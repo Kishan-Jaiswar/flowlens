@@ -19,14 +19,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 18 is the floor declared in package.json engines; 24 is the current
-        # LTS; 26 is what the project is developed on. All three are tested
-        # because the CLI is meant to run on whatever a developer already has.
-        node: ['18.18', '20', '22', '24', '26']
+        # Vitest 4 cannot start on Node 18 — rolldown imports `styleText` from
+        # node:util, which arrived in 20.12. Node 18 compatibility is therefore
+        # proven by the `compat` job below, which exercises the product itself
+        # rather than the test runner.
+        node: ['20', '22', '24', '26']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -39,13 +40,42 @@ jobs:
       - name: Test
         run: npx vitest run
 
+  compat:
+    name: compat (node 18.18)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '18.18'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # package.json declares engines >= 18.18, so that claim is verified by
+      # running the CLI itself — which is what a user on Node 18 actually does.
+      - name: The CLI works on the oldest supported Node
+        run: |
+          node --version
+          node packages/cli/bin/flowlens.mjs --version
+          node packages/cli/bin/flowlens.mjs scan examples/clinic
+          node packages/cli/bin/flowlens.mjs flows examples/clinic
+          node packages/cli/bin/flowlens.mjs doctor examples/clinic
+          node examples/clinic/demo-trace.mjs
+          node packages/cli/bin/flowlens.mjs trace examples/clinic
+          node packages/cli/bin/flowlens.mjs impact AuditService.record -p examples/clinic
+
   quality:
     name: lint, format, typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -65,9 +95,9 @@ jobs:
     name: end-to-end smoke test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
