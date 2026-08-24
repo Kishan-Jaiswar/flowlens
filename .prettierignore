@@ -1,0 +1,13 @@
+# Build output and dependencies
+dist/
+node_modules/
+*.tsbuildinfo
+.flowlens/
+
+# Fixtures are formatted the way real-world code is written, on purpose —
+# reformatting them would weaken what the tests are checking.
+tests/fixtures/
+examples/
+
+# Generated
+package-lock.json

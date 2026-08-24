@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# FlowLens output, including recorded traces from a local app.
+.flowlens/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.log

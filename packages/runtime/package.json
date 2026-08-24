@@ -1,0 +1,44 @@
+{
+  "name": "@flowlens/runtime",
+  "version": "0.1.0",
+  "description": "Zero-dependency runtime tracer for FlowLens (HTTP + Mongoose + browser)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./browser": "./dist/browser.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "license": "MIT",
+  "author": "Kishan Jaiswar",
+  "bugs": {
+    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues"
+  },
+  "homepage": "https://github.com/Kishan-Jaiswar/flowlens#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
+    "directory": "packages/runtime"
+  },
+  "keywords": [
+    "tracing",
+    "observability",
+    "mongoose",
+    "express",
+    "nestjs",
+    "developer-tools",
+    "instrumentation"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

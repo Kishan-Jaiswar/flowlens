@@ -1,0 +1,60 @@
+name: Bug report
+description: FlowLens analyzed something incorrectly, or crashed
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The most useful report for a static analyzer is a **small source snippet
+        that gets analyzed wrongly**. If you cannot share code, redacted
+        `--json` output is usually enough.
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect, and what happened?
+      placeholder: |
+        Expected: POST /users matched to UsersController.create
+        Actual:   POST /users reported as having no backend route
+    validations:
+      required: true
+
+  - type: textarea
+    id: snippet
+    attributes:
+      label: Smallest code that reproduces it
+      description: Frontend call, backend route, or both — trimmed as far as it still reproduces.
+      render: typescript
+
+  - type: input
+    id: command
+    attributes:
+      label: Command you ran
+      placeholder: flowlens scan ./web ./api --api-prefix /api
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: Paste the scan summary, or the error and stack trace.
+      render: shell
+
+  - type: input
+    id: versions
+    attributes:
+      label: FlowLens and Node versions
+      placeholder: flowlens 0.1.0, node 22.11.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: stack
+    attributes:
+      label: Project shape
+      description: |
+        Frontend framework, backend framework, database, and how the folders are
+        arranged. Layout matters more than you would think.
+      placeholder: |
+        Next.js (pages router, plain .js) + NestJS + Mongoose
+        Separate repos: ./my-web and ./my-api
+        Requests go through getRequest({ url }) in src/lib/http.js

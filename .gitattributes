@@ -1,0 +1,9 @@
+# Keep line endings stable across machines — this repo gets copied to a USB
+# stick and opened on Windows.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff2 binary

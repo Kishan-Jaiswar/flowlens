@@ -1,0 +1,48 @@
+{
+  "name": "flowlens-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "FlowLens - trace any user action from the UI to the database",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b packages/core packages/runtime packages/cli",
+    "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo",
+    "typecheck": "tsc -b packages/core packages/runtime packages/cli --force",
+    "test": "npm run build && vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "verify": "npm run lint && npm run format:check && npm run test",
+    "flowlens": "node packages/cli/bin/flowlens.mjs",
+    "scan:example": "node packages/cli/bin/flowlens.mjs scan examples/clinic",
+    "flows:example": "node packages/cli/bin/flowlens.mjs flows examples/clinic",
+    "serve:example": "node packages/cli/bin/flowlens.mjs serve examples/clinic"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^24.3.0",
+    "eslint": "^9.39.5",
+    "globals": "^15.15.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.67.0",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues"
+  },
+  "homepage": "https://github.com/Kishan-Jaiswar/flowlens#readme",
+  "author": "Kishan Jaiswar",
+  "license": "MIT"
+}

@@ -1,0 +1,46 @@
+{
+  "name": "@flowlens/cli",
+  "version": "0.1.0",
+  "description": "FlowLens command line interface",
+  "type": "module",
+  "bin": {
+    "flowlens": "./bin/flowlens.mjs"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@flowlens/core": "0.1.0"
+  },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "license": "MIT",
+  "author": "Kishan Jaiswar",
+  "bugs": {
+    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues"
+  },
+  "homepage": "https://github.com/Kishan-Jaiswar/flowlens#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
+    "directory": "packages/cli"
+  },
+  "keywords": [
+    "cli",
+    "developer-tools",
+    "code-analysis",
+    "onboarding",
+    "data-lineage",
+    "impact-analysis"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

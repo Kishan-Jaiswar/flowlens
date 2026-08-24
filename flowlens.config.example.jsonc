@@ -1,0 +1,44 @@
+// Copy to `flowlens.config.json` in the root of the project you want to scan.
+//
+// Every setting is optional — FlowLens works with no config at all. This file
+// exists for projects whose conventions differ from the defaults, so the
+// settings live in the repo instead of being retyped as flags every time.
+//
+// CLI flags override this file; this file overrides the defaults.
+{
+  // Scanned together when no paths are given on the command line.
+  // Relative to THIS file, not to your shell's working directory.
+  // Use it when the frontend and backend are separate repositories.
+  'roots': ['./web', './api'],
+
+  // Stripped from BOTH frontend URLs and backend routes before matching.
+  // A Nest app with setGlobalPrefix('api') or @Controller('api/x') needs this,
+  // and stripping only one side means nothing ever matches.
+  'apiPrefixes': ['/api'],
+
+  // Your house-built request layer. Capture group 1 must be the HTTP verb.
+  // Matches getRequest, postRequest, patchRequestNoLoader, getRequestV3, ...
+  // Keep it specific: a looser pattern would treat getState() as a GET request.
+  'requestFunctionPattern': '^(get|post|put|patch|delete|head|options)Request[A-Za-z0-9_]*$',
+
+  // Identifiers treated as HTTP clients, for `api.post(url, body)` style calls.
+  'httpClients': ['axios', 'api', 'apiClient', 'http', 'httpClient', 'client'],
+
+  // Option keys read from a request options object.
+  'urlKeys': ['url', 'path', 'endpoint'],
+  'suffixKeys': ['params', 'query', 'suffix'],
+  'bodyKeys': ['body', 'data', 'payload'],
+
+  // Extra directories to skip, on top of node_modules, dist, .next and friends.
+  'ignore': ['legacy', 'generated', 'public'],
+
+  // Resolve endpoint constants (`url: getPatientsList`) to their literal value.
+  // Turn off only if it ever resolves something wrongly.
+  'resolveConstants': true,
+
+  // Analyze *.test.ts / *.spec.ts / *.stories.tsx too.
+  'includeTests': false,
+
+  // Safety valve for very large trees.
+  'maxFiles': 20000,
+}

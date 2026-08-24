@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FlowLens</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🔎</text></svg>"
+    />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">◎</span>
+        <div>
+          <h1>FlowLens</h1>
+          <p id="subtitle">loading…</p>
+        </div>
+      </div>
+      <div class="actions">
+        <label class="toggle">
+          <input type="checkbox" id="show-all" />
+          <span>include local-only actions</span>
+        </label>
+        <button id="rescan" class="button">Rescan</button>
+        <a id="doc-link" class="button ghost" href="#" target="_blank" rel="noreferrer"
+          >Feature doc</a
+        >
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <div class="search">
+          <input id="filter" type="search" placeholder="Filter features…" autocomplete="off" />
+        </div>
+        <div id="flow-list" class="flow-list"></div>
+        <div class="findings">
+          <h2>Findings</h2>
+          <div id="findings"></div>
+        </div>
+      </aside>
+
+      <section class="canvas">
+        <div id="flow-header" class="flow-header"></div>
+        <div id="graph" class="graph"></div>
+      </section>
+
+      <aside id="details" class="details">
+        <p class="muted">Select a step to inspect it.</p>
+      </aside>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

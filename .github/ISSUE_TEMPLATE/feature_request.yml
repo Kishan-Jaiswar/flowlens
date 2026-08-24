@@ -1,0 +1,41 @@
+name: Feature request
+description: Support for a framework, database, or a new capability
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check `docs/ROADMAP.md` first — it lists what is planned, what is
+        deliberately not, and in what order.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What can you not answer about your codebase today?
+      description: Describe the question, not the implementation.
+      placeholder: |
+        I cannot see which flows touch a Postgres table, because my data layer
+        is Prisma rather than Mongoose.
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: What does that code look like?
+      description: For a new framework or data layer, a representative snippet is the single most useful thing you can provide.
+      render: typescript
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Category
+      options:
+        - Frontend framework (Vue, Svelte, Angular, ...)
+        - Backend framework (Fastify, Koa, tRPC, GraphQL, ...)
+        - Data layer (Prisma, TypeORM, SQL, Redis, ...)
+        - Editor or browser integration
+        - New analysis (N+1, contract drift, architecture rules, ...)
+        - Other
+    validations:
+      required: true

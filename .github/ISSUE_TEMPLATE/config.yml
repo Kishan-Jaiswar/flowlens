@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Architecture and design decisions
+    url: https://github.com/Kishan-Jaiswar/flowlens/blob/main/docs/ARCHITECTURE.md
+    about: Why each analyzer pass runs in the order it does, and the bugs that shaped it.
+  - name: Roadmap and known limits
+    url: https://github.com/Kishan-Jaiswar/flowlens/blob/main/docs/ROADMAP.md
+    about: What is planned, what is not done yet, and what is deliberately out of scope.

@@ -1,0 +1,230 @@
+import { parseArgs } from 'node:util';
+import { loadConfig } from '@flowlens/core';
+import { runFlow, runFlows } from './commands/flows.js';
+import { runDoctor, runImpact } from './commands/impact.js';
+import { runScan } from './commands/scan.js';
+import { runServe } from './commands/serve.js';
+import { runTrace } from './commands/trace.js';
+import { color } from './ui.js';
+
+const VERSION = '0.1.0';
+
+const HELP = `
+${color.bold('FlowLens')} — trace any user action from the UI to the database.
+
+${color.bold('USAGE')}
+  flowlens <command> [project] [options]
+
+${color.bold('COMMANDS')}
+  scan [project]          Read the source and build the flow graph
+  flows [project]         List every user action that reaches the backend
+  flow <id> [project]     Show one feature end to end (add --markdown for a doc)
+  impact <symbol>         "If I change this, what breaks?"
+  doctor [project]        Broken API calls, dead endpoints, shared writes
+  trace [project]         Merge recorded runtime spans into the graph
+  serve [project]         Open the dashboard (default http://127.0.0.1:4177)
+
+${color.bold('OPTIONS')}
+  -p, --project <dir>     Project root (repeatable — scan siblings together)
+  -g, --graph <file>      Graph file (default: <project>/.flowlens/graph.json)
+      --trace <file>      Trace file (default: <project>/.flowlens/trace.jsonl)
+  -o, --out <file>        Write output to a file
+      --json              Machine-readable output
+      --markdown          Render a feature document (flow command)
+      --all               Include UI actions that never call the backend
+      --api-prefix <p>    Strip this prefix from BOTH frontend URLs and backend
+                          routes (repeatable, default /api)
+      --request-fn <re>   Regex for wrapper functions whose name holds the verb.
+                          Capture group 1 is the method.
+                          default ^(get|post|put|patch|delete)Request[A-Za-z0-9_]*$
+      --http-client <id>  Identifier treated as an HTTP client (repeatable)
+      --no-constants      Do not resolve URL constants to their literal value
+  -c, --config <file>     Config file (default: nearest flowlens.config.json)
+      --max-files <n>     Cap on files parsed (default 20000)
+      --ignore <dir>      Skip a directory (repeatable)
+      --include-tests     Analyze test files too
+      --port <n>          Dashboard port (serve)
+      --host <h>          Dashboard host (serve, default 127.0.0.1)
+  -q, --quiet             Print only the essentials
+  -h, --help              Show this help
+  -v, --version           Show the version
+
+${color.bold('EXAMPLES')}
+  flowlens scan ./my-app
+  flowlens scan ./my-web ./my-api          # separate repos, one graph
+  flowlens flows ./my-app
+  flowlens flow create-patient ./my-app
+  flowlens flow create-patient ./my-app --markdown --out docs/create-patient.md
+  flowlens impact PatientsService.create -p ./my-app
+  flowlens serve ./my-app
+
+${color.gray('FlowLens reads source files only. It never connects to a database and')}
+${color.gray('never executes the code it analyzes. Runtime tracing is opt-in and')}
+${color.gray('writes to a local .flowlens/trace.jsonl in your own project.')}
+`;
+
+export function main(argv = process.argv.slice(2)): number {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        project: { type: 'string', short: 'p', multiple: true },
+        'request-fn': { type: 'string' },
+        'http-client': { type: 'string', multiple: true },
+        'no-constants': { type: 'boolean', default: false },
+        config: { type: 'string', short: 'c' },
+        'max-files': { type: 'string' },
+        graph: { type: 'string', short: 'g' },
+        trace: { type: 'string' },
+        out: { type: 'string', short: 'o' },
+        json: { type: 'boolean', default: false },
+        markdown: { type: 'boolean', default: false },
+        all: { type: 'boolean', default: false },
+        'api-prefix': { type: 'string', multiple: true },
+        ignore: { type: 'string', multiple: true },
+        'include-tests': { type: 'boolean', default: false },
+        port: { type: 'string' },
+        host: { type: 'string' },
+        quiet: { type: 'boolean', short: 'q', default: false },
+        help: { type: 'boolean', short: 'h', default: false },
+        version: { type: 'boolean', short: 'v', default: false },
+      },
+    });
+  } catch (error) {
+    process.stderr.write(
+      `${color.red('error')} ${(error as Error).message}\n\nRun \`flowlens --help\`.\n`,
+    );
+    return 1;
+  }
+
+  const { values, positionals } = parsed;
+
+  if (values.version) {
+    process.stdout.write(`${VERSION}\n`);
+    return 0;
+  }
+
+  const [command, ...rest] = positionals;
+
+  if (values.help || !command) {
+    process.stdout.write(`${HELP}\n`);
+    return command ? 0 : values.help ? 0 : 1;
+  }
+
+  /**
+   * `flowlens flow create-patient ./my-app` and
+   * `flowlens flow create-patient -p ./my-app` should behave the same, so
+   * projects come from --project (repeatable), else any positional that looks
+   * like a path, else the current directory.
+   *
+   * Several roots are allowed because a frontend and backend often live in
+   * sibling repositories, and the seam between them is the point:
+   *
+   *   flowlens scan ./clinic-web ./clinic-backend
+   */
+  const pathLike = rest.filter((value) => value.includes('/') || value === '.' || value === '..');
+  const projects = values.project ?? [];
+  const args = rest.filter((value) => !pathLike.includes(value));
+
+  /**
+   * A `flowlens.config.json` beside the project describes conventions once, so
+   * an unusual codebase does not need the same flags typed on every command.
+   * Explicit paths and flags always win over the file.
+   */
+  const cliRoots = projects.length > 0 ? projects : pathLike;
+  const { config: fileConfig, path: configPath } = loadConfig(cliRoots[0] ?? '.', values.config);
+  const roots = cliRoots.length > 0 ? cliRoots : (fileConfig.roots ?? ['.']);
+
+  const common = {
+    root: roots[0]!,
+    ...(roots.length > 1 ? { extraRoots: roots.slice(1) } : {}),
+    ...(values.graph ? { graph: values.graph } : {}),
+    ...(values.trace ? { trace: values.trace } : {}),
+    json: values.json,
+  };
+
+  try {
+    switch (command) {
+      case 'scan':
+        return runScan({
+          // Config file first, then anything given explicitly on the CLI.
+          ...(fileConfig.ignore ? { ignore: fileConfig.ignore } : {}),
+          ...(fileConfig.apiPrefixes ? { apiPrefix: fileConfig.apiPrefixes } : {}),
+          ...(fileConfig.requestFunctionPattern
+            ? { requestFunctionPattern: fileConfig.requestFunctionPattern }
+            : {}),
+          ...(fileConfig.httpClients ? { httpClients: fileConfig.httpClients } : {}),
+          ...(fileConfig.maxFiles ? { maxFiles: fileConfig.maxFiles } : {}),
+          ...(fileConfig.includeTests !== undefined
+            ? { includeTests: fileConfig.includeTests }
+            : {}),
+          ...(fileConfig.resolveConstants !== undefined
+            ? { resolveConstants: fileConfig.resolveConstants }
+            : {}),
+          ...common,
+          ...(values.out ? { out: values.out } : {}),
+          quiet: values.quiet,
+          ...(values['include-tests'] ? { includeTests: true } : {}),
+          ...(values.ignore ? { ignore: values.ignore } : {}),
+          ...(values['api-prefix'] ? { apiPrefix: values['api-prefix'] } : {}),
+          ...(values['request-fn'] ? { requestFunctionPattern: values['request-fn'] } : {}),
+          ...(values['http-client'] ? { httpClients: values['http-client'] } : {}),
+          ...(values['max-files'] ? { maxFiles: Number(values['max-files']) } : {}),
+          ...(values['no-constants'] ? { resolveConstants: false } : {}),
+          ...(configPath ? { configPath } : {}),
+        });
+
+      case 'flows':
+        return runFlows({ ...common, all: values.all });
+
+      case 'flow': {
+        const id = args[0];
+        if (!id) {
+          process.stderr.write(`${color.red('error')} flow id required: flowlens flow <id>\n`);
+          return 1;
+        }
+        return runFlow({
+          ...common,
+          id,
+          markdown: values.markdown,
+          ...(values.out ? { out: values.out } : {}),
+        });
+      }
+
+      case 'impact': {
+        const query = args[0];
+        if (!query) {
+          process.stderr.write(
+            `${color.red('error')} symbol required: flowlens impact PatientsService.create\n`,
+          );
+          return 1;
+        }
+        return runImpact({ ...common, query });
+      }
+
+      case 'doctor':
+        return runDoctor(common);
+
+      case 'trace':
+        return runTrace(common);
+
+      case 'serve':
+        return runServe({
+          ...common,
+          ...(values.port ? { port: Number(values.port) } : {}),
+          ...(values.host ? { host: values.host } : {}),
+        });
+
+      default:
+        process.stderr.write(
+          `${color.red('error')} unknown command "${command}"\n\nRun \`flowlens --help\`.\n`,
+        );
+        return 1;
+    }
+  } catch (error) {
+    process.stderr.write(`${color.red('error')} ${(error as Error).message}\n`);
+    return 1;
+  }
+}

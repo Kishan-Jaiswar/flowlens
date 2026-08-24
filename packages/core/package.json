@@ -1,0 +1,49 @@
+{
+  "name": "@flowlens/core",
+  "version": "0.1.0",
+  "description": "FlowLens graph engine, static analyzers, flow resolver and impact analysis",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "ts-morph": "^24.0.0"
+  },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "license": "MIT",
+  "author": "Kishan Jaiswar",
+  "bugs": {
+    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues"
+  },
+  "homepage": "https://github.com/Kishan-Jaiswar/flowlens#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
+    "directory": "packages/core"
+  },
+  "keywords": [
+    "static-analysis",
+    "ast",
+    "ts-morph",
+    "code-graph",
+    "data-lineage",
+    "impact-analysis",
+    "developer-tools",
+    "nestjs",
+    "mongoose",
+    "nextjs"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
