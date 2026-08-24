@@ -1,0 +1,10 @@
+# Every file in this repository is owned by the maintainer.
+#
+# Combined with the "require review from Code Owners" rule on `main`, this means
+# no change reaches the default branch without an approval from @Kishan-Jaiswar
+# specifically — not merely from anyone with write access.
+#
+# Outside contributions are welcome; they arrive as pull requests from forks and
+# wait here for review.
+
+* @Kishan-Jaiswar
