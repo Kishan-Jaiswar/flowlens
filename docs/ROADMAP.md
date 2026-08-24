@@ -8,18 +8,20 @@ requires the whole system to exist first.
 Listed before the feature roadmap on purpose: these are gaps in what has
 _already been built_, and they are worth more than any new feature.
 
-- [ ] **The runtime tracer has never run.** `@flowlens/runtime` is 778 lines with
-      **zero tests**, and every trace FlowLens has merged so far came from
-      `examples/clinic/demo-trace.mjs` — a script that fabricates spans. The
-      static half is verified against a 1,500-file production codebase; the half
-      that turns "these files look connected" into "this path executed in 204ms"
-      has never been exercised against a live app. Until it is, `confirmed`
-      evidence is a claim, not a result.
+- [ ] **The runtime tracer has not run against a live application.** Its
+      contract is now covered by 26 unit tests — the sink, the HTTP middleware,
+      `traceMethod`, and the Mongoose plugin driven through fake schema hooks —
+      and a test asserts that the spans it emits merge into a scanned graph and
+      produce `confirmed` evidence. What is still missing is the real thing: a
+      running Express or NestJS app with a real database, clicked through by
+      hand. Until that happens, the integration is verified only against fakes.
 - [ ] **Not published.** `npm link -w @flowlens/cli` works and is documented,
       but installing means cloning the repo. Publishing `@flowlens/cli` to npm
       would make `npx flowlens scan .` the first-run experience.
-- [ ] **The dashboard is untested.** 356 lines of browser JavaScript with no
-      coverage at all.
+- [ ] **The dashboard's browser code is untested.** Its server and JSON API now
+      have 16 integration tests that drive the real `flowlens serve` process, but
+      the 356 lines of DOM rendering in `apps/dashboard/public/app.js` have no
+      direct coverage.
 
 ## Done — v0.1 (this repo)
 

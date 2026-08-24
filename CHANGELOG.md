@@ -47,8 +47,9 @@ application (see `docs/ROADMAP.md`).
 - **Structure independence** — files are classified by content rather than by
   folder name; multi-root scanning for frontend and backend in separate
   repositories; `flowlens.config.json` for per-project conventions.
-- 134 tests covering unit logic, a tidy example app, a production-shaped
-  fixture, eleven project layouts, and hostile inputs.
+- 176 tests covering unit logic, a tidy example app, a production-shaped
+  fixture, eleven project layouts, hostile inputs, the runtime tracer (driven
+  through fakes), and the dashboard's HTTP API (driven through the real CLI).
 
 ### Fixed during development
 

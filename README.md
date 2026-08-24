@@ -5,7 +5,7 @@
 [![CI](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml/badge.svg)](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-134%20passing-brightgreen)](tests)
+[![Tests](https://img.shields.io/badge/tests-176%20passing-brightgreen)](tests)
 
 > FlowLens helps developers understand and safely modify unfamiliar applications
 > by tracing a feature from the user's UI action through frontend state and

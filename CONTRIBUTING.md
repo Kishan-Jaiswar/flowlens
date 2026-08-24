@@ -11,7 +11,7 @@ cd flowlens
 nvm use            # or any Node >= 18.18
 npm install
 npm run build
-npm test           # 134 tests, ~5s
+npm test           # 176 tests, ~8s
 ```
 
 Try it against the bundled example, which is a source-only React + NestJS +
@@ -86,7 +86,7 @@ nodes and the rest follows.
 
 ## Tests
 
-Vitest, in `tests/`. Four kinds, all of which matter:
+Vitest, in `tests/`. Six kinds, all of which matter:
 
 - `graph.test.ts`, `http.test.ts` — unit tests of the pure logic
 - `analyzer.test.ts` — the tidy example app, asserting exact flows
@@ -94,6 +94,10 @@ Vitest, in `tests/`. Four kinds, all of which matter:
   wrapper functions, endpoint constants, a global `/api` prefix
 - `structures.test.ts` — eleven project layouts, plus hostile inputs (symlink
   cycles, binary files, syntax errors, empty directories)
+- `tracer.test.ts` — `@flowlens/runtime` driven through fake requests and fake
+  Mongoose hooks, so no server or database is needed
+- `server.test.ts` — spawns the real `flowlens serve` process and exercises the
+  dashboard and its JSON API over HTTP
 
 Fixtures under `tests/fixtures/` are deliberately _not_ formatted by Prettier.
 They imitate real code, and tidying them would weaken what the tests check.
