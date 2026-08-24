@@ -108,8 +108,10 @@ Risk factors
 
 ## Install
 
-Requires **Node 18.18 or newer**. Tested in CI on 18.18, 20, 22, 24 and 26;
-`.nvmrc` pins 26 for development.
+Requires **Node 18.18 or newer**. CI runs the test suite on Node 20, 22, 24 and
+26, and separately verifies that the CLI itself works on 18.18 — the test runner
+no longer supports Node 18, but the product does. `.nvmrc` pins 26 for
+development.
 
 ```bash
 git clone https://github.com/Kishan-Jaiswar/flowlens.git

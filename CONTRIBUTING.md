@@ -29,8 +29,13 @@ npm run serve:example
 npm run verify     # lint + format check + build + tests
 ```
 
-CI runs the same thing on Node 18.18, 20, 22, 24 and 26, plus an end-to-end
-smoke test of every CLI command.
+CI runs the same thing on Node 20, 22, 24 and 26, plus an end-to-end smoke test
+of every CLI command.
+
+Node 18.18 is the declared floor in `engines`, but Vitest 4 cannot start on it
+(rolldown needs `styleText` from `node:util`, added in 20.12). So the `compat`
+job builds on 18.18 and runs the CLI against the example project instead — the
+product is verified there, just not the test suite.
 
 ## The one rule that matters
 
