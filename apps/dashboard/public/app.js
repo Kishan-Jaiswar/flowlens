@@ -77,7 +77,7 @@ function filteredFlows() {
   const needle = state.filter.trim().toLowerCase();
   if (!needle) return state.flows;
   return state.flows.filter((flow) =>
-    [flow.label, flow.component, flow.id, ...flow.endpoints]
+    [flow.title, flow.label, flow.screen, flow.component, flow.id, ...flow.endpoints]
       .filter(Boolean)
       .some((value) => value.toLowerCase().includes(needle)),
   );
@@ -98,9 +98,11 @@ function renderFlowList() {
     button.setAttribute('aria-selected', String(flow.id === state.selectedFlow?.id));
     button.onclick = () => selectFlow(flow.id);
     button.innerHTML = `
-      <div class="label">${escapeHtml(flow.label)}</div>
+      <div class="label">${escapeHtml(flowTitle(flow))}</div>
       <div class="meta">${escapeHtml(
-        [flow.component, flow.endpoints[0], `risk ${flow.risk.level}`].filter(Boolean).join(' · '),
+        [eventVerb(flow.event), flow.component, flow.endpoints[0], `risk ${flow.risk.level}`]
+          .filter(Boolean)
+          .join(' · '),
       )}</div>`;
     el.flowList.appendChild(button);
   }
@@ -153,6 +155,8 @@ function renderFlowHeader(flow) {
     `<span class="chip risk-${flow.risk.level}">risk ${flow.risk.level} · ${flow.risk.score}</span>`,
     `<span class="chip">${flow.evidence}</span>`,
   ];
+  if (flow.screen) chips.push(`<span class="chip">${escapeHtml(flow.screen)}</span>`);
+  if (flow.event) chips.push(`<span class="chip">${escapeHtml(eventVerb(flow.event))}</span>`);
   if (flow.component) chips.push(`<span class="chip">${escapeHtml(flow.component)}</span>`);
   if (flow.totalMs != null) chips.push(`<span class="chip">${flow.totalMs}ms observed</span>`);
   for (const collection of flow.collections) {
@@ -162,7 +166,7 @@ function renderFlowHeader(flow) {
   }
 
   el.flowHeader.innerHTML = `
-    <h2>${escapeHtml(flow.label)}</h2>
+    <h2>${escapeHtml(flowTitle(flow))}</h2>
     <div class="chips">${chips.join('')}</div>
     ${
       flow.source
@@ -216,12 +220,26 @@ function renderNode(step) {
   };
 
   const pieces = [
-    `<div class="kind">${escapeHtml(step.kind.replace('-', ' '))}</div>`,
-    `<div class="label">${escapeHtml(step.label)}</div>`,
+    `<div class="kind">${escapeHtml(tileKind(step))}</div>`,
+    `<div class="label">${escapeHtml(tileLabel(step))}</div>`,
   ];
+  // The words actually on the element, when the title has rephrased them.
+  const action = step.meta?.action;
+  if (step.kind === 'ui-action' && action && step.meta?.event !== 'mount') {
+    if (!tileLabel(step).toLowerCase().includes(String(action).toLowerCase())) {
+      pieces.push(`<div class="sub">on “${escapeHtml(action)}”</div>`);
+    }
+  }
   if (step.file) {
     pieces.push(
       `<div class="sub">${escapeHtml(step.file)}${step.line ? `:${step.line}` : ''}</div>`,
+    );
+  }
+  // A shared endpoint: the same node appears in every flow that calls it.
+  if (step.meta?.otherCallers) {
+    const others = step.meta.otherCallers;
+    pieces.push(
+      `<div class="sub">also called from ${others} other place${others === 1 ? '' : 's'}</div>`,
     );
   }
   if (step.avgMs != null) {
@@ -243,7 +261,7 @@ async function renderDetails(step) {
     const flow = state.selectedFlow;
     el.details.innerHTML = flow
       ? `
-        <h3>${escapeHtml(flow.label)}</h3>
+        <h3>${escapeHtml(flowTitle(flow))}</h3>
         <p class="muted">Select a step to inspect it.</p>
         <h4>Risk factors</h4>
         ${
@@ -262,9 +280,12 @@ async function renderDetails(step) {
   }
 
   el.details.innerHTML = `
-    <h3>${escapeHtml(step.label)}</h3>
+    <h3>${escapeHtml(tileLabel(step))}</h3>
     <dl>
       <dt>kind</dt><dd>${escapeHtml(step.kind)}</dd>
+      ${step.meta?.screen ? `<dt>screen</dt><dd>${escapeHtml(step.meta.screen)}</dd>` : ''}
+      ${step.meta?.page ? `<dt>route</dt><dd><code>${escapeHtml(step.meta.page)}</code></dd>` : ''}
+      ${step.meta?.action ? `<dt>action</dt><dd>${escapeHtml(step.meta.action)}</dd>` : ''}
       <dt>layer</dt><dd>${escapeHtml(step.layer)}</dd>
       <dt>evidence</dt><dd>${escapeHtml(step.evidence)}</dd>
       ${step.file ? `<dt>source</dt><dd>${escapeHtml(step.file)}:${step.line ?? ''}</dd>` : ''}
@@ -289,7 +310,7 @@ async function renderDetails(step) {
         flows.length
           ? `<ul>${flows
               .slice(0, 12)
-              .map((flow) => `<li>${escapeHtml(flow.label)}</li>`)
+              .map((flow) => `<li>${escapeHtml(flowTitle(flow))}</li>`)
               .join('')}</ul>`
           : '<p class="muted">None.</p>'
       }
@@ -350,6 +371,38 @@ el.rescan.addEventListener('click', async () => {
     el.rescan.textContent = 'Rescan';
   }
 });
+
+/**
+ * What a tile is called.
+ *
+ * A user action's own label is only the words on the element — "Submit" — so the
+ * scan stores a descriptive title next to it (`Prescription · Submit`) and that
+ * is what the tile shows. Code nodes keep their identifier, which is already the
+ * clearest name for them.
+ */
+function tileLabel(step) {
+  return step.meta?.title || step.label;
+}
+
+function flowTitle(flow) {
+  return flow.title || flow.label;
+}
+
+/** `onClick` -> `click`, so the tile says what the user did, not the prop name. */
+function eventVerb(event) {
+  if (!event) return '';
+  if (event === 'mount') return 'on load';
+  return event.replace(/^on/, '').replace(/^[A-Z]/, (character) => character.toLowerCase());
+}
+
+/** The kind line: for a user action, the gesture; otherwise the node kind. */
+function tileKind(step) {
+  if (step.kind === 'ui-action') {
+    const verb = eventVerb(step.meta?.event);
+    return verb ? `user ${verb}` : 'user action';
+  }
+  return step.kind.replace('-', ' ');
+}
 
 function escapeHtml(value) {
   return String(value ?? '').replace(

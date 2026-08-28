@@ -32,7 +32,14 @@ export interface ImpactReport {
   /** Everything that would notice a change here, nearest first. */
   dependents: Dependent[];
   /** User-facing features that run through the target. */
-  affectedFlows: Array<{ id: string; label: string; component?: string; risk: number }>;
+  affectedFlows: Array<{
+    id: string;
+    label: string;
+    /** Descriptive form: `Prescription · Submit`. */
+    title: string;
+    component?: string;
+    risk: number;
+  }>;
   /** Collections the target reads or writes, directly or transitively. */
   collections: string[];
   /** Direct API endpoints that lead here. */
@@ -77,6 +84,7 @@ export function analyzeImpact(graph: FlowGraph, targetId: string): ImpactReport 
     .map((flow) => ({
       id: flow.id,
       label: flow.label,
+      title: flow.title,
       ...(flow.component ? { component: flow.component } : {}),
       risk: flow.risk.score,
     }))

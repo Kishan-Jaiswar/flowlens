@@ -6,7 +6,7 @@ import {
   findSharedWrites,
 } from '@flowlens/core';
 import { graphPath, loadGraph } from '../paths.js';
-import { color, heading, table } from '../ui.js';
+import { color, glyph, heading, table } from '../ui.js';
 
 export interface ImpactArgs {
   root: string;
@@ -77,7 +77,7 @@ export function runImpact(args: ImpactArgs): number {
       table(
         report.affectedFlows
           .slice(0, limit)
-          .map((flow) => [flow.label.slice(0, 40), flow.component ?? '', flow.id]),
+          .map((flow) => [flow.title.slice(0, 40), flow.component ?? '', flow.id]),
         ['feature', 'component', 'flow id'],
       ) + '\n',
     );
@@ -108,7 +108,7 @@ export function runImpact(args: ImpactArgs): number {
   if (report.warnings.length > 0) {
     process.stdout.write(heading('Warnings') + '\n');
     for (const warning of report.warnings) {
-      process.stdout.write(`  ${color.yellow('⚠')} ${warning}\n`);
+      process.stdout.write(`  ${color.yellow(glyph.warn)} ${warning}\n`);
     }
   }
 
@@ -166,7 +166,7 @@ export function runDoctor(args: DoctorArgs): number {
           ? `method mismatch, backend has ${(call.meta['availableMethods'] as string[]).join(', ')}`
           : 'no such route';
       process.stdout.write(
-        `  ${color.yellow('⚠')} ${call.label}  ${color.gray(reason)}\n` +
+        `  ${color.yellow(glyph.warn)} ${call.label}  ${color.gray(reason)}\n` +
           (call.source ? `      ${color.gray(`${call.source.file}:${call.source.line}`)}\n` : ''),
       );
     }
@@ -178,7 +178,7 @@ export function runDoctor(args: DoctorArgs): number {
   } else {
     for (const route of dead) {
       process.stdout.write(
-        `  ${color.gray('·')} ${route.label}` +
+        `  ${color.gray(glyph.dot)} ${route.label}` +
           (route.source ? `  ${color.gray(`${route.source.file}:${route.source.line}`)}` : '') +
           '\n',
       );
@@ -196,7 +196,7 @@ export function runDoctor(args: DoctorArgs): number {
   } else {
     for (const entry of shared) {
       process.stdout.write(
-        `  ${color.yellow('⚠')} ${entry.collection}: ${entry.writers.join(', ')}\n`,
+        `  ${color.yellow(glyph.warn)} ${entry.collection}: ${entry.writers.join(', ')}\n`,
       );
     }
   }

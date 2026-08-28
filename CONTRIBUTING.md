@@ -9,10 +9,15 @@ actually matter for this codebase.
 git clone https://github.com/Kishan-Jaiswar/flowlens.git
 cd flowlens
 nvm use            # or any Node >= 18.18
-npm install
-npm run build
-npm test           # 176 tests, ~8s
+npm install        # also builds, via the prepare script
+npm test           # 200 tests, ~8s
 ```
+
+On Windows, `nvm use` has no equivalent — install Node 20 or newer and the rest
+is the same. Every script in `package.json` is plain Node with no shell built
+in, so they behave identically on all three operating systems. If you only want
+to run FlowLens rather than work on it, `./flowlens` (or `flowlens.cmd`) does
+the install and build for you on first use.
 
 Try it against the bundled example, which is a source-only React + NestJS +
 Mongoose app that is never executed:
@@ -27,10 +32,25 @@ npm run serve:example
 
 ```bash
 npm run verify     # lint + format check + build + tests
+npm run smoke      # every CLI command, run for real, on this OS
 ```
 
-CI runs the same thing on Node 20, 22, 24 and 26, plus an end-to-end smoke test
-of every CLI command.
+CI runs the same thing on Node 20, 22, 24 and 26 on Linux and Node 24 on Windows
+and macOS. It also runs the smoke test on all three operating systems, and the
+launcher on all three from a checkout with nothing installed.
+
+Because FlowLens is pointed at whatever a developer has on disk, on whatever
+machine they have, anything touching paths, the file system or terminal output
+deserves a thought about the other two platforms:
+
+- Build paths with `node:path`, and convert to `/` only where a path leaves the
+  program (node ids, config files, generated documents) — `tests/portability.test.ts`
+  covers the argument-parsing side of this.
+- Assume the file system may be case-insensitive (Windows, macOS) and that
+  creating a symlink may not be permitted at all (Windows without Developer
+  Mode).
+- Terminal glyphs go through `glyphsFor()` in `packages/core/src/ui/glyphs.ts`,
+  so the ASCII fallback stays in one place.
 
 Node 18.18 is the declared floor in `engines`, but Vitest 4 cannot start on it
 (rolldown needs `styleText` from `node:util`, added in 20.12). So the `compat`

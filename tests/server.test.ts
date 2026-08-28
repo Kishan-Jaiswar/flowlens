@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,6 +21,17 @@ const PROJECT = join(REPO, 'examples', 'clinic');
 const PORT = 4181;
 const base = `http://127.0.0.1:${PORT}`;
 
+/**
+ * Artifacts go to a temp directory, explicitly.
+ *
+ * FlowLens defaults to a machine-local cache outside the project, so a test that
+ * looked in `examples/clinic/.flowlens` would find nothing. Naming the paths here
+ * keeps the test hermetic — it neither reads nor pollutes the real user cache.
+ */
+const ARTIFACTS = mkdtempSync(join(tmpdir(), 'flowlens-server-test-'));
+const GRAPH = join(ARTIFACTS, 'graph.json');
+const TRACE = join(ARTIFACTS, 'trace.jsonl');
+
 let server: ChildProcess;
 
 async function get(path: string, init?: RequestInit) {
@@ -28,9 +40,10 @@ async function get(path: string, init?: RequestInit) {
 
 beforeAll(async () => {
   // A stale trace from another test run would change the evidence assertions.
-  rmSync(join(PROJECT, '.flowlens'), { recursive: true, force: true });
+  rmSync(TRACE, { force: true });
 
-  server = spawn(process.execPath, [BIN, 'serve', PROJECT, '--port', String(PORT)], {
+  const argv = [BIN, 'serve', PROJECT, '--port', String(PORT), '-g', GRAPH, '--trace', TRACE];
+  server = spawn(process.execPath, argv, {
     cwd: REPO,
     stdio: 'ignore',
   });
@@ -51,7 +64,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   server?.kill('SIGTERM');
-  rmSync(join(PROJECT, '.flowlens'), { recursive: true, force: true });
+  rmSync(ARTIFACTS, { recursive: true, force: true });
 });
 
 describe('static assets', () => {
@@ -196,9 +209,8 @@ describe('span collection', () => {
     expect(response.status).toBe(200);
     expect((await response.json()).received).toBe(2);
 
-    const traceFile = join(PROJECT, '.flowlens', 'trace.jsonl');
-    expect(existsSync(traceFile)).toBe(true);
-    expect(readFileSync(traceFile, 'utf8')).toContain('server-test-1');
+    expect(existsSync(TRACE)).toBe(true);
+    expect(readFileSync(TRACE, 'utf8')).toContain('server-test-1');
   });
 
   it('rejects a malformed payload without dying', async () => {

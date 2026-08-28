@@ -8,19 +8,21 @@
   ],
   "scripts": {
     "build": "tsc -b packages/core packages/runtime packages/cli",
-    "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo",
+    "clean": "node scripts/clean.mjs",
     "typecheck": "tsc -b packages/core packages/runtime packages/cli --force",
     "test": "npm run build && vitest run",
     "test:watch": "vitest",
+    "smoke": "node scripts/smoke.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "verify": "npm run lint && npm run format:check && npm run test",
-    "flowlens": "node packages/cli/bin/flowlens.mjs",
-    "scan:example": "node packages/cli/bin/flowlens.mjs scan examples/clinic",
-    "flows:example": "node packages/cli/bin/flowlens.mjs flows examples/clinic",
-    "serve:example": "node packages/cli/bin/flowlens.mjs serve examples/clinic"
+    "flowlens": "node bin/flowlens.mjs",
+    "scan:example": "node bin/flowlens.mjs scan examples/clinic",
+    "flows:example": "node bin/flowlens.mjs flows examples/clinic",
+    "serve:example": "node bin/flowlens.mjs serve examples/clinic",
+    "prepare": "node scripts/prepare.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

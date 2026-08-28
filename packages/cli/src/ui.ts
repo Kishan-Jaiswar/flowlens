@@ -1,9 +1,22 @@
 /** Terminal output helpers: colour when it helps, plain text when piped. */
 
+import { glyphsFor, preferAscii } from '@flowlens/core';
+
 const useColor =
   process.stdout.isTTY === true &&
   process.env['NO_COLOR'] === undefined &&
   process.env['TERM'] !== 'dumb';
+
+/**
+ * Whether this terminal can draw box characters.
+ *
+ * Read once at startup: nothing about the terminal changes mid-command, and
+ * every table and tree needs the answer.
+ */
+export const ascii = preferAscii();
+
+/** The glyph set for this terminal — Unicode almost everywhere, ASCII on a legacy Windows console. */
+export const glyph = glyphsFor(ascii);
 
 const wrap = (code: string) => (text: string) =>
   useColor ? `\u001b[${code}m${text}\u001b[0m` : text;
@@ -21,7 +34,7 @@ export const color = {
 };
 
 export function heading(text: string): string {
-  return `\n${color.bold(text)}\n${color.gray('─'.repeat(Math.min(text.length, 60)))}`;
+  return `\n${color.bold(text)}\n${color.gray(glyph.rule.repeat(Math.min(text.length, 60)))}`;
 }
 
 export function riskBadge(level: 'low' | 'medium' | 'high'): string {
@@ -49,7 +62,7 @@ export function table(rows: string[][], headers?: string[]): string {
   const lines: string[] = [];
   if (headers) {
     lines.push(headers.map((cell, i) => color.bold(pad(cell, widths[i] ?? 0))).join('  '));
-    lines.push(widths.map((width) => color.gray('─'.repeat(width))).join('  '));
+    lines.push(widths.map((width) => color.gray(glyph.rule.repeat(width))).join('  '));
   }
   for (const row of rows) {
     lines.push(

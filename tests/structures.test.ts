@@ -10,6 +10,22 @@ const STRUCTURES = resolve(here, 'fixtures', 'structures');
 
 const at = (name: string) => join(STRUCTURES, name);
 
+/** Can this machine create a directory symlink at all? */
+function probeSymlinks(dir: string): boolean {
+  const target = join(dir, 'probe-target');
+  const link = join(dir, 'probe-link');
+  try {
+    mkdirSync(target, { recursive: true });
+    symlinkSync(target, link, 'dir');
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(link, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  }
+}
+
 /**
  * FlowLens gets pointed at whatever a developer has on disk. These fixtures are
  * the layouts that broke earlier versions: a flat directory, both Next.js
@@ -220,10 +236,20 @@ describe('symlinks', () => {
   });
 
   /**
+   * Windows only allows creating symlinks with Developer Mode on or from an
+   * elevated shell, so these two tests cannot run on a default Windows box.
+   * They are skipped rather than failed: the behaviour they cover is the
+   * directory walker's, which is platform-independent and proven on the other
+   * runners.
+   */
+  const canSymlink = probeSymlinks(temp);
+  const withSymlinks = canSymlink ? it : it.skip;
+
+  /**
    * Built at test time rather than committed: a real cycle on disk breaks every
    * other tool that walks the tree, including the test runner itself.
    */
-  it('terminates on a symlink cycle', () => {
+  withSymlinks('terminates on a symlink cycle', () => {
     const src = join(temp, 'src');
     mkdirSync(src, { recursive: true });
     writeFileSync(
@@ -246,7 +272,7 @@ describe('symlinks', () => {
     expect(result.graph.nodesOfKind('api-call').map((n) => n.label)).toEqual(['GET /loop']);
   });
 
-  it('follows a symlink that points somewhere useful', () => {
+  withSymlinks('follows a symlink that points somewhere useful', () => {
     const linkedRoot = mkdtempSync(join(tmpdir(), 'flowlens-linked-'));
     const real = join(linkedRoot, 'real');
     mkdirSync(real, { recursive: true });

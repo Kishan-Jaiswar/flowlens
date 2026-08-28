@@ -2,6 +2,14 @@
 # stick and opened on Windows.
 * text=auto eol=lf
 
+# Windows batch files are the exception: cmd.exe can mis-parse a .cmd file with
+# LF-only endings, and this one is the Windows entry point, so it must be CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# The POSIX launcher must stay executable.
+flowlens text eol=lf
+
 *.png binary
 *.jpg binary
 *.gif binary

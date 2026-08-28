@@ -27,6 +27,7 @@ import {
   type Functionish,
 } from './ast.js';
 import { classifyFile, isFrontendCandidate } from './classify.js';
+import { composeTitle, eventVerb, humanizeName, screenOf } from './screens.js';
 import { DYNAMIC_MARKER, HTTP_METHODS, PARAM, normalizePath, type HttpMethod } from './http.js';
 import type { LoadedProject } from './project.js';
 
@@ -43,6 +44,9 @@ const ACTION_PROPS = ['onClick', 'onSubmit', 'onPress', 'onDoubleClick'] as cons
 const LABEL_PROPS = ['aria-label', 'title', 'label', 'name', 'placeholder', 'data-testid'];
 
 const HANDLER_NAME = /^(handle|on)[A-Z]/;
+
+/** The last-resort label `actionLabel` falls back to: `button onClick`. */
+const UNLABELLED = /^[A-Za-z][\w.]* on[A-Z]/;
 const HOOK_NAME = /^use[A-Z]/;
 const COMPONENT_NAME = /^[A-Z][A-Za-z0-9]*$/;
 
@@ -66,7 +70,10 @@ export interface FrontendConfig {
    * (`getState()`, `deleteRow()`) are not mistaken for HTTP calls — a looser
    * `^(get|post|...)` would match half the functions in a project.
    *
-   * Capture group 1 must be the HTTP verb.
+   * Capture group 1 must be the HTTP verb. Matched case-insensitively, and the
+   * verb may appear anywhere in the name, so a wrapper family that prefixes or
+   * infixes a product name (`abhaPostRequest`, `postAiRequest`,
+   * `MedisageGetRequest`) is picked up without configuration.
    */
   requestFunctionPattern: string;
   /** Option keys read as the request path, in priority order. */
@@ -82,7 +89,8 @@ export interface FrontendConfig {
 export const DEFAULT_FRONTEND_CONFIG: FrontendConfig = {
   httpClients: ['axios', 'api', 'apiClient', 'http', 'httpClient', 'client', 'request', 'instance'],
   apiPrefixes: ['/api'],
-  requestFunctionPattern: '^(get|post|put|patch|delete|head|options)Request[A-Za-z0-9_]*$',
+  requestFunctionPattern:
+    '^[A-Za-z0-9_]*?(get|post|put|patch|delete|head|options)[A-Za-z0-9_]*request[A-Za-z0-9_]*$',
   urlKeys: ['url', 'path', 'endpoint'],
   suffixKeys: ['params', 'query', 'suffix'],
   bodyKeys: ['body', 'data', 'payload'],
@@ -150,6 +158,7 @@ export function analyzeFrontend(
   }
 
   resolvePendingCalls(graph, globals, pending, aliases);
+  addMountActions(graph);
 }
 
 function message(error: unknown): string {
@@ -330,19 +339,51 @@ function analyzeComponentBody(
     }
   }
 
-  // Handlers declared inside the component
+  /**
+   * Functions declared inside the component.
+   *
+   * Every named function gets a node, not only `handleX`/`onX`. A request made
+   * from `fetchBillingData` or `saveVoiceRx` has to stay attributable to the
+   * function that made it: without a node, `ownerOf` walks past it and credits
+   * the whole component, which severs the `ui-action -> handler -> api-call`
+   * chain and silently drops the flow. Any codebase that does not use the
+   * `handle` naming convention would otherwise appear to have almost no flows.
+   *
+   * `eventHandler` records whether the name looks like a DOM handler, so the
+   * distinction is still available to callers that want it.
+   */
+  const declaredFunctions: { name: string; node: Node; line: number }[] = [];
   for (const declaration of fn.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
-    const name = declaration.getName();
     const initializer = declaration.getInitializer();
     if (!initializer || !isFunctionish(initializer)) continue;
-    if (!HANDLER_NAME.test(name)) continue;
+    declaredFunctions.push({
+      name: declaration.getName(),
+      node: initializer,
+      line: lineOf(declaration),
+    });
+  }
+  // `async function save() {}` inside a component is just as common as the
+  // arrow-function form, and was previously invisible.
+  for (const declaration of fn.getDescendantsOfKind(SyntaxKind.FunctionDeclaration)) {
+    const name = declaration.getName();
+    if (!name) continue;
+    declaredFunctions.push({ name, node: declaration, line: lineOf(declaration) });
+  }
+
+  for (const { name, node: initializer, line } of declaredFunctions) {
+    // A nested component, not a function of this one.
+    if (COMPONENT_NAME.test(name)) continue;
     const id = ids.handler(rel, componentName, name);
     graph.addNode({
       id,
       kind: 'handler',
       label: `${componentName}.${name}`,
-      source: { file: rel, line: lineOf(declaration) },
-      meta: { component: componentName, function: name },
+      source: { file: rel, line },
+      meta: {
+        component: componentName,
+        function: name,
+        eventHandler: HANDLER_NAME.test(name),
+      },
     });
     graph.addEdge({ from: componentId, to: id, kind: 'defines' });
     declare(name, { id, kind: 'handler', file: rel, ensure: noop });
@@ -364,13 +405,35 @@ function analyzeComponentBody(
       typeof handlerName === 'string' ? handlerName : undefined,
     );
 
+    /**
+     * "Submit" alone identifies nothing in an app with fifteen of them, so the
+     * node also carries where it lives — `Prescription · Submit`. `label` stays
+     * the words on the element, which is what a text search looks for.
+     */
+    const place = screenOf(rel, componentName);
+    /**
+     * An icon button with no text, no labelling prop and no named handler has
+     * nothing to quote, and `button onClick` on a tile is noise. Name it after
+     * the component and the gesture instead — "Mapping cell click" — and leave
+     * `action` unset, since there are no words on the element to show.
+     */
+    const wordless = !hasWords(label) || UNLABELLED.test(label);
+    const phrase = wordless ? `${humanizeName(componentName)} ${eventVerb(propName)}` : label;
     const actionId = ids.uiAction(componentId, `${propName}-${label}`);
     graph.addNode({
       id: actionId,
       kind: 'ui-action',
       label,
       source: { file: rel, line: lineOf(attribute) },
-      meta: { event: propName, component: componentName },
+      meta: {
+        event: propName,
+        component: componentName,
+        ...(wordless ? { unlabelled: true } : { action: label }),
+        screen: place.screen,
+        title: composeTitle(place.screen, phrase),
+        ...(place.page ? { page: place.page } : {}),
+        ...(place.area ? { area: place.area } : {}),
+      },
     });
     graph.addEdge({ from: componentId, to: actionId, kind: 'renders' });
 
@@ -513,6 +576,11 @@ export function humanizeHandler(name: string): string | undefined {
     .trim();
   if (words.length === 0) return undefined;
   return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** Does this text contain anything a person could read out loud? */
+function hasWords(text: string): boolean {
+  return /[A-Za-z0-9]/.test(text);
 }
 
 /** Immediate text children of a JSX element, collapsed to one line. */
@@ -711,7 +779,9 @@ function readWrapperCall(
   config: FrontendConfig,
   resolve: ((name: string) => string | undefined) | undefined,
 ): DetectedRequest | undefined {
-  const match = new RegExp(config.requestFunctionPattern).exec(member);
+  // Case-insensitive: the verb shows up as `get`, `Get` and `GET` across the
+  // wrapper families real codebases grow (`abhaPostRequest`, `MedisageGetRequest`).
+  const match = new RegExp(config.requestFunctionPattern, 'i').exec(member);
   const verb = match?.[1]?.toUpperCase();
   if (!verb || !isHttpMethod(verb)) return undefined;
 
@@ -899,8 +969,27 @@ function linkApiCall(
     payloadSources: { ...(node.meta?.payloadSources as object), ...request.payloadSources },
   };
 
+  /**
+   * Where this endpoint is called from, across the whole app.
+   *
+   * One node per method+path is deliberate — it is what makes "who else calls
+   * this?" answerable — but it means the node's own `source` is merely the first
+   * call site the scan happened to read. A flow must show *its* call site, so
+   * every site is recorded on the edge as well as counted here.
+   */
+  const site = `${rel}:${lineOf(call)}`;
+  const sites = (node.meta?.['callSites'] as string[] | undefined) ?? [];
+  if (!sites.includes(site)) {
+    node.meta = { ...node.meta, callSites: [...sites, site] };
+  }
+
   if (ownerId) {
-    graph.addEdge({ from: ownerId, to: id, kind: 'requests', meta: { line: lineOf(call) } });
+    graph.addEdge({
+      from: ownerId,
+      to: id,
+      kind: 'requests',
+      meta: { file: rel, line: lineOf(call) },
+    });
   }
 }
 
@@ -962,6 +1051,83 @@ function ownerComponentName(node: Node): string | undefined {
     current = enclosingFunction(current);
   }
   return last;
+}
+
+/**
+ * Give every component a synthetic "loads" action when its mount path reaches
+ * the backend.
+ *
+ * A great many screens fetch their data from `useEffect` rather than from a
+ * click, so the work is triggered by the component appearing, not by the user
+ * pressing anything. Those are still features — "the appointment screen loads
+ * its diseases" is exactly what someone tracing a flow wants to find — but with
+ * no `ui-action` at the head of the chain they were invisible to `flows`.
+ *
+ * The action is only created when something downstream actually requests, so
+ * this never invents an entry point for a purely presentational component. It is
+ * tagged `event: 'mount'` so callers can tell it from a real DOM event.
+ */
+function addMountActions(graph: FlowGraph): void {
+  for (const component of graph.nodesOfKind('component')) {
+    // Functions this component invokes directly, minus anything a real UI
+    // action already triggers — those flows exist and would be duplicated.
+    const triggered = new Set<string>();
+    for (const action of graph.successors(component.id, ['renders'])) {
+      for (const handler of graph.successors(action.id, ['triggers'])) triggered.add(handler.id);
+    }
+
+    const onMount = graph
+      .successors(component.id, ['calls'])
+      /**
+       * Hooks are excluded. `const { createPatient } = useCreatePatient()` in
+       * the body is a declaration, not a request: the hook hands back a function
+       * that some handler calls later. Counting it would invent a mount-time
+       * fetch for every component that merely holds a data hook.
+       */
+      .filter((node) => node.kind !== 'hook')
+      .map((node) => node.id)
+      .filter((id) => !triggered.has(id))
+      .filter((id) => reachesApiCall(graph, id));
+
+    if (onMount.length === 0) continue;
+
+    const label = 'loads';
+    const place = screenOf(component.source?.file ?? '', component.label);
+    const actionId = ids.uiAction(component.id, `mount-${label}`);
+    graph.addNode({
+      id: actionId,
+      kind: 'ui-action',
+      label: `${component.label} ${label}`,
+      ...(component.source ? { source: component.source } : {}),
+      meta: {
+        event: 'mount',
+        component: component.label,
+        synthetic: true,
+        action: label,
+        screen: place.screen,
+        /**
+         * `Patient detail · Upcoming appointment loads`. One file can define
+         * several components, and two of them fetching on mount would otherwise
+         * produce two tiles reading "Patient detail loads".
+         */
+        title: composeTitle(place.screen, `${humanizeName(component.label)} ${label}`),
+        ...(place.page ? { page: place.page } : {}),
+        ...(place.area ? { area: place.area } : {}),
+      },
+    });
+    graph.addEdge({ from: component.id, to: actionId, kind: 'renders' });
+    for (const handler of onMount) {
+      graph.addEdge({ from: actionId, to: handler, kind: 'triggers' });
+    }
+  }
+}
+
+/** Does this node reach an api-call by calling or requesting? */
+function reachesApiCall(graph: FlowGraph, start: string): boolean {
+  for (const id of graph.reachable(start, { kinds: ['calls', 'requests'] }).keys()) {
+    if (graph.node(id)?.kind === 'api-call') return true;
+  }
+  return false;
 }
 
 function resolvePendingCalls(

@@ -14,11 +14,16 @@
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
-const outFile = join(root, '.flowlens', 'trace.jsonl');
+
+// Not inside the example project: FlowLens never writes into the project it
+// reads, and this script has to honour the same rule. Pass a path to choose one.
+const outFile =
+  process.argv[2] ?? process.env['FLOWLENS_TRACE'] ?? join(tmpdir(), 'flowlens-demo-trace.jsonl');
 
 let clock = Date.parse('2026-08-24T09:00:00.000Z');
 let spanCounter = 0;

@@ -68,6 +68,15 @@ export {
 } from './analyzer/backend.js';
 export { collectConstants, emptyConstantTable, type ConstantTable } from './analyzer/constants.js';
 export {
+  TITLE_SEPARATOR,
+  composeTitle,
+  eventVerb,
+  humanizeName,
+  pageRouteOf,
+  screenOf,
+  type ScreenName,
+} from './analyzer/screens.js';
+export {
   DYNAMIC_MARKER,
   HTTP_METHODS,
   PARAM,
@@ -99,7 +108,21 @@ export {
   type ResolveOptions,
   type RiskScore,
 } from './flow/resolve.js';
-export { renderFeatureDocument, renderFlowTree, renderTimings } from './flow/document.js';
+export {
+  renderFeatureDocument,
+  renderFlowTree,
+  renderTimings,
+  stepTitle,
+  type RenderOptions,
+} from './flow/document.js';
+export {
+  ASCII_GLYPHS,
+  UNICODE_GLYPHS,
+  glyphsFor,
+  preferAscii,
+  type AsciiProbe,
+  type Glyphs,
+} from './ui/glyphs.js';
 
 export {
   analyzeImpact,

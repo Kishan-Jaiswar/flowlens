@@ -150,6 +150,44 @@ describe('findings', () => {
   });
 });
 
+describe('functions that are not named like handlers', () => {
+  /**
+   * The regression this covers: node creation used to be gated on
+   * `/^(handle|on)[A-Z]/`, so a codebase naming its functions `fetchPatients` or
+   * `saveVoiceRx` had no node for them. Every request they made was credited to
+   * the whole component instead, which severed `ui-action -> handler -> api-call`
+   * and made a large app look as though it had almost no flows.
+   */
+  it('attributes a request to the function that made it, not the component', () => {
+    const graph = exampleScan().graph;
+    const owners = graph
+      .allEdges()
+      .filter((edge) => edge.kind === 'requests')
+      .map((edge) => graph.node(edge.from)?.kind);
+    expect(owners.length).toBeGreaterThan(0);
+    // A component may still own a module-level call, but must not be the norm.
+    expect(owners.filter((kind) => kind === 'component').length).toBeLessThan(owners.length);
+  });
+});
+
+describe('screens that load their data on mount', () => {
+  it('does not invent a mount action for a component that only holds a hook', () => {
+    // PatientForm calls useCreatePatient() in its body, but the request happens
+    // in handleSubmit. A hook call is a declaration, not a mount-time fetch.
+    const flows = resolveFlows(exampleScan().graph);
+    expect(flows.map((flow) => flow.label)).not.toContain('PatientForm loads');
+  });
+
+  it('marks a synthetic mount action so it is distinguishable from a click', () => {
+    const graph = exampleScan().graph;
+    for (const action of graph.nodesOfKind('ui-action')) {
+      if (action.meta?.['synthetic'] === true) {
+        expect(action.meta?.['event']).toBe('mount');
+      }
+    }
+  });
+});
+
 describe('impact analysis', () => {
   it('reports every feature that depends on a shared service method', () => {
     const { graph } = exampleScan();

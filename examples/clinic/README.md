@@ -49,8 +49,8 @@ node packages/cli/bin/flowlens.mjs impact AuditService.record -p examples/clinic
 node packages/cli/bin/flowlens.mjs doctor examples/clinic
 
 # add a synthetic runtime recording (no server, no database)
-node examples/clinic/demo-trace.mjs
-node packages/cli/bin/flowlens.mjs trace examples/clinic
+node examples/clinic/demo-trace.mjs /tmp/demo-trace.jsonl
+node packages/cli/bin/flowlens.mjs trace examples/clinic --trace /tmp/demo-trace.jsonl
 
 # then the dashboard
 node packages/cli/bin/flowlens.mjs serve examples/clinic

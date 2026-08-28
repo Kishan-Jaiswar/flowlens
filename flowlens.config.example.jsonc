@@ -1,4 +1,5 @@
-// Copy to `flowlens.config.json` in the root of the project you want to scan.
+// Copy to `flowlens.config.json` in the root of the project you want to scan —
+// or run `flowlens init` there, which detects the layout and writes one for you.
 //
 // Every setting is optional — FlowLens works with no config at all. This file
 // exists for projects whose conventions differ from the defaults, so the
@@ -7,8 +8,12 @@
 // CLI flags override this file; this file overrides the defaults.
 {
   // Scanned together when no paths are given on the command line.
-  // Relative to THIS file, not to your shell's working directory.
+  // Relative to THIS file, not to your shell's working directory — which is
+  // also what makes `flowlens scan` work from any subdirectory of the project.
   // Use it when the frontend and backend are separate repositories.
+  //
+  // Always write these with `/`, even on Windows: a committed config has to
+  // work for everyone on the team, whatever machine they are on.
   'roots': ['./web', './api'],
 
   // Stripped from BOTH frontend URLs and backend routes before matching.

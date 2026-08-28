@@ -54,7 +54,17 @@ export interface CollectionAccess {
 export interface FeatureFlow {
   /** Stable, URL-safe id: `create-patient`. */
   id: string;
+  /** The words on the element the user clicks: `Submit`. */
   label: string;
+  /**
+   * Label plus where it lives: `Prescription · Submit`.
+   *
+   * What every list and tile shows, because `Submit` on its own does not tell a
+   * reader which of the app's fifteen submits this is.
+   */
+  title: string;
+  /** The part of the product this action belongs to: `Prescription`. */
+  screen?: string;
   component?: string;
   event?: string;
   entryNodeId: string;
@@ -113,7 +123,7 @@ export function resolveFlows(graph: FlowGraph, options: ResolveOptions = {}): Fe
     flows.push(flow);
   }
 
-  return flows.sort((a, b) => b.risk.score - a.risk.score || a.label.localeCompare(b.label));
+  return flows.sort((a, b) => b.risk.score - a.risk.score || a.title.localeCompare(b.title));
 }
 
 /** Resolve a single flow from a UI action (or any other entry node). */
@@ -140,6 +150,8 @@ export function resolveFlow(graph: FlowGraph, entryNodeId: string): FeatureFlow 
       ...(node.meta ? { meta: node.meta } : {}),
     });
   }
+
+  attributeCallSites(graph, steps, depths);
 
   // Read top to bottom: UI, frontend, network, backend, data.
   steps.sort(
@@ -182,10 +194,14 @@ export function resolveFlow(graph: FlowGraph, entryNodeId: string): FeatureFlow 
 
   const component = entry.meta?.['component'] ? String(entry.meta['component']) : undefined;
   const event = entry.meta?.['event'] ? String(entry.meta['event']) : undefined;
+  const screen = entry.meta?.['screen'] ? String(entry.meta['screen']) : undefined;
+  const title = entry.meta?.['title'] ? String(entry.meta['title']) : entry.label;
 
   const flow: FeatureFlow = {
     id: slug(`${component ?? 'app'}-${entry.label}`) || slug(entry.id),
     label: entry.label,
+    title,
+    ...(screen ? { screen } : {}),
     ...(component ? { component } : {}),
     ...(event ? { event } : {}),
     entryNodeId,
@@ -204,6 +220,43 @@ export function resolveFlow(graph: FlowGraph, entryNodeId: string): FeatureFlow 
 
   flow.risk = scoreRisk(graph, flow);
   return flow;
+}
+
+/**
+ * Point every `api-call` step at the call site *this* flow goes through.
+ *
+ * There is one api-call node per method+path, shared by every caller in the app,
+ * so its own `source` is just the first site the scan read. Left alone, a click
+ * in `patient_detail` showed its network step as living in
+ * `components/RequestPaymentPopup.js` — code on a different screen entirely,
+ * which is exactly how a correct flow comes to look like a dump of the whole
+ * page. The `requests` edge knows better: it was written at the real call site.
+ */
+function attributeCallSites(
+  graph: FlowGraph,
+  steps: FlowStep[],
+  depths: Map<string, number>,
+): void {
+  for (const step of steps) {
+    if (step.kind !== 'api-call') continue;
+
+    const edges = graph.edgesTo(step.nodeId, ['requests']);
+    // Callers that this flow actually passes through, nearest to the click first.
+    const mine = edges
+      .filter((edge) => depths.has(edge.from))
+      .sort((a, b) => (depths.get(a.from) ?? 0) - (depths.get(b.from) ?? 0));
+
+    const nearest = mine[0];
+    const file = nearest?.meta?.['file'];
+    const line = nearest?.meta?.['line'];
+    if (typeof file === 'string') step.file = file;
+    if (typeof line === 'number') step.line = line;
+
+    const elsewhere = edges.length - mine.length;
+    if (elsewhere > 0) {
+      step.meta = { ...step.meta, otherCallers: elsewhere };
+    }
+  }
 }
 
 function collectionAccesses(steps: FlowStep[]): CollectionAccess[] {
