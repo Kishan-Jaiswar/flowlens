@@ -34,11 +34,47 @@ import type { LoadedProject } from './project.js';
 /**
  * Event props that make a JSX element a user action.
  *
- * `onChange` is deliberately absent: every keystroke in every text input would
- * become a "feature", burying the handful of actions that actually reach the
- * backend under form noise.
+ * The deliberate gesture — the user meant to do this.
  */
 const ACTION_PROPS = ['onClick', 'onSubmit', 'onPress', 'onDoubleClick'] as const;
+
+/**
+ * Events that are also real actions, but noisy in bulk.
+ *
+ * `onChange` on a text input fires per keystroke and sets local state, and there
+ * are hundreds of them; listing each as a "feature" buries the actions that
+ * reach the backend. But `onChange` on a dropdown that refetches, `onBlur` that
+ * autosaves, and `onKeyDown` that submits a search are exactly the actions
+ * someone opens this tool to trace, so leaving them out entirely means the
+ * answer to "show me every action" is wrong.
+ *
+ * They are detected like any other action and marked `input` in `eventClass`.
+ * The ones that only touch local state fall under the existing local-only
+ * filter and stay hidden by default; the ones that reach an API appear next to
+ * the clicks, where they belong.
+ */
+const INPUT_ACTION_PROPS = [
+  'onChange',
+  'onBlur',
+  'onFocus',
+  'onInput',
+  'onKeyDown',
+  'onKeyUp',
+  'onKeyPress',
+  'onSelect',
+  'onToggle',
+  'onDrop',
+  'onClose',
+  'onCancel',
+  'onOk',
+  'onSearch',
+  'onFinish',
+  'onMouseDown',
+  'onMouseUp',
+  'onScroll',
+] as const;
+
+const ALL_ACTION_PROPS: readonly string[] = [...ACTION_PROPS, ...INPUT_ACTION_PROPS];
 
 /** Props we read to label an action when the element has no text child. */
 const LABEL_PROPS = ['aria-label', 'title', 'label', 'name', 'placeholder', 'data-testid'];
@@ -48,6 +84,36 @@ const HANDLER_NAME = /^(handle|on)[A-Z]/;
 /** The last-resort label `actionLabel` falls back to: `button onClick`. */
 const UNLABELLED = /^[A-Za-z][\w.]* on[A-Z]/;
 const HOOK_NAME = /^use[A-Z]/;
+
+/**
+ * Hooks that fetch as soon as the component renders.
+ *
+ * The distinction matters for mount actions: `useMutation` hands back a
+ * `mutate` function that some handler calls later, but `useQuery` issues its
+ * request on mount. Treating every hook as the deferred kind meant a page whose
+ * data loads through React Query had no action at all — in a real Next.js app,
+ * 1 mount action for the whole project.
+ */
+const QUERY_HOOKS = new Set([
+  'useQuery',
+  'useQueries',
+  'useInfiniteQuery',
+  'useSuspenseQuery',
+  'useSuspenseQueries',
+  'useSuspenseInfiniteQuery',
+  'useSWR',
+  'useSWRInfinite',
+  'useSWRImmutable',
+]);
+
+/** Does this function body issue a request on mount rather than on demand? */
+function fetchesOnMount(fn: Functionish): boolean {
+  for (const call of callsIn(fn)) {
+    const name = calleeName(call);
+    if (QUERY_HOOKS.has(name.split('.').pop() ?? name)) return true;
+  }
+  return false;
+}
 const COMPONENT_NAME = /^[A-Z][A-Za-z0-9]*$/;
 
 const STATE_HOOKS = new Set(['useState', 'useReducer']);
@@ -103,6 +169,15 @@ interface PendingCall {
   /** Symbol being called. */
   name: string;
   file: string;
+  /**
+   * `name` is the *receiver* of a member call, not the callee.
+   *
+   * `adjust.mutate(input)` where `const adjust = useAdjustStock()`. Such a call
+   * may only be resolved through the alias table — never against globals, or
+   * every `router.push()` and `console.log()` would try to link to a symbol
+   * named `router` or `console`.
+   */
+  receiverOnly?: boolean;
 }
 
 /**
@@ -196,6 +271,7 @@ function analyzeFrontendFile(
         kind: 'hook',
         label: name,
         source: { file: rel, line: lineOf(fn) },
+        ...(fetchesOnMount(fn) ? { meta: { fetchesOnMount: true } } : {}),
       });
       declare(name, { id, kind: 'hook', file: rel, ensure: noop });
       continue;
@@ -307,6 +383,26 @@ function analyzeFrontendFile(
     const callee = calleeName(call);
     if (!callee.includes('.') && owner) {
       pending.push({ from: owner, name: callee, file: rel });
+      continue;
+    }
+
+    /**
+     * `adjust.mutate(input)` — a method on an object a hook handed back.
+     *
+     * React Query's idiom is `const adjust = useAdjustStock()` followed by
+     * `adjust.mutate(...)`, and the destructured form
+     * (`const { mutate } = ...`) is only half of real usage. Recording just the
+     * bare-identifier form left the request unreachable from the click: in a
+     * Next.js app built this way, 3 of 121 actions reached the backend.
+     *
+     * Only the receiver is recorded, and it is resolved solely through the
+     * alias table, so a receiver that is not a hook result links to nothing.
+     */
+    if (owner && callee.includes('.')) {
+      const receiver = callee.split('.')[0];
+      if (receiver && /^[A-Za-z_$][\w$]*$/.test(receiver)) {
+        pending.push({ from: owner, name: receiver, file: rel, receiverOnly: true });
+      }
     }
   }
 }
@@ -393,7 +489,8 @@ function analyzeComponentBody(
   // JSX elements the user can interact with
   for (const attribute of fn.getDescendantsOfKind(SyntaxKind.JsxAttribute)) {
     const propName = attribute.getNameNode().getText();
-    if (!(ACTION_PROPS as readonly string[]).includes(propName)) continue;
+    if (!ALL_ACTION_PROPS.includes(propName)) continue;
+    const eventClass = (ACTION_PROPS as readonly string[]).includes(propName) ? 'gesture' : 'input';
 
     // Resolve the handler first: its name is the best label for the very common
     // case of an icon or wrapper element with no text of its own.
@@ -427,6 +524,7 @@ function analyzeComponentBody(
       source: { file: rel, line: lineOf(attribute) },
       meta: {
         event: propName,
+        eventClass,
         component: componentName,
         ...(wordless ? { unlabelled: true } : { action: label }),
         screen: place.screen,
@@ -678,6 +776,8 @@ export interface DetectedRequest {
   payloadKeys: string[];
   /** payload key -> identifier it was assigned from (for state lineage). */
   payloadSources: Record<string, string>;
+  /** Query-string parameter names: `?page=1&size=20` -> ['page', 'size']. */
+  queryKeys: string[];
   client: string;
 }
 
@@ -848,7 +948,12 @@ function withSuffix(
     const suffix = readPathLike(propertyValue(options, key), resolve);
     if (suffix === undefined) continue;
     const trimmed = suffix.trim();
-    if (trimmed.startsWith('?') || trimmed.length === 0) return rawPath;
+    if (trimmed.length === 0) return rawPath;
+    // A `?...` suffix is a query string, not a path segment. It used to be
+    // dropped here, which lost every query parameter in the codebase; keep it on
+    // the raw path instead, because `normalizePath` strips it before matching
+    // and `buildRequest` reads the parameter names off it.
+    if (trimmed.startsWith('?')) return `${rawPath}${trimmed}`;
     if (trimmed.startsWith('/')) return `${rawPath}${trimmed}`;
     return `${rawPath}/${trimmed}`;
   }
@@ -894,8 +999,32 @@ function buildRequest(
     path: normalizePath(rawPath, config.apiPrefixes),
     payloadKeys,
     payloadSources,
+    queryKeys: queryKeysOf(rawPath),
     client,
   };
+}
+
+/**
+ * Parameter names from a query string as written in source.
+ *
+ * Values are ignored on purpose — they are usually interpolations
+ * (`?page=${page}`) and the name is the part that describes the contract.
+ */
+export function queryKeysOf(rawPath: string): string[] {
+  const start = rawPath.indexOf('?');
+  if (start === -1) return [];
+  const keys: string[] = [];
+  for (const pair of rawPath.slice(start + 1).split('&')) {
+    let key = pair.split('=')[0]?.trim();
+    if (!key) continue;
+    // An interpolation immediately before the name leaves the placeholder stuck
+    // to it (`<param>status`), which is not a parameter called `<param>status`.
+    if (key.startsWith(DYNAMIC_MARKER)) key = key.slice(DYNAMIC_MARKER.length).trim();
+    // Skip a fully interpolated key (`?${qs}`): there is no name to report.
+    if (!key || key.includes('$') || key.includes('{') || key.includes('<')) continue;
+    if (!keys.includes(key)) keys.push(key);
+  }
+  return keys;
 }
 
 /** `body: JSON.stringify(payload)` or `data: { ... }`. */
@@ -963,10 +1092,12 @@ function linkApiCall(
   // subsets of the same endpoint.
   const existingKeys = (node.meta?.payloadKeys as string[] | undefined) ?? [];
   const mergedKeys = [...new Set([...existingKeys, ...request.payloadKeys])];
+  const existingQuery = (node.meta?.['queryKeys'] as string[] | undefined) ?? [];
   node.meta = {
     ...node.meta,
     payloadKeys: mergedKeys,
     payloadSources: { ...(node.meta?.payloadSources as object), ...request.payloadSources },
+    queryKeys: [...new Set([...existingQuery, ...request.queryKeys])],
   };
 
   /**
@@ -1079,12 +1210,15 @@ function addMountActions(graph: FlowGraph): void {
     const onMount = graph
       .successors(component.id, ['calls'])
       /**
-       * Hooks are excluded. `const { createPatient } = useCreatePatient()` in
-       * the body is a declaration, not a request: the hook hands back a function
-       * that some handler calls later. Counting it would invent a mount-time
-       * fetch for every component that merely holds a data hook.
+       * Deferred hooks are excluded. `const { createPatient } =
+       * useCreatePatient()` in the body is a declaration, not a request: the
+       * hook hands back a function that some handler calls later, so counting it
+       * would invent a mount-time fetch for every component holding a mutation.
+       *
+       * A `useQuery`-style hook is the opposite — it fetches on render — so it
+       * is exactly what a mount action should be built from.
        */
-      .filter((node) => node.kind !== 'hook')
+      .filter((node) => node.kind !== 'hook' || node.meta?.['fetchesOnMount'] === true)
       .map((node) => node.id)
       .filter((id) => !triggered.has(id))
       .filter((id) => reachesApiCall(graph, id));
@@ -1145,7 +1279,10 @@ function resolvePendingCalls(
 
   for (const call of pending) {
     // `createPatient()` in this file may really mean `useCreatePatient()`.
-    const name = aliasTable.get(`${call.file}::${call.name}`) ?? call.name;
+    const aliased = aliasTable.get(`${call.file}::${call.name}`);
+    // A receiver is only ever a hook result; anything else is not a call edge.
+    if (call.receiverOnly && !aliased) continue;
+    const name = aliased ?? call.name;
     const candidates = globals.get(name);
     if (!candidates || candidates.length === 0) continue;
     // Prefer a declaration in the same file, then a unique global one.

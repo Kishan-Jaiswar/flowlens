@@ -1,9 +1,9 @@
 import { Node, SyntaxKind, type SourceFile } from 'ts-morph';
 import type { FlowGraph } from '../graph/graph.js';
 import { ids } from '../graph/ids.js';
-import { callsIn, calleeMember, readString } from './ast.js';
+import { callsIn, calleeMember, lineOf, readString } from './ast.js';
 import { HTTP_METHODS, type HttpMethod } from './http.js';
-import { linkDbOperations } from './dbaccess.js';
+import { linkDbOperations, type CollectionAliases } from './dbaccess.js';
 import type { LoadedProject } from './project.js';
 import { isFileSystemRoute } from './classify.js';
 
@@ -25,6 +25,8 @@ import { isFileSystemRoute } from './classify.js';
  */
 export interface FileRouteConfig {
   apiPrefixes: string[];
+  /** Collection handles produced by a factory; see `collectionAliasesOf`. */
+  collectionAliases?: CollectionAliases;
 }
 
 export function analyzeFileRoutes(
@@ -42,7 +44,17 @@ export function analyzeFileRoutes(
     if (path === undefined) continue;
 
     const methods = methodsOf(file, rel);
-    const handlerId = declareHandler(file, rel, graph, path);
+    /**
+     * One handler per exported verb, when the file exports them separately.
+     *
+     * An App Router `route.ts` commonly exports `GET`, `PUT` and `DELETE` side
+     * by side. Giving the file a single handler merged all three, so a flow
+     * through the PUT reported the DELETE's query too — a phantom
+     * `medicines.deleteOne` on an edit. Where the verbs are separate functions
+     * they get separate handlers, and each one's queries are scoped to its own
+     * body.
+     */
+    const perVerb = verbFunctions(file);
 
     for (const method of methods) {
       const routeId = ids.route(method, path);
@@ -53,13 +65,27 @@ export function analyzeFileRoutes(
         source: { file: rel, line: 1 },
         meta: { httpMethod: method, path, framework: 'file-route', handler: rel },
       });
+      const scope = perVerb.get(method);
+      const handlerId = scope
+        ? declareVerbHandler(rel, graph, path, method, lineOf(scope))
+        : declareHandler(file, rel, graph, path);
       graph.addEdge({ from: routeId, to: handlerId, kind: 'calls' });
       declared += 1;
     }
 
-    // The whole file is the scope: a route module's queries belong to its
-    // single handler, wherever in the file they are written.
-    linkDbOperations(file, file, rel, graph, handlerId);
+    if (perVerb.size > 0) {
+      for (const [method, scope] of perVerb) {
+        const handlerId = declareVerbHandler(rel, graph, path, method, lineOf(scope));
+        linkDbOperations(scope, file, rel, graph, handlerId, config.collectionAliases);
+      }
+    } else {
+      /**
+       * A Pages Router module branches on `req.method` inside one function, so
+       * there is nothing finer to scope to: the whole file is the handler.
+       */
+      const handlerId = declareHandler(file, rel, graph, path);
+      linkDbOperations(file, file, rel, graph, handlerId, config.collectionAliases);
+    }
   }
 
   return declared;
@@ -199,6 +225,48 @@ function methodsOf(file: SourceFile, rel: string): HttpMethod[] {
 }
 
 /** One method node per route file, named after the file. */
+/**
+ * Exported functions named after an HTTP verb, and their bodies.
+ *
+ * Empty for a Pages Router module, which has one default-exported handler.
+ */
+function verbFunctions(file: SourceFile): Map<HttpMethod, Node> {
+  const out = new Map<HttpMethod, Node>();
+
+  for (const fn of file.getFunctions()) {
+    const name = (fn.getName() ?? '').toUpperCase();
+    if (fn.isExported() && isHttpMethod(name)) out.set(name, fn);
+  }
+  for (const declaration of file.getVariableDeclarations()) {
+    const name = declaration.getName().toUpperCase();
+    if (!isHttpMethod(name)) continue;
+    if (!declaration.getVariableStatement()?.isExported()) continue;
+    const initializer = declaration.getInitializer();
+    if (initializer) out.set(name, initializer);
+  }
+
+  return out;
+}
+
+/** The handler node for one verb of a multi-verb route module. */
+function declareVerbHandler(
+  rel: string,
+  graph: FlowGraph,
+  path: string,
+  method: HttpMethod,
+  line: number,
+): string {
+  const handlerId = ids.method(`controller:${rel}#file-route`, method);
+  graph.addNode({
+    id: handlerId,
+    kind: 'method',
+    label: `${method} ${path} handler`,
+    source: { file: rel, line },
+    meta: { framework: 'file-route', path, httpMethod: method },
+  });
+  return handlerId;
+}
+
 function declareHandler(file: SourceFile, rel: string, graph: FlowGraph, path: string): string {
   const handlerId = ids.method(`controller:${rel}#file-route`, 'handler');
   graph.addNode({

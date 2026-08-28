@@ -56,6 +56,7 @@ export {
   analyzeFrontend,
   humanizeHandler,
   isConcreteEndpoint,
+  queryKeysOf,
   readHttpCall,
   type DetectedRequest,
   type FrontendConfig,
@@ -89,11 +90,15 @@ export {
   type RouteLike,
 } from './analyzer/http.js';
 export {
+  DB_EFFECT_LABEL,
+  DB_EFFECT_ORDER,
   DB_OPERATIONS,
   collectionNameOf,
   dbAccessOf,
+  dbEffectOf,
   pluralize,
   type DbAccess,
+  type DbEffect,
 } from './analyzer/mongo.js';
 export { linkDataLineage, linkFrontendToBackend, type SeamResult } from './analyzer/seam.js';
 

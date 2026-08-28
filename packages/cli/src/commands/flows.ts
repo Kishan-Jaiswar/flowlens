@@ -41,7 +41,8 @@ export function runFlows(args: FlowsArgs): number {
         flow.label.slice(0, 40),
         flow.component ?? '',
         flow.endpoints.join(' ') || color.gray(glyph.none),
-        flow.collections.map((c) => `${c.collection}:${c.access[0]}`).join(' ') ||
+        // One letter per effect: r(ead) c(reate) u(pdate) d(elete) w(rite).
+        flow.collections.map((c) => `${c.collection}:${c.effect[0]}`).join(' ') ||
           color.gray(glyph.none),
         riskBadge(flow.risk.level),
         evidenceBadge(flow.evidence),

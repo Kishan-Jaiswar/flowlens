@@ -1,3 +1,4 @@
+import { DB_EFFECT_LABEL, DB_EFFECT_ORDER, type DbEffect } from '../analyzer/mongo.js';
 import type { FlowGraph } from '../graph/graph.js';
 import type { Evidence } from '../graph/types.js';
 import { analyzeImpact } from '../impact/impact.js';
@@ -79,7 +80,20 @@ function padKind(kind: string): string {
 function stepDetail(step: FlowStep, g: Glyphs): string | undefined {
   const parts: string[] = [];
   if (step.file) parts.push(`${step.file}${step.line ? `:${step.line}` : ''}`);
-  if (step.kind === 'db-op' && step.meta?.['access']) parts.push(String(step.meta['access']));
+  // The contract this step carries, so the tree answers "with what?" and not
+  // only "what next?".
+  const d = step.detail;
+  if (d?.queryKeys?.length) parts.push(`?${d.queryKeys.join(' &')}`);
+  if (d?.payloadKeys?.length) parts.push(`body: ${d.payloadKeys.join(', ')}`);
+  if (d?.dtos?.length) parts.push(`dto: ${d.dtos.map((dto) => dto.name).join(', ')}`);
+  if (d?.schema) parts.push(`schema: ${d.schema.model}`);
+  if (d?.statesWritten?.length) parts.push(`sets: ${d.statesWritten.join(', ')}`);
+  // Prefer the specific effect (`create`/`update`/`delete`) over the coarse
+  // `write`; older graphs only carry `access`.
+  if (step.kind === 'db-op') {
+    const effect = step.meta?.['effect'] ?? step.meta?.['access'];
+    if (effect) parts.push(String(effect));
+  }
   if (step.meta?.['mismatch']) parts.push(`${g.warn} ${describeMismatch(step)}`);
   if (step.meta?.['unresolved']) parts.push(`${g.warn} handler not resolved statically`);
   if (step.meta?.['discoveredAtRuntime']) parts.push('runtime-only');
@@ -152,9 +166,20 @@ export function renderFeatureDocument(graph: FlowGraph, flow: FeatureFlow): stri
   lines.push(`| Endpoints | ${flow.endpoints.map((e) => `\`${e}\``).join(', ') || '—'} |`);
   lines.push(
     `| Collections | ${
-      flow.collections.map((c) => `\`${c.collection}\` (${c.access})`).join(', ') || '—'
+      flow.collections.map((c) => `\`${c.collection}\` (${c.effect})`).join(', ') || '—'
     } |`,
   );
+  if (flow.controllers.length > 0)
+    lines.push(`| Controllers | ${flow.controllers.map((c) => `\`${c}\``).join(', ')} |`);
+  if (flow.services.length > 0)
+    lines.push(`| Services | ${flow.services.map((c) => `\`${c}\``).join(', ')} |`);
+  if (flow.dtos.length > 0) lines.push(`| DTOs | ${flow.dtos.map((c) => `\`${c}\``).join(', ')} |`);
+  if (flow.schemas.length > 0)
+    lines.push(
+      `| Schemas | ${flow.schemas.map((s) => `\`${s.model}\` → \`${s.collection}\``).join(', ')} |`,
+    );
+  if (flow.hooks.length > 0)
+    lines.push(`| Hooks | ${flow.hooks.map((c) => `\`${c}\``).join(', ')} |`);
   lines.push('');
 
   lines.push('## Execution path');
@@ -169,6 +194,47 @@ export function renderFeatureDocument(graph: FlowGraph, flow: FeatureFlow): stri
     lines.push('');
     for (const state of flow.state) lines.push(`- \`${state}\``);
     lines.push('');
+  }
+
+  const requests = flow.steps.filter(
+    (step) =>
+      step.kind === 'api-call' &&
+      (step.detail?.queryKeys?.length || step.detail?.payloadKeys?.length),
+  );
+  if (requests.length > 0) {
+    lines.push('## What each request sends');
+    lines.push('');
+    lines.push('| Endpoint | Query | Body |');
+    lines.push('| --- | --- | --- |');
+    for (const step of requests) {
+      const query = (step.detail?.queryKeys ?? []).map((k) => `\`${k}\``).join(', ') || '—';
+      const body = (step.detail?.payloadKeys ?? []).map((k) => `\`${k}\``).join(', ') || '—';
+      lines.push(`| \`${step.label}\` | ${query} | ${body} |`);
+    }
+    lines.push('');
+  }
+
+  if (flow.collections.length > 0) {
+    lines.push('## Collections touched');
+    lines.push('');
+    lines.push('| Collection | What happens | Operations |');
+    lines.push('| --- | --- | --- |');
+    for (const entry of flow.collections) {
+      lines.push(
+        `| \`${entry.collection}\` | ${DB_EFFECT_LABEL[entry.effect]} | ${entry.operations
+          .map((operation) => `\`${operation}()\``)
+          .join(', ')} |`,
+      );
+    }
+    lines.push('');
+    const unknown = flow.collections.filter((entry) => entry.effect === 'write');
+    if (unknown.length > 0) {
+      lines.push(
+        `Rows marked "written to" use \`${unknown[0]?.operations.join('`/`')}\`, whose effect ` +
+          'depends on runtime state — they may insert or update.',
+      );
+      lines.push('');
+    }
   }
 
   const lineage = renderLineage(graph, flow);
@@ -216,12 +282,16 @@ export function renderFeatureDocument(graph: FlowGraph, flow: FeatureFlow): stri
 
   lines.push('## What could break if this changes?');
   lines.push('');
-  const writeTargets = flow.collections.filter((c) => c.access === 'write');
-  if (writeTargets.length > 0) {
+  // Split by effect: "writes 4 collections" and "deletes from 1" deserve
+  // different amounts of attention from a reviewer.
+  for (const effect of DB_EFFECT_ORDER) {
+    if (effect === 'read') continue;
+    const targets = flow.collections.filter((c) => c.effect === effect);
+    if (targets.length === 0) continue;
+    const named = targets.map((c) => `\`${c.collection}\` (${c.operations.join(', ')})`).join(', ');
     lines.push(
-      `- Data written: ${writeTargets
-        .map((c) => `\`${c.collection}\` (${c.operations.join(', ')})`)
-        .join(', ')}. Any consumer of these fields is downstream of this feature.`,
+      `- Data ${DB_EFFECT_LABEL[effect as DbEffect]}: ${named}. ` +
+        'Any consumer of these fields is downstream of this feature.',
     );
   }
   for (const endpoint of flow.endpoints) {

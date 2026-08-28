@@ -4,6 +4,7 @@ import {
   type ClassDeclaration,
   type MethodDeclaration,
   type ParameterDeclaration,
+  type PropertyDeclaration,
   type SourceFile,
 } from 'ts-morph';
 import type { FlowGraph } from '../graph/graph.js';
@@ -23,9 +24,9 @@ import {
   readString,
 } from './ast.js';
 import { classifyFile, isServerCandidate } from './classify.js';
-import { linkDbOperations } from './dbaccess.js';
+import { linkDbOperations, type CollectionAliases } from './dbaccess.js';
 import { HTTP_METHODS, joinRoutePath, normalizePath, type HttpMethod } from './http.js';
-import { collectionNameOf, dbAccessOf } from './mongo.js';
+import { collectionNameOf, dbEffectOf, type DbEffect } from './mongo.js';
 import type { LoadedProject } from './project.js';
 
 /** Nest route decorators, mapped to their HTTP verb. */
@@ -95,6 +96,8 @@ export interface BackendConfig {
   apiPrefixes: string[];
   /** Resolve identifiers (route path constants) to their literal value. */
   resolveConstant?: (name: string) => string | undefined;
+  /** Collection handles produced by a factory; see `collectionAliasesOf`. */
+  collectionAliases?: CollectionAliases;
 }
 
 export const DEFAULT_BACKEND_CONFIG: BackendConfig = {
@@ -143,7 +146,7 @@ export function analyzeBackend(
   }
 
   for (const info of index.classes.values()) {
-    safely(info.file, () => resolveConstructor(info, graph, index));
+    safely(info.file, () => resolveInjection(info, graph, index));
   }
 
   for (const info of index.classes.values()) {
@@ -402,28 +405,44 @@ function registerModel(
 // Pass 2 — resolution
 // ---------------------------------------------------------------------------
 
-/** Read constructor injection: services and Mongoose models. */
-function resolveConstructor(info: ClassInfo, graph: FlowGraph, index: BackendIndex): void {
+/**
+ * Read dependency injection: services and Mongoose models.
+ *
+ * Nest supports two forms, and a real codebase mixes them in the same class:
+ *
+ *   constructor(@InjectModel(Doctor.name) private doctorModel: Model<D>) {}
+ *
+ *   @InjectModel(DoctorPatient.name)
+ *   private readonly doctorPatientModel: Model<DoctorPatientDocument>;
+ *
+ * Reading only the constructor silently drops every query made through a
+ * property-injected model, so the flow stops at the service and the collection
+ * never appears — a missing layer, not a missing detail.
+ */
+function resolveInjection(info: ClassInfo, graph: FlowGraph, index: BackendIndex): void {
   const [constructor] = info.declaration.getConstructors();
-  if (!constructor) return;
+  const members: Array<ParameterDeclaration | PropertyDeclaration> = [
+    ...(constructor?.getParameters() ?? []),
+    ...info.declaration.getProperties(),
+  ];
 
-  for (const parameter of constructor.getParameters()) {
-    const receiver = `this.${parameter.getName()}`;
+  for (const member of members) {
+    const receiver = `this.${member.getName()}`;
 
-    const modelName = injectedModelName(parameter);
+    const modelName = injectedModelName(member);
     if (modelName) {
       info.models.set(receiver, modelName);
       if (!index.collections.has(modelName)) {
         registerModel(graph, index, modelName, collectionNameOf(modelName), {
           file: info.file,
-          line: lineOf(parameter),
+          line: lineOf(member),
         });
       }
       graph.addEdge({ from: info.nodeId, to: ids.model(modelName), kind: 'injects' });
       continue;
     }
 
-    const typeName = baseTypeName(parameter);
+    const typeName = baseTypeName(member);
     if (!typeName) continue;
     const target = index.classes.get(typeName);
     if (!target || (target.role !== 'service' && target.role !== 'controller')) continue;
@@ -433,8 +452,8 @@ function resolveConstructor(info: ClassInfo, graph: FlowGraph, index: BackendInd
 }
 
 /** `@InjectModel(Patient.name)` or `@InjectModel('Patient')`. */
-function injectedModelName(parameter: ParameterDeclaration): string | undefined {
-  const decorator = parameter.getDecorators().find((d) => d.getName() === 'InjectModel');
+function injectedModelName(member: ParameterDeclaration | PropertyDeclaration): string | undefined {
+  const decorator = member.getDecorators().find((d) => d.getName() === 'InjectModel');
   if (decorator) {
     const [argument] = decorator.getArguments();
     if (argument) {
@@ -447,14 +466,14 @@ function injectedModelName(parameter: ParameterDeclaration): string | undefined 
     }
   }
   // Plain Mongoose in a service: `private patientModel: Model<Patient>`
-  const typeText = parameter.getTypeNode()?.getText() ?? '';
+  const typeText = member.getTypeNode()?.getText() ?? '';
   const generic = /^Model<\s*([A-Za-z0-9_]+)/.exec(typeText);
   if (generic?.[1]) return generic[1].replace(/(Document|Entity)$/, '');
   return undefined;
 }
 
-function baseTypeName(parameter: ParameterDeclaration): string | undefined {
-  const typeText = parameter.getTypeNode()?.getText();
+function baseTypeName(member: ParameterDeclaration | PropertyDeclaration): string | undefined {
+  const typeText = member.getTypeNode()?.getText();
   if (!typeText) return undefined;
   const match = /^([A-Za-z0-9_$]+)/.exec(typeText.trim());
   return match?.[1];
@@ -526,8 +545,8 @@ function resolveMethodBodies(info: ClassInfo, graph: FlowGraph, index: BackendIn
       // 1. Database access: this.patientModel.find(...)
       const modelName = resolveModelReceiver(receiver, info);
       if (modelName) {
-        const access = dbAccessOf(member);
-        if (!access) continue;
+        const effect = dbEffectOf(member);
+        if (!effect) continue;
         recordDbOp(graph, index, {
           methodId,
           modelName,
@@ -535,7 +554,7 @@ function resolveMethodBodies(info: ClassInfo, graph: FlowGraph, index: BackendIn
           file: info.file,
           line: lineOf(call),
           site: `${info.name}.${methodName}`,
-          access,
+          effect,
         });
         continue;
       }
@@ -588,7 +607,9 @@ function resolveMethodBodies(info: ClassInfo, graph: FlowGraph, index: BackendIn
         file: info.file,
         line: lineOf(expression),
         site: `${info.name}.${methodName}`,
-        access: 'write',
+        // `save()` alone is ambiguous, but `new Model(...)` is not: the document
+        // is new here, so this is an insert rather than an unknown write.
+        effect: 'create',
       });
     }
   }
@@ -619,7 +640,7 @@ function recordDbOp(
     file: string;
     line: number;
     site: string;
-    access: 'read' | 'write';
+    effect: DbEffect;
   },
 ): void {
   const collection = index.collections.get(input.modelName) ?? collectionNameOf(input.modelName);
@@ -632,7 +653,8 @@ function recordDbOp(
     meta: {
       collection,
       operation: input.operation,
-      access: input.access,
+      access: input.effect === 'read' ? 'read' : 'write',
+      effect: input.effect,
       model: input.modelName,
     },
   });
@@ -640,7 +662,7 @@ function recordDbOp(
   graph.addEdge({
     from: opId,
     to: ids.collection(collection),
-    kind: input.access === 'read' ? 'reads' : 'writes',
+    kind: input.effect === 'read' ? 'reads' : 'writes',
   });
 }
 
@@ -709,7 +731,7 @@ function declareExpressRoutes(
       ? (file.getVariableDeclaration(handler.getText())?.getInitializer() ??
         file.getFunction(handler.getText()))
       : handler;
-    if (body) linkDbOperations(body, file, rel, graph, handlerId);
+    if (body) linkDbOperations(body, file, rel, graph, handlerId, config.collectionAliases);
   }
 }
 

@@ -8,6 +8,8 @@ import {
 } from './analyzer/frontend.js';
 import { collectConstants, type ConstantTable } from './analyzer/constants.js';
 import { analyzeFileRoutes } from './analyzer/fileroutes.js';
+import { analyzeServerModules } from './analyzer/servermodules.js';
+import { collectionAliasesOf } from './analyzer/dbaccess.js';
 import { detectProjects, loadProject, type ScanOptions } from './analyzer/project.js';
 import { linkDataLineage, linkFrontendToBackend, type SeamResult } from './analyzer/seam.js';
 
@@ -129,11 +131,23 @@ export function scan(options: ScanOptions & FlowLensConfig): ScanResult {
         : detectProjects(loaded.root),
   });
 
+  /**
+   * Built before any query is linked, because the native-driver wrapper puts the
+   * collection literals in a different file from the queries.
+   */
+  const collectionAliases = collectionAliasesOf(loaded);
+
   analyzeFrontend(loaded, graph, frontendConfig);
-  analyzeBackend(loaded, graph, backendConfig);
+  analyzeBackend(loaded, graph, { ...backendConfig, collectionAliases });
   // File-system routes (Next.js `pages/api`, App Router, Nuxt) are a backend
   // with no controllers to find, so they need their own pass.
-  const fileRoutes = analyzeFileRoutes(loaded, graph, { apiPrefixes });
+  const fileRoutes = analyzeFileRoutes(loaded, graph, { apiPrefixes, collectionAliases });
+  /**
+   * Plain modules holding the queries (`lib/db/store.ts`), which neither the
+   * Nest pass nor the route pass reaches. Must run after `analyzeFileRoutes`,
+   * because it joins the route handlers those declared to the module functions.
+   */
+  analyzeServerModules(loaded, graph, collectionAliases);
   const seam = linkFrontendToBackend(graph);
   const lineageLinks = linkDataLineage(graph);
 

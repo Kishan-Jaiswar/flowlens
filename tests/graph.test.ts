@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FlowGraph, collectionNameOf, dbAccessOf, pluralize } from '@flowlens/core';
+import { FlowGraph, collectionNameOf, dbAccessOf, dbEffectOf, pluralize } from '@flowlens/core';
 
 function sample(): FlowGraph {
   const graph = new FlowGraph({ root: '/tmp/example' });
@@ -113,6 +113,26 @@ describe('mongo naming', () => {
     expect(pluralize('diagnosis')).toBe('diagnoses');
   });
 
+  /**
+   * Checked against mongoose's own `lib/helpers/pluralize.js`, whose f-rule is
+   * `/(?:([^f])fe|([lr])f)$/`. It is deliberately narrower than English: only
+   * `[lr]f` and non-f + `fe` become `ves`. Guessing the wider `/(f|fe)$/` named
+   * a collection that does not exist (`Staff` → `stafves`).
+   */
+  it('only turns f into ves where mongoose does', () => {
+    // [lr]f and [^f]fe -> ves
+    expect(pluralize('shelf')).toBe('shelves');
+    expect(pluralize('calf')).toBe('calves');
+    expect(pluralize('knife')).toBe('knives');
+    expect(pluralize('life')).toBe('lives');
+    expect(pluralize('wife')).toBe('wives');
+    // everything else just takes an s, however wrong that looks
+    expect(pluralize('staff')).toBe('staffs');
+    expect(pluralize('roof')).toBe('roofs');
+    expect(pluralize('chief')).toBe('chiefs');
+    expect(pluralize('leaf')).toBe('leafs');
+  });
+
   it('derives a collection name from a model name', () => {
     expect(collectionNameOf('Patient')).toBe('patients');
     expect(collectionNameOf('AuditLog')).toBe('auditlogs');
@@ -129,5 +149,35 @@ describe('mongo naming', () => {
     expect(dbAccessOf('lean')).toBeUndefined();
     expect(dbAccessOf('sort')).toBeUndefined();
     expect(dbAccessOf('limit')).toBeUndefined();
+    expect(dbEffectOf('lean')).toBeUndefined();
+  });
+
+  /**
+   * "Writes `patients`" does not say whether a patient was created, edited or
+   * removed, which is the difference a reviewer actually needs.
+   */
+  it('separates inserts, updates and deletes instead of calling them all writes', () => {
+    expect(dbEffectOf('aggregate')).toBe('read');
+    expect(dbEffectOf('create')).toBe('create');
+    expect(dbEffectOf('insertMany')).toBe('create');
+    expect(dbEffectOf('findByIdAndUpdate')).toBe('update');
+    expect(dbEffectOf('replaceOne')).toBe('update');
+    expect(dbEffectOf('deleteMany')).toBe('delete');
+    expect(dbEffectOf('findByIdAndRemove')).toBe('delete');
+  });
+
+  it("admits when an operation's effect is not knowable from the call site", () => {
+    // `save()` inserts a new document and updates an existing one; `bulkWrite`
+    // can do both plus delete. Guessing either way would be a wrong finding.
+    expect(dbEffectOf('save')).toBe('write');
+    expect(dbEffectOf('bulkWrite')).toBe('write');
+  });
+
+  it('keeps the coarse read/write split agreeing with the effect', () => {
+    for (const operation of ['find', 'create', 'updateOne', 'deleteOne', 'save', 'bulkWrite']) {
+      const effect = dbEffectOf(operation);
+      const expected = effect === 'read' ? 'read' : 'write';
+      expect(dbAccessOf(operation)).toBe(expected);
+    }
   });
 });

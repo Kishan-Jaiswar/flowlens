@@ -459,3 +459,183 @@ describe('diagnostics', () => {
     expect(result.diagnostics.join(' ')).toContain('no components');
   });
 });
+
+/**
+ * Nest lets a class take its dependencies two ways, and a real codebase mixes
+ * them: some models arrive as constructor parameters, others as decorated class
+ * properties. Reading only the constructor made every query through a
+ * property-injected model vanish — the flow reached the service and stopped, so
+ * the whole data layer went missing for that endpoint.
+ */
+describe('property injection', () => {
+  const project = mkdtempSync(join(tmpdir(), 'flowlens-propinject-'));
+
+  mkdirSync(join(project, 'src'), { recursive: true });
+  writeFileSync(
+    join(project, 'src', 'doctor.controller.ts'),
+    `import { Controller, Get } from '@nestjs/common';
+     import { DoctorService } from './doctor.service';
+     @Controller('doctor')
+     export class DoctorController {
+       constructor(private readonly doctorService: DoctorService) {}
+       @Get('patients')
+       getPatients() { return this.doctorService.getPatientsV2(); }
+     }`,
+    'utf8',
+  );
+  writeFileSync(
+    join(project, 'src', 'doctor.service.ts'),
+    `import { Injectable } from '@nestjs/common';
+     import { InjectModel } from '@nestjs/mongoose';
+     import { Model } from 'mongoose';
+     @Injectable()
+     export class DoctorService {
+       // Constructor injection: the form that always worked.
+       constructor(
+         @InjectModel(Doctor.name) private doctorModel: Model<DoctorDocument>,
+       ) {}
+
+       // Property injection: the form that used to be invisible.
+       @InjectModel(DoctorPatient.name)
+       private readonly doctorPatientModel: Model<DoctorPatientDocument>;
+
+       async getPatientsV2() {
+         const owner = await this.doctorModel.findById('x');
+         return this.doctorPatientModel.aggregate([]).exec();
+       }
+     }`,
+    'utf8',
+  );
+
+  // A flow starts at a user action, so the fixture needs a frontend for the
+  // "reaches the collection" assertion to have anything to walk.
+  writeFileSync(
+    join(project, 'src', 'Patients.jsx'),
+    `import axios from 'axios';
+     export function Patients() {
+       const loadPatients = () => axios.get('/doctor/patients');
+       return <button onClick={loadPatients}>Load Patients</button>;
+     }`,
+    'utf8',
+  );
+
+  const result = scan({ root: project, apiPrefixes: [] });
+  const collections = result.graph.nodesOfKind('collection').map((n) => n.label);
+
+  it('finds models injected as decorated class properties', () => {
+    expect(collections).toContain('doctorpatients');
+  });
+
+  it('still finds models injected through the constructor', () => {
+    expect(collections).toContain('doctors');
+  });
+
+  it('carries the property-injected query into the flow, not just the graph', () => {
+    const flow = resolveFlows(result.graph, { includeLocalOnly: true }).find(
+      (f) => f.label === 'Load Patients',
+    );
+    // The endpoint's flow has to reach the collection, which is the thing a
+    // graph-only assertion would not catch.
+    expect(flow?.collections.map((c) => c.collection)).toContain('doctorpatients');
+  });
+
+  it('records the aggregate as a read', () => {
+    const op = result.graph
+      .nodesOfKind('db-op')
+      .find((n) => n.label === 'doctorpatients.aggregate');
+    expect(op?.meta?.['access']).toBe('read');
+  });
+
+  rmSync(project, { recursive: true, force: true });
+});
+
+/**
+ * The point of the data layer is answering "where did this come from, and what
+ * happened to it". A flow that reports `patients: write` has not answered that:
+ * inserting a patient, editing one and deleting one are different facts.
+ */
+describe('collection effects in a flow', () => {
+  const project = mkdtempSync(join(tmpdir(), 'flowlens-effects-'));
+
+  mkdirSync(join(project, 'src'), { recursive: true });
+  writeFileSync(
+    join(project, 'src', 'Admin.jsx'),
+    `import axios from 'axios';
+     export function Admin() {
+       const purge = () => axios.post('/admin/purge');
+       return <button onClick={purge}>Purge</button>;
+     }`,
+    'utf8',
+  );
+  writeFileSync(
+    join(project, 'src', 'admin.controller.ts'),
+    `import { Controller, Post } from '@nestjs/common';
+     import { AdminService } from './admin.service';
+     @Controller('admin')
+     export class AdminController {
+       constructor(private readonly adminService: AdminService) {}
+       @Post('purge')
+       purge() { return this.adminService.purge(); }
+     }`,
+    'utf8',
+  );
+  writeFileSync(
+    join(project, 'src', 'admin.service.ts'),
+    `import { Injectable } from '@nestjs/common';
+     import { InjectModel } from '@nestjs/mongoose';
+     import { Model } from 'mongoose';
+     @Injectable()
+     export class AdminService {
+       constructor(
+         @InjectModel(Patient.name) private patientModel: Model<PatientDocument>,
+         @InjectModel(AuditLog.name) private auditLogModel: Model<AuditLogDocument>,
+         @InjectModel(Session.name) private sessionModel: Model<SessionDocument>,
+       ) {}
+       async purge() {
+         const stale = await this.patientModel.find({ stale: true });
+         await this.patientModel.updateMany({ stale: true }, { archived: true });
+         await this.sessionModel.deleteMany({ stale: true });
+         await this.auditLogModel.create({ action: 'purge' });
+         return stale.length;
+       }
+     }`,
+    'utf8',
+  );
+
+  const result = scan({ root: project, apiPrefixes: [] });
+  const flow = resolveFlows(result.graph, { includeLocalOnly: true }).find(
+    (candidate) => candidate.label === 'Purge',
+  );
+  const byEffect = (effect: string) =>
+    (flow?.collections ?? []).filter((c) => c.effect === effect).map((c) => c.collection);
+
+  it('says which collection the data came from', () => {
+    expect(byEffect('read')).toEqual(['patients']);
+  });
+
+  it('separates the insert, the update and the delete', () => {
+    expect(byEffect('create')).toEqual(['auditlogs']);
+    expect(byEffect('update')).toEqual(['patients']);
+    expect(byEffect('delete')).toEqual(['sessions']);
+  });
+
+  it('reports one collection twice when an action both reads and writes it', () => {
+    // `patients` is read and updated; collapsing that to a single row would
+    // lose the read, which is where the data on screen came from.
+    const patients = (flow?.collections ?? []).filter((c) => c.collection === 'patients');
+    expect(patients.map((c) => c.effect).sort()).toEqual(['read', 'update']);
+  });
+
+  it('keeps access agreeing with effect for older consumers', () => {
+    for (const entry of flow?.collections ?? []) {
+      expect(entry.access).toBe(entry.effect === 'read' ? 'read' : 'write');
+    }
+  });
+
+  it('lists reads before mutations', () => {
+    // Reads first is what makes the panel readable top to bottom.
+    expect(flow?.collections[0]?.effect).toBe('read');
+  });
+
+  rmSync(project, { recursive: true, force: true });
+});

@@ -94,8 +94,8 @@ BACKEND
 DATABASE
 ├── [db op]       patients.findById            read
 ├── [db op]       medicines.countDocuments     read
-├── [db op]       prescriptions.create         write
-└── [db op]       auditlogs.create             write
+├── [db op]       prescriptions.create         create
+└── [db op]       auditlogs.create             create
 
 Risk factors
 ────────────
@@ -451,6 +451,95 @@ not repeated: `Submit Prescription` stays as it is.
 Both halves stay separate in the graph, so a flow keeps `label` (the words on the
 element), `screen`, and the composed `title` that lists and tiles show. `--json`
 returns all three.
+
+---
+
+## What one action shows you
+
+Every action resolves to a chain, and each step carries its own contract — not
+just what ran next, but what it ran _with_:
+
+| Layer       | What you get                                                                                       |
+| ----------- | -------------------------------------------------------------------------------------------------- |
+| User action | The words on the element, the component that renders it, the file and line                         |
+| Frontend    | Handlers in the chain, the state each one sets and reads, the custom hooks in play                 |
+| Network     | Method and path, **query parameters**, **request body keys** and the identifier each came from     |
+| Backend     | Route → controller → service methods, and the **DTO** the route validates against, with its fields |
+| Database    | The query, its effect, the **schema** behind it with its fields, and the collection                |
+
+The left pane draws the chain; clicking any step opens its contract in the side
+panel; the panel's default view lists the whole chain in execution order.
+`flowlens flow <id>` prints the same thing as a tree, and `--markdown` adds
+**What each request sends** and **Collections touched** tables.
+
+### Stacks where the chain hides in the middle
+
+The layers are usually all findable; what breaks is the _join_ between them.
+Three joins are handled explicitly because each one silently emptied a layer:
+
+- **Queries in a plain module.** `app/api/stock/route.ts` calls
+  `adjustStock()` from `lib/db/store.ts`. Neither the Nest pass (no decorators)
+  nor the route pass (wrong file) reaches it, so the queries are followed into
+  the module and attributed to the function that makes them.
+- **Collections behind a factory.** With the native driver, `const { medicines }
+= await getCollections()` is a destructured binding whose literal lives in
+  another file. The `name: db.collection('x')` pairs are collected project-wide,
+  and the literal is read rather than the property name conventionalised —
+  `smsTemplates: db.collection('smsendpointmaps')` is why.
+- **Requests inside a data hook.** React Query's idiom is `const create =
+useCreateMedicine()` then `create.mutate(values)`, so the request is two hops
+  from the click and the middle hop is a method on a returned object. Receivers
+  are resolved through the hook alias table.
+
+A route module exporting several verbs gets **one handler per verb**, so a flow
+through the `PUT` does not inherit the `DELETE`'s query. And a `useQuery`-style
+hook counts as a mount action, because it fetches on render — unlike
+`useMutation`, which waits for a click.
+
+### Every action, including the ones that are not clicks
+
+`onClick`, `onSubmit`, `onPress` and `onDoubleClick` are the deliberate
+gestures. But a file upload is an `onChange`, an autosave is an `onBlur`, and a
+search is often an `onKeyDown` — so those are detected too, along with
+`onFocus`, `onInput`, `onKeyUp`, `onKeyPress`, `onSelect`, `onToggle`, `onDrop`,
+`onClose`, `onCancel`, `onOk`, `onSearch`, `onFinish`, `onMouseDown`,
+`onMouseUp` and `onScroll`.
+
+They are marked `input` rather than `gesture` in the node's `eventClass`. Most
+`onChange` handlers only set local state, and those stay behind the same
+**include local-only actions** filter as any other purely local interaction — so
+the default list is still the actions that reach the backend, without the
+keystroke noise, and nothing is silently missing.
+
+---
+
+## Which collections, and what happened to them
+
+The data layer answers two questions, not one: where the data on screen came
+from, and what the action did to the database. So every query is labelled with
+its **effect** rather than a read/write flag:
+
+| Effect   | Meaning                         | Operations                                                                     |
+| -------- | ------------------------------- | ------------------------------------------------------------------------------ |
+| `read`   | Where the data came from        | `find`, `findOne`, `findById`, `aggregate`, `count*`, `distinct`, `exists`     |
+| `create` | Documents inserted              | `create`, `insertOne`, `insertMany`, `new Model(...).save()`                   |
+| `update` | Existing documents changed      | `updateOne`, `updateMany`, `replaceOne`, `findOneAndUpdate`, `find*AndReplace` |
+| `delete` | Documents removed               | `deleteOne`, `deleteMany`, `remove`, `find*AndDelete`, `findByIdAndRemove`     |
+| `write`  | A write whose effect is unknown | `save()` on an existing document, `bulkWrite()`                                |
+
+`write` is deliberately vague and deliberately kept: a bare `save()` inserts a
+new document and updates an existing one, and `bulkWrite` can do both plus
+delete, so the call site does not carry the answer. Naming one anyway would be a
+wrong finding rather than a missing one.
+
+A collection appears once **per effect**, so an action that reads `patients` and
+then edits them shows both — collapsing that into "writes patients" would lose
+where the data came from. `updateOne`/`updateMany` are reported as `update` even
+though `{ upsert: true }` can insert.
+
+The dashboard groups this above the database tiles, `flowlens flow` prints the
+effect beside each query, and a generated feature document gets a **Collections
+touched** table.
 
 ---
 
