@@ -2,6 +2,11 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Staged into packages/cli by scripts/prepack.mjs so `npm pack` can see them.
+packages/cli/dashboard/
+packages/cli/runtime/
+packages/*/LICENSE
+
 # FlowLens output, including recorded traces from a local app.
 .flowlens/
 

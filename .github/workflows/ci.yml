@@ -75,6 +75,32 @@ jobs:
       - name: Every command a user actually types
         run: npm run smoke
 
+  package:
+    name: install as a stranger (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # Every other job runs against the working tree, where the dashboard and
+      # the browser tracer simply exist. `npm pack` cannot reach outside a
+      # package directory, so a published CLI once shipped neither and answered
+      # `serve` with a 500 while all of CI stayed green. This packs the real
+      # tarballs, installs them into a throwaway project, and drives the result
+      # over HTTP — the only check that would have caught it.
+      - name: Pack, install elsewhere, and serve
+        run: npm run test:package
+
   launcher:
     name: launcher from a bare checkout (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

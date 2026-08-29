@@ -14,7 +14,8 @@ const packages = join(root, 'packages');
 
 let removed = 0;
 for (const name of readdirSync(packages)) {
-  for (const artifact of ['dist', 'tsconfig.tsbuildinfo']) {
+  // `dashboard`, `runtime` and `LICENSE` are staged by prepack.mjs, not by tsc.
+  for (const artifact of ['dist', 'tsconfig.tsbuildinfo', 'dashboard', 'runtime', 'LICENSE']) {
     const target = join(packages, name, artifact);
     try {
       rmSync(target, { recursive: true, force: true });

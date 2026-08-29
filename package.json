@@ -22,7 +22,9 @@
     "scan:example": "node bin/flowlens.mjs scan examples/crud",
     "flows:example": "node bin/flowlens.mjs flows examples/crud",
     "serve:example": "node bin/flowlens.mjs serve examples/crud",
-    "prepare": "node scripts/prepare.mjs"
+    "prepare": "node scripts/prepare.mjs",
+    "test:package": "node scripts/package-test.mjs",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
