@@ -407,17 +407,18 @@ scanned in 10.7s      339 URL constants resolved
 
 ## Commands
 
-| Command                         | What it answers                                  |
-| ------------------------------- | ------------------------------------------------ |
-| `flowlens init [project]`       | Where does this project keep its two halves?     |
-| `flowlens scan [project]`       | Build the graph, into a cache outside the repo.  |
-| `flowlens flows [project]`      | Which user actions reach the backend?            |
-| `flowlens flow <id>`            | Everything one click does, end to end.           |
-| `flowlens flow <id> --markdown` | Generate a living feature document.              |
-| `flowlens impact <symbol>`      | If I change this, what breaks?                   |
-| `flowlens doctor [project]`     | Broken API calls, dead endpoints, shared writes. |
-| `flowlens trace [project]`      | Merge recorded runtime spans into the graph.     |
-| `flowlens serve [project]`      | The dashboard.                                   |
+| Command                         | What it answers                                     |
+| ------------------------------- | --------------------------------------------------- |
+| `flowlens init [project]`       | Where does this project keep its two halves?        |
+| `flowlens scan [project]`       | Build the graph, into a cache outside the repo.     |
+| `flowlens flows [project]`      | Which user actions reach the backend?               |
+| `flowlens flow <id>`            | Everything one click does, end to end.              |
+| `flowlens flow <id> --markdown` | Generate a living feature document.                 |
+| `flowlens where <file>:<line>`  | What is this code for? Features running through it. |
+| `flowlens impact <symbol>`      | If I change this, what breaks?                      |
+| `flowlens doctor [project]`     | Broken API calls, dead endpoints, shared writes.    |
+| `flowlens trace [project]`      | Merge recorded runtime spans into the graph.        |
+| `flowlens serve [project]`      | The dashboard.                                      |
 
 Add `--json` to any command to get machine-readable output.
 
@@ -425,6 +426,45 @@ Add `--json` to any command to get machine-readable output.
 is piped or scripted (`--open` and `--no-open` override that). If port 4177 is
 busy it moves to the next free one and tells you — unless you asked for a
 specific `--port`, in which case a busy port is an error rather than a surprise.
+
+### What is this code for?
+
+`flow <id>` goes forward from a click. `where` goes the other way: you are
+reading line 20 of a file you did not write, and the question is not what the
+code does but which features break if you change it.
+
+```text
+$ flowlens where web/src/components/OrderForm.tsx:20 examples/crud
+
+Nearest declaration
+───────────────────
+  [api-call] POST /orders  line 16  (4 lines above)
+
+Features running through here (1)
+─────────────────────────────────
+feature       via                    endpoint      data                    risk  flow id
+────────────  ─────────────────────  ────────────  ──────────────────────  ────  ──────────────────────
+Submit Order  api-call POST /orders  POST /orders  customers, products +2  high  orderform-submit-order
+  ⚠ 1 high-risk feature depends on this
+  ⚠ reaches 4 collections
+
+Elsewhere in this file (3)
+──────────────────────────
+  line 35  Order form change (orderform-textarea-onchange)
+  line 43  Print Order (orderform-print-order)
+```
+
+No node is declared on line 20 — it is inside `handleSubmit`'s body — so the
+answer is the nearest declaration above it, and the output says so rather than
+pretending the hit was exact. A location can be a bare filename
+(`OrderForm.tsx`), an absolute path, or a Windows one; a basename that matches
+two files lists them instead of guessing, because every App Router project has a
+dozen `route.ts`.
+
+A `useState` field, a DTO or a schema field does not sit _on_ the execution path,
+so a match there is followed one hop out to the handler that uses it and marked
+`*`. That is the same one-hop rule the flow tree uses for `StepDetail`, and the
+same reason: `defines` walked transitively pulls in half the app.
 
 ### What a feature is called
 

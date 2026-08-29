@@ -29,6 +29,18 @@ command work — without leaving a mark on that project.
 
 ### Added
 
+- **`flowlens where <file>:<line>`** — the reverse lookup. `flow <id>` goes
+  forward from a click; this starts at a cursor position and reports every
+  user-visible feature whose execution path runs through it, with the endpoint,
+  the collections in reach and the risk. Two details make it usable rather than
+  merely correct: a line inside a function body resolves to the nearest
+  declaration _above_ it and says how far, rather than silently answering a
+  different question; and a match that is not itself on the execution path (a
+  `useState` field, a DTO, a schema field) is followed one hop along the
+  non-execution edges to a node that is — the same one-hop rule `StepDetail`
+  uses, and for the same reason. A bare basename is accepted only when
+  unambiguous, because every App Router project has a dozen `route.ts`.
+
 - Components that load their data on mount now get a synthetic `loads` action, so
   effect-driven fetches appear in `flows` instead of being unreachable. Tagged
   `event: 'mount'` and `synthetic: true` to distinguish them from a real DOM

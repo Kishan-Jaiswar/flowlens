@@ -43,6 +43,16 @@ flowlens('scan the example project', ['scan', PROJECT]);
 flowlens('list the flows', ['flows', PROJECT]);
 flowlens('doctor reports on the seam', ['doctor', PROJECT]);
 
+// The reverse lookup, in the two spellings that matter: a line inside a function
+// body (no node is declared there) and a bare basename.
+flowlens('where reports the features on a line', [
+  'where',
+  'web/src/components/OrderForm.tsx:20',
+  PROJECT,
+]);
+flowlens('where accepts a bare filename', ['where', 'OrderForm.tsx', PROJECT, '--json']);
+expectFailure('where refuses an unknown file', ['where', 'nope.tsx', PROJECT]);
+
 // A project named without any separator — the spelling that used to be
 // mistaken for a flow id and silently scanned the current directory instead.
 flowlens('scan a project named without a path separator', ['scan', 'crud'], {

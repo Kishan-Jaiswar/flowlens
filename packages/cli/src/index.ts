@@ -7,6 +7,7 @@ import { runInit } from './commands/init.js';
 import { runScan } from './commands/scan.js';
 import { runServe } from './commands/serve.js';
 import { runTrace } from './commands/trace.js';
+import { runWhere } from './commands/where.js';
 import { color } from './ui.js';
 
 const VERSION = '0.1.0';
@@ -22,6 +23,7 @@ ${color.bold('COMMANDS')}
   scan [project]          Read the source and build the flow graph
   flows [project]         List every user action that reaches the backend
   flow <id> [project]     Show one feature end to end (add --markdown for a doc)
+  where <file>:<line>     "What is this code for?" — features running through it
   impact <symbol>         "If I change this, what breaks?"
   doctor [project]        Broken API calls, dead endpoints, shared writes
   trace [project]         Merge recorded runtime spans into the graph
@@ -65,6 +67,7 @@ ${color.bold('EXAMPLES')}
   flowlens flows my-app
   flowlens flow create-customer my-app
   flowlens flow create-customer my-app --markdown --out docs/create-customer.md
+  flowlens where web/src/components/OrderForm.tsx:20 my-app
   flowlens impact CustomersService.create -p my-app
   flowlens serve my-app
 
@@ -220,6 +223,17 @@ export function main(argv = process.argv.slice(2)): number {
           markdown: values.markdown,
           ...(values.out ? { out: values.out } : {}),
         });
+      }
+
+      case 'where': {
+        const location = args[0];
+        if (!location) {
+          process.stderr.write(
+            `${color.red('error')} location required: flowlens where src/App.tsx:42\n`,
+          );
+          return 1;
+        }
+        return runWhere({ ...common, location });
       }
 
       case 'impact': {

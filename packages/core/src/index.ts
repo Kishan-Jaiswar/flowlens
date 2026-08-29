@@ -114,6 +114,19 @@ export {
   type RiskScore,
 } from './flow/resolve.js';
 export {
+  isWhereFailure,
+  parseLocation,
+  resolveGraphFile,
+  whereIs,
+  type Location,
+  type ResolvedFile,
+  type WhereFailure,
+  type WhereFlowHit,
+  type WhereNode,
+  type WhereOptions,
+  type WhereReport,
+} from './flow/where.js';
+export {
   renderFeatureDocument,
   renderFlowTree,
   renderTimings,

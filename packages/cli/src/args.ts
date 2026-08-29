@@ -17,10 +17,18 @@ import { existsSync, statSync } from 'node:fs';
  * instead of quietly scanning the wrong tree. For the two commands that do take
  * an argument, a positional is treated as a path if it looks like one or if it
  * exists on disk.
+ *
+ * `where` needs a third rule, because its argument *is* a path
+ * (`src/App.tsx:42`) and every heuristic above would claim it as a project
+ * root. Position decides instead: the first positional is the location, and
+ * anything after it is a root.
  */
 
 /** Commands whose first non-path positional is their own argument. */
 const COMMANDS_WITH_ARGUMENT = new Set(['flow', 'impact']);
+
+/** Commands whose first positional is their own argument even though it is a path. */
+const COMMANDS_WITH_LOCATION = new Set(['where']);
 
 /** Extensions FlowLens will accept as a single-file root. */
 const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'];
@@ -42,6 +50,14 @@ export function splitPositionals(
   rest: string[],
   options: SplitOptions = {},
 ): SplitPositionals {
+  if (COMMANDS_WITH_LOCATION.has(command)) {
+    const [location, ...tail] = rest;
+    return {
+      roots: [...tail],
+      args: location === undefined ? [] : [location],
+    };
+  }
+
   if (!COMMANDS_WITH_ARGUMENT.has(command)) {
     return { roots: [...rest], args: [] };
   }
