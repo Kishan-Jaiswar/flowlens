@@ -232,7 +232,7 @@ export function loadProject(options: ScanOptions): LoadedProject {
    *
    * With several roots the basename is prepended, so `pages/index.js` in two
    * different repos does not produce the same node id — and a developer reading
-   * `clinic-web/pages/index.js` immediately knows which repo it is.
+   * `shop-web/pages/index.js` immediately knows which repo it is.
    */
   const multiRoot = allRoots.length > 1;
   const labels = rootLabels(allRoots);

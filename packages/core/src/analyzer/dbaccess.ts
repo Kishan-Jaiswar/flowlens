@@ -11,14 +11,14 @@ import type { LoadedProject } from './project.js';
  * The native MongoDB driver is almost always wrapped:
  *
  *   // lib/db/mongo.ts
- *   return { medicines: db.collection('medicines'),
+ *   return { products: db.collection('products'),
  *            smsTemplates: db.collection('smsendpointmaps') }
  *
  *   // lib/db/store.ts
- *   const { medicines } = await getCollections()
- *   await medicines.updateOne(...)
+ *   const { products } = await getCollections()
+ *   await products.updateOne(...)
  *
- * `medicines` is then a destructured binding with no initializer to read, in a
+ * `products` is then a destructured binding with no initializer to read, in a
  * different file from the factory, so nothing local can resolve it — a real
  * project of this shape reported zero collections. The property names and their
  * literal collection names are collected once per scan instead.
@@ -134,7 +134,7 @@ export function collectionFor(
   file: SourceFile,
   aliases?: CollectionAliases,
 ): string | undefined {
-  // db.collection('patients').find(...)
+  // db.collection('customers').find(...)
   const explicitCollection = /collection\(\s*['"]([^'"]+)['"]\s*\)/.exec(receiver);
   if (explicitCollection?.[1]) return explicitCollection[1];
 
@@ -165,7 +165,7 @@ export function collectionFor(
     return collectionNameOf(head.replace(/(Model|Collection|Repo|Repository)$/, ''));
   }
 
-  // Imported: `import { PatientModel } from '../lib/models'`. The convention
+  // Imported: `import { CustomerModel } from '../lib/models'`. The convention
   // has to carry it, so require an explicit marker or PascalCase.
   if (/(Model|Collection)$/.test(head)) {
     return collectionNameOf(head.replace(/(Model|Collection)$/, ''));

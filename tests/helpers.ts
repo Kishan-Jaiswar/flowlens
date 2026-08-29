@@ -5,7 +5,7 @@ import { scan, type ScanResult } from '@flowlens/core';
 const here = dirname(fileURLToPath(import.meta.url));
 
 /** The bundled example app: Next-style React + NestJS + Mongoose, source only. */
-export const EXAMPLE_ROOT = resolve(here, '..', 'examples', 'clinic');
+export const EXAMPLE_ROOT = resolve(here, '..', 'examples', 'crud');
 
 let cached: ScanResult | undefined;
 

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(here, '..');
 const BIN = join(REPO, 'packages', 'cli', 'bin', 'flowlens.mjs');
-const PROJECT = join(REPO, 'examples', 'clinic');
+const PROJECT = join(REPO, 'examples', 'crud');
 
 /**
  * The dashboard and its API, exercised through the real CLI.
@@ -25,7 +25,7 @@ const base = `http://127.0.0.1:${PORT}`;
  * Artifacts go to a temp directory, explicitly.
  *
  * FlowLens defaults to a machine-local cache outside the project, so a test that
- * looked in `examples/clinic/.flowlens` would find nothing. Naming the paths here
+ * looked in `examples/crud/.flowlens` would find nothing. Naming the paths here
  * keeps the test hermetic — it neither reads nor pollutes the real user cache.
  */
 const ARTIFACTS = mkdtempSync(join(tmpdir(), 'flowlens-server-test-'));
@@ -114,12 +114,12 @@ describe('graph API', () => {
     const flows = await (await get('/api/flows')).json();
     expect(Array.isArray(flows)).toBe(true);
     const labels = flows.map((flow: { label: string }) => flow.label);
-    expect(labels).toContain('Submit Prescription');
+    expect(labels).toContain('Submit Order');
 
-    const submit = flows.find((flow: { label: string }) => flow.label === 'Submit Prescription');
+    const submit = flows.find((flow: { label: string }) => flow.label === 'Submit Order');
     expect(submit.steps.length).toBeGreaterThan(5);
     expect(submit.risk.level).toBeTypeOf('string');
-    expect(submit.endpoints).toContain('POST /prescriptions');
+    expect(submit.endpoints).toContain('POST /orders');
   });
 
   it('includes local-only actions when asked', async () => {
@@ -132,10 +132,10 @@ describe('graph API', () => {
     const doctor = await (await get('/api/doctor')).json();
     // The example ships a deliberate PUT/PATCH mismatch.
     expect(doctor.brokenCalls.map((c: { label: string }) => c.label)).toContain(
-      'PUT /patients/:param/archive',
+      'PUT /customers/:param/archive',
     );
     expect(doctor.sharedWrites.map((s: { collection: string }) => s.collection)).toContain(
-      'patients',
+      'customers',
     );
     expect(Array.isArray(doctor.deadEndpoints)).toBe(true);
   });
@@ -160,11 +160,11 @@ describe('graph API', () => {
   });
 
   it('renders a feature document as markdown', async () => {
-    const response = await get('/api/document?flow=prescriptionform-submit-prescription');
+    const response = await get('/api/document?flow=orderform-submit-order');
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('markdown');
     const document = await response.text();
-    expect(document).toContain('# Submit Prescription');
+    expect(document).toContain('# Submit Order');
     expect(document).toContain('## Execution path');
   });
 
@@ -182,10 +182,10 @@ describe('span collection', () => {
         traceId: 'server-test-1',
         spanId: 'ui-1',
         kind: 'ui-action',
-        name: 'Submit Prescription',
+        name: 'Submit Order',
         startedAt: 1_735_000_000_000,
         durationMs: 3,
-        attrs: { component: 'PrescriptionForm' },
+        attrs: { component: 'OrderForm' },
       },
       {
         v: 1,
@@ -193,10 +193,10 @@ describe('span collection', () => {
         spanId: 'client-1',
         parentSpanId: 'ui-1',
         kind: 'http-client',
-        name: 'POST /api/prescriptions',
+        name: 'POST /api/orders',
         startedAt: 1_735_000_000_003,
         durationMs: 120,
-        attrs: { httpMethod: 'POST', path: '/api/prescriptions', statusCode: 201 },
+        attrs: { httpMethod: 'POST', path: '/api/orders', statusCode: 201 },
       },
     ];
 
@@ -246,7 +246,7 @@ describe('rescan', () => {
     // runtime evidence for the route they exercised.
     await get('/api/rescan', { method: 'POST' });
     const flows = await (await get('/api/flows')).json();
-    const submit = flows.find((flow: { label: string }) => flow.label === 'Submit Prescription');
+    const submit = flows.find((flow: { label: string }) => flow.label === 'Submit Order');
     expect(['runtime', 'confirmed']).toContain(submit.evidence);
   });
 });

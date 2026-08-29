@@ -478,14 +478,14 @@ describe('tracer output merges into a scanned graph', () => {
 
     await new Promise<void>((resolve) => {
       flowlensHttp({ sink })(
-        { method: 'POST', originalUrl: '/api/patients', headers: {} },
+        { method: 'POST', originalUrl: '/api/customers', headers: {} },
         response,
         async () => {
           await traceMethod(
-            'PatientsService',
+            'CustomersService',
             'create',
             async () => {
-              const query = { mongooseCollection: { name: 'patients' } };
+              const query = { mongooseCollection: { name: 'customers' } };
               schema.find('updateOne', 'pre')?.call(query);
               schema.find('updateOne', 'post')?.call(query, {});
             },
@@ -501,11 +501,11 @@ describe('tracer output merges into a scanned graph', () => {
     const merge = mergeRuntimeTrace(result.graph, spans());
 
     expect(merge.matched).toBeGreaterThan(0);
-    const route = result.graph.nodesOfKind('route').find((n) => n.label === 'POST /patients');
+    const route = result.graph.nodesOfKind('route').find((n) => n.label === 'POST /customers');
     expect(route?.evidence).toBe('confirmed');
     expect(route?.timing?.count).toBe(1);
 
-    const flow = resolveFlows(result.graph).find((f) => f.label === 'Create Patient');
+    const flow = resolveFlows(result.graph).find((f) => f.label === 'Create Customer');
     expect(flow?.evidence).toBe('confirmed');
   });
 

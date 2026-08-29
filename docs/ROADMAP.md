@@ -96,8 +96,8 @@ live.
 
 An explanation layer over a verified graph:
 
-> "Explain how prescription creation works."
-> "What would break if I renamed `Patient.phone`?"
+> "Explain how order creation works."
+> "What would break if I renamed `Customer.phone`?"
 
 Ordered last on purpose. An LLM reading the repo directly guesses; an LLM reading
 a graph that has been confirmed by runtime traces cites. The graph is the

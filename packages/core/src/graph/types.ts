@@ -7,7 +7,7 @@
  */
 
 export type NodeKind =
-  /** A clickable/submittable thing in the UI: "Submit Prescription". */
+  /** A clickable/submittable thing in the UI: "Submit Order". */
   | 'ui-action'
   /** A React component. */
   | 'component'
@@ -15,11 +15,11 @@ export type NodeKind =
   | 'handler'
   /** A piece of frontend state (useState / useReducer field). */
   | 'state'
-  /** A custom hook (useCreatePrescription). */
+  /** A custom hook (useCreateOrder). */
   | 'hook'
-  /** An outbound HTTP call found in the frontend: POST /api/prescriptions. */
+  /** An outbound HTTP call found in the frontend: POST /api/orders. */
   | 'api-call'
-  /** A backend route declaration: POST /prescriptions. */
+  /** A backend route declaration: POST /orders. */
   | 'route'
   /** A backend controller class. */
   | 'controller'
@@ -31,7 +31,7 @@ export type NodeKind =
   | 'model'
   /** A physical database collection/table. */
   | 'collection'
-  /** A concrete database operation: patients.insertOne. */
+  /** A concrete database operation: customers.insertOne. */
   | 'db-op'
   /** A request validation object (DTO). */
   | 'dto'
@@ -65,7 +65,7 @@ export type EdgeKind =
   | 'defines'
   /** route -> dto, dto -> field */
   | 'validates'
-  /** field -> field: payload.name -> dto.name -> patients.name */
+  /** field -> field: payload.name -> dto.name -> customers.name */
   | 'flows-to';
 
 /** Which side of the app a node lives on. Drives the dashboard columns. */
@@ -106,7 +106,7 @@ export type Evidence = 'static' | 'runtime' | 'confirmed';
 export interface FlowNode {
   id: string;
   kind: NodeKind;
-  /** Human label shown in the graph: "Submit Prescription", "POST /patients". */
+  /** Human label shown in the graph: "Submit Order", "POST /customers". */
   label: string;
   source?: SourceRef;
   evidence: Evidence;
@@ -136,7 +136,7 @@ export interface FlowEdge {
  * - *inclusive* (`avgMs`) — wall clock for this step and everything it called.
  *   "The request took 355ms."
  * - *exclusive* (`avgSelfMs`) — time spent in this step itself, with children
- *   subtracted. "82ms of that was the medicines query."
+ *   subtracted. "82ms of that was the products query."
  *
  * Only exclusive times may be summed. Adding inclusive times across a nested
  * trace counts the same milliseconds once per level of nesting.

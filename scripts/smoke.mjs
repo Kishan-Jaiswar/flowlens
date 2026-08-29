@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = join(ROOT, 'packages', 'cli', 'bin', 'flowlens.mjs');
-const PROJECT = join(ROOT, 'examples', 'clinic');
+const PROJECT = join(ROOT, 'examples', 'crud');
 const PORT = Number(process.env['FLOWLENS_SMOKE_PORT'] ?? 4188);
 
 const temp = mkdtempSync(join(tmpdir(), 'flowlens-smoke-'));
@@ -34,7 +34,7 @@ process.stdout.write(
 
 // A trace left behind by an earlier run would change what `trace` reports.
 // FlowLens keeps artifacts in a machine-local cache, never in the project, so
-// there is nothing to clean up inside examples/clinic. Assert that instead.
+// there is nothing to clean up inside examples/crud. Assert that instead.
 assertNoArtifactsIn(PROJECT);
 
 flowlens('the version prints', ['--version']);
@@ -45,7 +45,7 @@ flowlens('doctor reports on the seam', ['doctor', PROJECT]);
 
 // A project named without any separator — the spelling that used to be
 // mistaken for a flow id and silently scanned the current directory instead.
-flowlens('scan a project named without a path separator', ['scan', 'clinic'], {
+flowlens('scan a project named without a path separator', ['scan', 'crud'], {
   cwd: join(ROOT, 'examples'),
 });
 
@@ -55,7 +55,7 @@ expectFailure('a missing project is an error, not a silent success', ['scan', 'n
 const markdown = join(temp, 'feature.md');
 flowlens('generate a feature document', [
   'flow',
-  'prescriptionform-submit-prescription',
+  'orderform-submit-order',
   PROJECT,
   '--markdown',
   '--out',

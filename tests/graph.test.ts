@@ -5,10 +5,10 @@ function sample(): FlowGraph {
   const graph = new FlowGraph({ root: '/tmp/example' });
   graph.addNode({ id: 'action', kind: 'ui-action', label: 'Save' });
   graph.addNode({ id: 'handler', kind: 'handler', label: 'Form.handleSave' });
-  graph.addNode({ id: 'call', kind: 'api-call', label: 'POST /patients' });
-  graph.addNode({ id: 'route', kind: 'route', label: 'POST /patients' });
-  graph.addNode({ id: 'method', kind: 'method', label: 'PatientsService.create' });
-  graph.addNode({ id: 'collection', kind: 'collection', label: 'patients' });
+  graph.addNode({ id: 'call', kind: 'api-call', label: 'POST /customers' });
+  graph.addNode({ id: 'route', kind: 'route', label: 'POST /customers' });
+  graph.addNode({ id: 'method', kind: 'method', label: 'CustomersService.create' });
+  graph.addNode({ id: 'collection', kind: 'collection', label: 'customers' });
   graph.addEdge({ from: 'action', to: 'handler', kind: 'triggers' });
   graph.addEdge({ from: 'handler', to: 'call', kind: 'requests' });
   graph.addEdge({ from: 'call', to: 'route', kind: 'handled-by' });
@@ -30,22 +30,22 @@ describe('FlowGraph', () => {
     graph.addNode({
       id: 'call',
       kind: 'api-call',
-      label: 'POST /patients',
+      label: 'POST /customers',
       meta: { httpMethod: 'POST' },
     });
     graph.addNode({
       id: 'call',
       kind: 'api-call',
-      label: 'POST /patients',
-      meta: { path: '/patients' },
+      label: 'POST /customers',
+      meta: { path: '/customers' },
     });
-    expect(graph.node('call')?.meta).toEqual({ httpMethod: 'POST', path: '/patients' });
+    expect(graph.node('call')?.meta).toEqual({ httpMethod: 'POST', path: '/customers' });
   });
 
   it('upgrades static + runtime evidence to confirmed', () => {
     const graph = sample();
     expect(graph.node('route')?.evidence).toBe('static');
-    graph.addNode({ id: 'route', kind: 'route', label: 'POST /patients', evidence: 'runtime' });
+    graph.addNode({ id: 'route', kind: 'route', label: 'POST /customers', evidence: 'runtime' });
     expect(graph.node('route')?.evidence).toBe('confirmed');
   });
 
@@ -105,8 +105,8 @@ describe('FlowGraph', () => {
 
 describe('mongo naming', () => {
   it('pluralises the way mongoose does', () => {
-    expect(pluralize('patient')).toBe('patients');
-    expect(pluralize('prescription')).toBe('prescriptions');
+    expect(pluralize('customer')).toBe('customers');
+    expect(pluralize('order')).toBe('orders');
     expect(pluralize('history')).toBe('histories');
     expect(pluralize('address')).toBe('addresses');
     expect(pluralize('person')).toBe('people');
@@ -134,9 +134,9 @@ describe('mongo naming', () => {
   });
 
   it('derives a collection name from a model name', () => {
-    expect(collectionNameOf('Patient')).toBe('patients');
+    expect(collectionNameOf('Customer')).toBe('customers');
     expect(collectionNameOf('AuditLog')).toBe('auditlogs');
-    expect(collectionNameOf('MedicineStock')).toBe('medicinestocks');
+    expect(collectionNameOf('ProductStock')).toBe('productstocks');
   });
 
   it('classifies reads and writes', () => {
@@ -153,7 +153,7 @@ describe('mongo naming', () => {
   });
 
   /**
-   * "Writes `patients`" does not say whether a patient was created, edited or
+   * "Writes `customers`" does not say whether a customer was created, edited or
    * removed, which is the difference a reviewer actually needs.
    */
   it('separates inserts, updates and deletes instead of calling them all writes', () => {

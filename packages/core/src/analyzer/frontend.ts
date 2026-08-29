@@ -127,7 +127,7 @@ export interface FrontendConfig {
    * Wrapper functions whose HTTP verb is part of the function name and whose
    * path arrives in an options object:
    *
-   *   getRequest({ url: getPatientsList, auth: true })
+   *   getRequest({ url: getCustomersList, auth: true })
    *   patchRequestNoLoader({ url, body })
    *   postRequestV3({ url, body })
    *
@@ -138,8 +138,8 @@ export interface FrontendConfig {
    *
    * Capture group 1 must be the HTTP verb. Matched case-insensitively, and the
    * verb may appear anywhere in the name, so a wrapper family that prefixes or
-   * infixes a product name (`abhaPostRequest`, `postAiRequest`,
-   * `MedisageGetRequest`) is picked up without configuration.
+   * infixes a product name (`crmPostRequest`, `postAiRequest`,
+   * `AcmeGetRequest`) is picked up without configuration.
    */
   requestFunctionPattern: string;
   /** Option keys read as the request path, in priority order. */
@@ -181,10 +181,10 @@ interface PendingCall {
 }
 
 /**
- * `const { createPatient } = useCreatePatient()`.
+ * `const { createCustomer } = useCreateCustomer()`.
  *
  * Without this, the most common React data-fetching idiom breaks the chain:
- * the handler calls `createPatient`, which is not a hook name and not declared
+ * the handler calls `createCustomer`, which is not a hook name and not declared
  * anywhere, so the flow would stop at the handler and never reach the API call.
  */
 interface PendingAlias {
@@ -197,7 +197,7 @@ interface DeclaredSymbol {
   id: string;
   /**
    * `module-fn` is a plain exported function — a service-layer wrapper such as
-   * `export async function fetchPatients()`. Its node is created only if it
+   * `export async function fetchCustomers()`. Its node is created only if it
    * turns out to participate in a flow; see `pruneUnusedModuleFunctions`.
    */
   kind: 'hook' | 'component' | 'handler' | 'module-fn';
@@ -293,8 +293,8 @@ function analyzeFrontendFile(
     /**
      * Any other top-level function.
      *
-     * This is the service-layer shape: `export async function fetchPatients()`
-     * in `src/api/patients.ts`, called from a component's handler. Without it,
+     * This is the service-layer shape: `export async function fetchCustomers()`
+     * in `src/api/customers.ts`, called from a component's handler. Without it,
      * the chain stops at the handler and the API call floats free — which is how
      * a project whose requests live one module away looks like it makes none.
      *
@@ -504,7 +504,7 @@ function analyzeComponentBody(
 
     /**
      * "Submit" alone identifies nothing in an app with fifteen of them, so the
-     * node also carries where it lives — `Prescription · Submit`. `label` stays
+     * node also carries where it lives — `Order · Submit`. `label` stays
      * the words on the element, which is what a text search looks for.
      */
     const place = screenOf(rel, componentName);
@@ -584,7 +584,7 @@ function setterName(state: string): string {
 
 /**
  * Label a user action the way the user would describe it.
- * Text child first ("Submit Prescription"), then labelling props, then the tag.
+ * Text child first ("Submit Order"), then labelling props, then the tag.
  */
 function actionLabel(attribute: JsxAttribute, propName: string, handlerName?: string): string {
   const element = attribute.getFirstAncestor(
@@ -604,7 +604,7 @@ function actionLabel(attribute: JsxAttribute, propName: string, handlerName?: st
       if (text) return text;
 
       // `<form onSubmit={...}>` has no text of its own — the user identifies it
-      // by its submit button ("Create Patient"), so borrow that label.
+      // by its submit button ("Create Customer"), so borrow that label.
       if (propName === 'onSubmit') {
         for (const descendant of parent.getDescendantsOfKind(SyntaxKind.JsxElement)) {
           const tagName = descendant.getOpeningElement().getTagNameNode().getText();
@@ -633,7 +633,7 @@ function actionLabel(attribute: JsxAttribute, propName: string, handlerName?: st
    * Text from a small subtree: `<div onClick={...}><p>Preview</p></div>`.
    *
    * Bounded by size, because the same pattern wraps whole cards and sections —
-   * and "Preview" is a label while the first paragraph of a patient record is
+   * and "Preview" is a label while the first paragraph of a customer record is
    * not.
    */
   if (Node.isJsxOpeningElement(element)) {
@@ -866,7 +866,7 @@ export function readHttpCall(
 }
 
 /**
- * `getRequest({ url: getPatientsList, params: `/${id}` })`
+ * `getRequest({ url: getCustomersList, params: `/${id}` })`
  *
  * The verb comes from the function name and the path from the options object.
  * This is the shape most house-built API layers use, and the one that made a
@@ -880,7 +880,7 @@ function readWrapperCall(
   resolve: ((name: string) => string | undefined) | undefined,
 ): DetectedRequest | undefined {
   // Case-insensitive: the verb shows up as `get`, `Get` and `GET` across the
-  // wrapper families real codebases grow (`abhaPostRequest`, `MedisageGetRequest`).
+  // wrapper families real codebases grow (`crmPostRequest`, `AcmeGetRequest`).
   const match = new RegExp(config.requestFunctionPattern, 'i').exec(member);
   const verb = match?.[1]?.toUpperCase();
   if (!verb || !isHttpMethod(verb)) return undefined;
@@ -934,7 +934,7 @@ function readOption(
 /**
  * Append a `params`-style suffix when it extends the *path*.
  *
- * `params: `/${id}`` makes `/doctor/patients` into `/doctor/patients/:id`,
+ * `params: `/${id}`` makes `/admin/customers` into `/admin/customers/:id`,
  * which is a different route. A query string (`?from=x`) does not change the
  * route, so it is dropped.
  */
@@ -1190,7 +1190,7 @@ function ownerComponentName(node: Node): string | undefined {
  *
  * A great many screens fetch their data from `useEffect` rather than from a
  * click, so the work is triggered by the component appearing, not by the user
- * pressing anything. Those are still features — "the appointment screen loads
+ * pressing anything. Those are still features — "the shipment screen loads
  * its diseases" is exactly what someone tracing a flow wants to find — but with
  * no `ui-action` at the head of the chain they were invisible to `flows`.
  *
@@ -1210,8 +1210,8 @@ function addMountActions(graph: FlowGraph): void {
     const onMount = graph
       .successors(component.id, ['calls'])
       /**
-       * Deferred hooks are excluded. `const { createPatient } =
-       * useCreatePatient()` in the body is a declaration, not a request: the
+       * Deferred hooks are excluded. `const { createCustomer } =
+       * useCreateCustomer()` in the body is a declaration, not a request: the
        * hook hands back a function that some handler calls later, so counting it
        * would invent a mount-time fetch for every component holding a mutation.
        *
@@ -1240,9 +1240,9 @@ function addMountActions(graph: FlowGraph): void {
         action: label,
         screen: place.screen,
         /**
-         * `Patient detail · Upcoming appointment loads`. One file can define
+         * `Customer detail · Upcoming shipment loads`. One file can define
          * several components, and two of them fetching on mount would otherwise
-         * produce two tiles reading "Patient detail loads".
+         * produce two tiles reading "Customer detail loads".
          */
         title: composeTitle(place.screen, `${humanizeName(component.label)} ${label}`),
         ...(place.page ? { page: place.page } : {}),
@@ -1278,7 +1278,7 @@ function resolvePendingCalls(
   const touched = new Set<string>();
 
   for (const call of pending) {
-    // `createPatient()` in this file may really mean `useCreatePatient()`.
+    // `createCustomer()` in this file may really mean `useCreateCustomer()`.
     const aliased = aliasTable.get(`${call.file}::${call.name}`);
     // A receiver is only ever a hook result; anything else is not a call edge.
     if (call.receiverOnly && !aliased) continue;
@@ -1307,7 +1307,7 @@ function resolvePendingCalls(
  * Drop module functions that lead nowhere.
  *
  * Declaring every top-level function lets FlowLens follow
- * `handler -> fetchPatients -> axios.post`, but it also drags in ordinary
+ * `handler -> fetchCustomers -> axios.post`, but it also drags in ordinary
  * helpers that merely call each other. Anything that cannot reach an API call
  * is not part of a feature flow, so it is removed rather than left to clutter
  * the graph and the impact counts.

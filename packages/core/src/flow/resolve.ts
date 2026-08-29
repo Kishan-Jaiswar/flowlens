@@ -61,7 +61,7 @@ export interface FlowStep {
 export interface StepDetail {
   /** Component that renders a ui-action. */
   component?: string;
-  /** State a handler assigns to (`setPatients`) and reads. */
+  /** State a handler assigns to (`setCustomers`) and reads. */
   statesWritten?: string[];
   statesRead?: string[];
   /** Custom hooks a handler or component calls. */
@@ -95,18 +95,18 @@ export interface CollectionAccess {
 }
 
 export interface FeatureFlow {
-  /** Stable, URL-safe id: `create-patient`. */
+  /** Stable, URL-safe id: `create-customer`. */
   id: string;
   /** The words on the element the user clicks: `Submit`. */
   label: string;
   /**
-   * Label plus where it lives: `Prescription · Submit`.
+   * Label plus where it lives: `Order · Submit`.
    *
    * What every list and tile shows, because `Submit` on its own does not tell a
    * reader which of the app's fifteen submits this is.
    */
   title: string;
-  /** The part of the product this action belongs to: `Prescription`. */
+  /** The part of the product this action belongs to: `Order`. */
   screen?: string;
   component?: string;
   event?: string;
@@ -307,7 +307,7 @@ export function resolveFlow(graph: FlowGraph, entryNodeId: string): FeatureFlow 
  *
  * There is one api-call node per method+path, shared by every caller in the app,
  * so its own `source` is just the first site the scan read. Left alone, a click
- * in `patient_detail` showed its network step as living in
+ * in `customer_detail` showed its network step as living in
  * `components/RequestPaymentPopup.js` — code on a different screen entirely,
  * which is exactly how a correct flow comes to look like a dump of the whole
  * page. The `requests` edge knows better: it was written at the real call site.
@@ -340,7 +340,7 @@ function attributeCallSites(
 }
 
 /**
- * One entry per collection *per effect*, so a flow that inserts into `patients`
+ * One entry per collection *per effect*, so a flow that inserts into `customers`
  * and also edits them reads as two facts rather than one vague "writes".
  *
  * Ordered by effect, not alphabetically: reads first, because that is where the

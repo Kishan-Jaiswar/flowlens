@@ -45,7 +45,7 @@ const ROUTE_DECORATORS: Record<string, HttpMethod | 'ALL'> = {
  * Names that may hold an Express/Fastify router — but only in a file that
  * actually imports one.
  *
- * Without that guard, a frontend HTTP client (`api.post('/patients', body)`)
+ * Without that guard, a frontend HTTP client (`api.post('/customers', body)`)
  * looks exactly like a route declaration and the analyzer invents phantom
  * backend routes for every call the frontend makes.
  */
@@ -71,9 +71,9 @@ interface ClassInfo {
   role: ClassRole;
   routePrefix: string;
   declaration: ClassDeclaration;
-  /** `this.patientsService` -> `PatientsService` */
+  /** `this.customersService` -> `CustomersService` */
   injected: Map<string, string>;
-  /** `this.patientModel` -> `Patient` */
+  /** `this.customerModel` -> `Customer` */
   models: Map<string, string>;
   methods: Map<string, MethodDeclaration>;
 }
@@ -89,8 +89,8 @@ export interface BackendConfig {
   /**
    * Prefixes stripped from route paths — must match the frontend list.
    *
-   * A Nest app with `setGlobalPrefix('api')` or `@Controller('api/doctor')`
-   * serves `/api/doctor/patients`; its frontend calls the same URL. Stripping
+   * A Nest app with `setGlobalPrefix('api')` or `@Controller('api/admin')`
+   * serves `/api/admin/customers`; its frontend calls the same URL. Stripping
    * on only one side is why a 506-route backend matched zero frontend calls.
    */
   apiPrefixes: string[];
@@ -258,7 +258,7 @@ function nodeIdFor(role: ClassRole, rel: string, name: string): string {
   }
 }
 
-/** `@Schema() class Patient { @Prop() name: string }` */
+/** `@Schema() class Customer { @Prop() name: string }` */
 function declareSchemaClass(
   declaration: ClassDeclaration,
   name: string,
@@ -327,7 +327,7 @@ function declareDto(
   }
 }
 
-/** Plain Mongoose: `new Schema({...})` + `model('Patient', schema)`. */
+/** Plain Mongoose: `new Schema({...})` + `model('Customer', schema)`. */
 function declareMongooseModels(
   file: SourceFile,
   rel: string,
@@ -410,10 +410,10 @@ function registerModel(
  *
  * Nest supports two forms, and a real codebase mixes them in the same class:
  *
- *   constructor(@InjectModel(Doctor.name) private doctorModel: Model<D>) {}
+ *   constructor(@InjectModel(Vendor.name) private vendorModel: Model<D>) {}
  *
- *   @InjectModel(DoctorPatient.name)
- *   private readonly doctorPatientModel: Model<DoctorPatientDocument>;
+ *   @InjectModel(VendorProduct.name)
+ *   private readonly vendorProductModel: Model<VendorProductDocument>;
  *
  * Reading only the constructor silently drops every query made through a
  * property-injected model, so the flow stops at the service and the collection
@@ -451,7 +451,7 @@ function resolveInjection(info: ClassInfo, graph: FlowGraph, index: BackendIndex
   }
 }
 
-/** `@InjectModel(Patient.name)` or `@InjectModel('Patient')`. */
+/** `@InjectModel(Customer.name)` or `@InjectModel('Customer')`. */
 function injectedModelName(member: ParameterDeclaration | PropertyDeclaration): string | undefined {
   const decorator = member.getDecorators().find((d) => d.getName() === 'InjectModel');
   if (decorator) {
@@ -465,7 +465,7 @@ function injectedModelName(member: ParameterDeclaration | PropertyDeclaration): 
       return argument.getText().replace(/\.name$/, '');
     }
   }
-  // Plain Mongoose in a service: `private patientModel: Model<Patient>`
+  // Plain Mongoose in a service: `private customerModel: Model<Customer>`
   const typeText = member.getTypeNode()?.getText() ?? '';
   const generic = /^Model<\s*([A-Za-z0-9_]+)/.exec(typeText);
   if (generic?.[1]) return generic[1].replace(/(Document|Entity)$/, '');
@@ -479,7 +479,7 @@ function baseTypeName(member: ParameterDeclaration | PropertyDeclaration): strin
   return match?.[1];
 }
 
-/** Turn `@Controller('patients')` + `@Post(':id/notes')` into route nodes. */
+/** Turn `@Controller('customers')` + `@Post(':id/notes')` into route nodes. */
 function resolveRoutes(info: ClassInfo, graph: FlowGraph, config: BackendConfig): void {
   if (info.role !== 'controller') return;
 
@@ -515,7 +515,7 @@ function resolveRoutes(info: ClassInfo, graph: FlowGraph, config: BackendConfig)
   }
 }
 
-/** `@Body() dto: CreatePatientDto` -> route validates dto. */
+/** `@Body() dto: CreateCustomerDto` -> route validates dto. */
 function linkRouteDto(method: MethodDeclaration, graph: FlowGraph, routeId: string): void {
   for (const parameter of method.getParameters()) {
     const isBody = parameter
@@ -542,7 +542,7 @@ function resolveMethodBodies(info: ClassInfo, graph: FlowGraph, index: BackendIn
       const member = calleeMember(call);
       if (!receiver) continue;
 
-      // 1. Database access: this.patientModel.find(...)
+      // 1. Database access: this.customerModel.find(...)
       const modelName = resolveModelReceiver(receiver, info);
       if (modelName) {
         const effect = dbEffectOf(member);
@@ -559,7 +559,7 @@ function resolveMethodBodies(info: ClassInfo, graph: FlowGraph, index: BackendIn
         continue;
       }
 
-      // 2. Injected service: this.patientsService.create(...)
+      // 2. Injected service: this.customersService.create(...)
       const targetClass = info.injected.get(receiver);
       if (targetClass) {
         const target = index.classes.get(targetClass);
@@ -595,7 +595,7 @@ function resolveMethodBodies(info: ClassInfo, graph: FlowGraph, index: BackendIn
       }
     }
 
-    // `new this.patientModel(dto).save()` — the document-style write.
+    // `new this.customerModel(dto).save()` — the document-style write.
     for (const expression of method.getDescendantsOfKind(SyntaxKind.NewExpression)) {
       const target = expression.getExpression().getText().replace(/\s+/g, '');
       const modelName = resolveModelReceiver(target, info);
@@ -666,7 +666,7 @@ function recordDbOp(
   });
 }
 
-/** `router.post('/patients', createPatient)` — Express/Fastify style. */
+/** `router.post('/customers', createCustomer)` — Express/Fastify style. */
 function declareExpressRoutes(
   file: SourceFile,
   rel: string,

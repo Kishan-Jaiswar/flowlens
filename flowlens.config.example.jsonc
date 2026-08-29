@@ -37,7 +37,7 @@
   // Extra directories to skip, on top of node_modules, dist, .next and friends.
   'ignore': ['legacy', 'generated', 'public'],
 
-  // Resolve endpoint constants (`url: getPatientsList`) to their literal value.
+  // Resolve endpoint constants (`url: getCustomersList`) to their literal value.
   // Turn off only if it ever resolves something wrongly.
   'resolveConstants': true,
 

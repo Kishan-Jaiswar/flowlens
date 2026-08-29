@@ -3,16 +3,16 @@
  *
  * A user action labelled `Submit` is useless on its own: a real app has fifteen
  * of them. What a developer needs on the tile is the same phrase they would say
- * out loud — "the submit on the prescription screen" — so every `ui-action`
+ * out loud — "the submit on the order screen" — so every `ui-action`
  * node carries a *screen* alongside its action text, and the two are composed
- * into a title: `Prescription · Submit`.
+ * into a title: `Order · Submit`.
  *
  * The screen is derived from the path on disk, which is where framework
  * conventions already record it:
  *
- *   pages/prescription/[id].js        ->  Prescription   (route segment)
+ *   pages/order/[id].js        ->  Order   (route segment)
  *   app/billing/invoices/page.tsx     ->  Invoices       (route segment)
- *   components/prescription/Rx.js     ->  Prescription   (feature folder)
+ *   components/order/Sku.js     ->  Order   (feature folder)
  *   components/Buttons.js             ->  Buttons        (component name)
  *
  * Nothing here needs the module graph, so it holds for a component defined in
@@ -69,17 +69,17 @@ const FRAMEWORK_FILES = new Set([
 
 /** Words a developer would not capitalise the lazy way. */
 const ACRONYMS = new Map([
-  ['abha', 'ABHA'],
+  ['crm', 'CRM'],
   ['ai', 'AI'],
   ['api', 'API'],
-  ['emr', 'EMR'],
+  ['csv', 'CSV'],
   ['faq', 'FAQ'],
-  ['gmb', 'GMB'],
+  ['seo', 'SEO'],
   ['id', 'ID'],
   ['otp', 'OTP'],
   ['pdf', 'PDF'],
   ['qr', 'QR'],
-  ['rx', 'Rx'],
+  ['sku', 'SKU'],
   ['sms', 'SMS'],
   ['ui', 'UI'],
   ['url', 'URL'],
@@ -90,7 +90,7 @@ const NOISE_DIRS = /^(parts|sections|elements|fragments|blocks|cards|popups|moda
 
 /**
  * Words too generic to prove that two names talk about the same thing: a
- * "Prescription form" and a "Billing form" share only the word `form`.
+ * "Order form" and a "Billing form" share only the word `form`.
  */
 const WEAK_WORDS = new Set([
   'a',
@@ -117,15 +117,15 @@ const WEAK_WORDS = new Set([
 
 const ACRONYM_VALUES = new Set(ACRONYMS.values());
 
-/** The default separator between screen and action: `Prescription · Submit`. */
+/** The default separator between screen and action: `Order · Submit`. */
 export const TITLE_SEPARATOR = ' · ';
 
 export interface ScreenName {
-  /** Human phrase for the part of the product: `Edit appointment`. */
+  /** Human phrase for the part of the product: `Edit shipment`. */
   screen: string;
-  /** Route the page serves, when the file is a page: `/edit-appointment`. */
+  /** Route the page serves, when the file is a page: `/edit-shipment`. */
   page?: string;
-  /** Feature folder the file sits in, when it is not a page: `prescription`. */
+  /** Feature folder the file sits in, when it is not a page: `order`. */
   area?: string;
 }
 
@@ -133,7 +133,7 @@ export interface ScreenName {
  * Name the screen a source file belongs to.
  *
  * `componentName` is the fallback, not the first choice: `RxFooter` in
- * `components/prescription/` is part of the prescription screen, and that is
+ * `components/order/` is part of the order screen, and that is
  * what a reader of the tile wants to see.
  */
 export function screenOf(rel: string, componentName?: string): ScreenName {
@@ -155,7 +155,7 @@ export function screenOf(rel: string, componentName?: string): ScreenName {
 }
 
 /**
- * The route a page file serves, without leading slash: `edit-appointment/:id`.
+ * The route a page file serves, without leading slash: `edit-shipment/:id`.
  *
  * Returns undefined for anything that is not a page — including `pages/api/**`,
  * which is a backend route and is handled by the file-route analyzer.
@@ -191,13 +191,13 @@ export function pageRouteOf(rel: string): string | undefined {
  * Anchored on the code root — `components`, `src`, `features`, `modules` — and
  * read *from* there, never from the top of the path:
  *
- *   components/prescription/parts/RxFooter.js  ->  prescription
+ *   components/order/parts/RxFooter.js  ->  order
  *   src/features/billing/Invoice.tsx           ->  billing
  *   my-repo/components/Buttons.js              ->  undefined (no feature folder)
  *
  * Reading downward is what keeps a repository's own name out of the answer. A
  * multi-root scan prefixes every path with the project folder, so walking up
- * from the file used to hand back "Whatsapp clinic frontend web" as the screen
+ * from the file used to hand back "Shop frontend web" as the screen
  * for anything sitting directly in `components/`.
  */
 function featureFolderOf(rel: string): string | undefined {
@@ -239,10 +239,10 @@ function meaningfulSegments(segments: string[]): string[] {
 }
 
 /**
- * `['prescription', 'create']` -> `Prescription create`.
+ * `['order', 'create']` -> `Order create`.
  *
  * The last two segments, not just the last, because half the routes in a real
- * app end in a verb: `prescription/create` is a screen, `create` is not. A
+ * app end in a verb: `order/create` is a screen, `create` is not. A
  * parent that merely repeats its child (`billing/billing-list`) is dropped.
  */
 function screenPhrase(segments: string[]): string {
@@ -256,7 +256,7 @@ function screenPhrase(segments: string[]): string {
   return humanizeName(tail[0] as string);
 }
 
-/** Mid-sentence form of a phrase, leaving an acronym (`Rx`, `ABHA`) alone. */
+/** Mid-sentence form of a phrase, leaving an acronym (`SKU`, `CRM`) alone. */
 function lowerFirst(phrase: string): string {
   const [first = ''] = phrase.split(' ');
   if (ACRONYM_VALUES.has(first)) return phrase;
@@ -278,10 +278,10 @@ function basenameOf(rel: string): string {
 }
 
 /**
- * `edit-appointment` -> `Edit appointment`, `RxScreen` -> `Rx screen`.
+ * `edit-shipment` -> `Edit shipment`, `SkuScreen` -> `SKU screen`.
  *
  * One sentence-cased phrase, because a tile is read as prose. Known acronyms
- * keep their capitals so `gmb_dashboard` does not become "Gmb dashboard".
+ * keep their capitals so `seo_dashboard` does not become "Seo dashboard".
  */
 export function humanizeName(text: string): string {
   const words = text
@@ -315,11 +315,11 @@ export function eventVerb(event: string): string {
 }
 
 /**
- * Compose the tile title: `Prescription · Submit`.
+ * Compose the tile title: `Order · Submit`.
  *
- * When the action text already says where it is ("Submit Prescription"), the
- * screen is dropped rather than repeated — a tile reading "Prescription ·
- * Submit Prescription" is worse than the action alone.
+ * When the action text already says where it is ("Submit Order"), the
+ * screen is dropped rather than repeated — a tile reading "Order ·
+ * Submit Order" is worse than the action alone.
  */
 export function composeTitle(screen: string, action: string, separator = TITLE_SEPARATOR): string {
   const trimmedAction = action.trim();
@@ -327,7 +327,7 @@ export function composeTitle(screen: string, action: string, separator = TITLE_S
   if (!trimmedScreen) return trimmedAction;
   if (!trimmedAction) return trimmedScreen;
   if (mentions(trimmedAction, trimmedScreen)) return trimmedAction;
-  // "Submit Prescription" on the prescription form already says where it is.
+  // "Submit Order" on the order form already says where it is.
   if (words(trimmedAction).length > 1 && sharesSubject(trimmedAction, trimmedScreen)) {
     return trimmedAction;
   }
@@ -355,7 +355,7 @@ function sharesSubject(action: string, screen: string): boolean {
     .some((word) => subject.has(word));
 }
 
-/** Crude singular form, so `Patients` and `patient` count as the same word. */
+/** Crude singular form, so `Customers` and `customer` count as the same word. */
 function stem(word: string): string {
   return word.length > 3 && word.endsWith('s') && !word.endsWith('ss') ? word.slice(0, -1) : word;
 }

@@ -15,10 +15,10 @@ import type { LoadedProject } from './project.js';
  * modern Next.js app is neither:
  *
  *   app/api/stock/route.ts   ->  export async function POST(req) {
- *                                  return adjustStock(clinicId, input)
+ *                                  return adjustStock(shopId, input)
  *                                }
  *   lib/db/store.ts          ->  export async function adjustStock(...) {
- *                                  await medicines.updateOne(...)
+ *                                  await products.updateOne(...)
  *                                }
  *
  * The route is found by `fileroutes`, but nothing followed `adjustStock` into

@@ -282,12 +282,12 @@ function renderCollectionSummary(flow) {
  * One layer, left to right in call order.
  *
  * Steps are grouped by depth and the groups joined with arrows, so a section
- * reads as a chain — `handleDelete -> useDeleteMedicine` — rather than as an
+ * reads as a chain — `handleDelete -> useDeleteProduct` — rather than as an
  * unordered row of tiles where nothing says what called what.
  *
  * Everything at the same depth is stacked in one column instead of being strung
  * together, because those are siblings: `handleDelete` calls *both*
- * `useDeleteMedicine` and `useToast`, and an arrow between them would claim a
+ * `useDeleteProduct` and `useToast`, and an arrow between them would claim a
  * call that does not happen.
  */
 function renderLayerSteps(steps) {
@@ -350,7 +350,7 @@ function renderStepDetail(step) {
 
   if (d.queryKeys?.length) blocks.push(detailSection('Query parameters', codeList(d.queryKeys)));
   if (d.payloadKeys?.length) {
-    // Show where each body key came from when we know: `patient_id ← patientId`.
+    // Show where each body key came from when we know: `customer_id ← customerId`.
     const rows = d.payloadKeys.map((key) => {
       const from = d.payloadSources?.[key];
       return from && from !== key
@@ -617,7 +617,7 @@ el.rescan.addEventListener('click', async () => {
  * What a tile is called.
  *
  * A user action's own label is only the words on the element — "Submit" — so the
- * scan stores a descriptive title next to it (`Prescription · Submit`) and that
+ * scan stores a descriptive title next to it (`Order · Submit`) and that
  * is what the tile shows. Code nodes keep their identifier, which is already the
  * clearest name for them.
  */

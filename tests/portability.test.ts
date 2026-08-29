@@ -52,7 +52,7 @@ describe('path arguments, spelled any way', () => {
   });
 
   it('does not mistake a symbol or a flow id for a path', () => {
-    for (const value of ['create-patient', 'PatientsService.create', 'AuditService.record', '']) {
+    for (const value of ['create-customer', 'CustomersService.create', 'AuditService.record', '']) {
       expect(looksLikePath(value), value).toBe(false);
     }
   });
@@ -66,13 +66,13 @@ describe('path arguments, spelled any way', () => {
   });
 
   it('separates a flow id from its project, in either order', () => {
-    expect(splitPositionals('flow', ['create-patient', './app'])).toEqual({
+    expect(splitPositionals('flow', ['create-customer', './app'])).toEqual({
       roots: ['./app'],
-      args: ['create-patient'],
+      args: ['create-customer'],
     });
-    expect(splitPositionals('flow', ['./app', 'create-patient'])).toEqual({
+    expect(splitPositionals('flow', ['./app', 'create-customer'])).toEqual({
       roots: ['./app'],
-      args: ['create-patient'],
+      args: ['create-customer'],
     });
     expect(splitPositionals('impact', ['Service.create', 'C:\\code\\app'])).toEqual({
       roots: ['C:\\code\\app'],
@@ -82,9 +82,9 @@ describe('path arguments, spelled any way', () => {
 
   it('accepts a directory that exists even with no separator in its name', () => {
     const exists = (value: string) => value === 'my-app';
-    expect(splitPositionals('flow', ['create-patient', 'my-app'], { exists })).toEqual({
+    expect(splitPositionals('flow', ['create-customer', 'my-app'], { exists })).toEqual({
       roots: ['my-app'],
-      args: ['create-patient'],
+      args: ['create-customer'],
     });
   });
 });
@@ -110,9 +110,9 @@ describe('the CLI, end to end', () => {
     });
 
   it('scans a project named without any path separator', () => {
-    // `flowlens scan clinic` from examples/ — the spelling that used to scan
+    // `flowlens scan shop` from examples/ — the spelling that used to scan
     // the wrong directory without saying so.
-    const result = run(['scan', 'clinic', '--json'], EXAMPLES);
+    const result = run(['scan', 'crud', '--json'], EXAMPLES);
     expect(result.status).toBe(0);
     const output = JSON.parse(result.stdout) as { stats: { routes: number } };
     expect(output.stats.routes).toBeGreaterThan(0);
@@ -125,10 +125,10 @@ describe('the CLI, end to end', () => {
   });
 
   it('still resolves a flow id given alongside a bare project name', () => {
-    run(['scan', 'clinic'], EXAMPLES);
-    const result = run(['flow', 'prescriptionform-submit-prescription', 'clinic'], EXAMPLES);
+    run(['scan', 'crud'], EXAMPLES);
+    const result = run(['flow', 'orderform-submit-order', 'crud'], EXAMPLES);
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('Submit Prescription');
+    expect(result.stdout).toContain('Submit Order');
   });
 });
 
@@ -368,7 +368,7 @@ describe('opening a browser', () => {
 });
 
 describe('reading a project without writing to it', () => {
-  const PROJECT = join(EXAMPLES, 'clinic');
+  const PROJECT = join(EXAMPLES, 'crud');
 
   it('keeps the graph and trace outside the project', () => {
     for (const artifact of [graphPath(PROJECT), tracePath(PROJECT), outputDir(PROJECT)]) {
@@ -384,11 +384,11 @@ describe('reading a project without writing to it', () => {
   });
 
   it('gives two checkouts of the same name different cache entries', () => {
-    const a = projectKey('/home/dev/one/clinic-web');
-    const b = projectKey('/home/dev/two/clinic-web');
+    const a = projectKey('/home/dev/one/shop-web');
+    const b = projectKey('/home/dev/two/shop-web');
     expect(a).not.toBe(b);
     // The readable half survives, so the cache stays browsable.
-    expect(a.startsWith('clinic-web-')).toBe(true);
+    expect(a.startsWith('shop-web-')).toBe(true);
   });
 
   it('honours FLOWLENS_CACHE, so a run can be redirected entirely', () => {

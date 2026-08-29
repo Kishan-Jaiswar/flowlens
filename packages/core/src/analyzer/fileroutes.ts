@@ -17,11 +17,11 @@ import { isFileSystemRoute } from './classify.js';
  * invisible — the analyzer would report a frontend making calls into nothing.
  *
  * Supported conventions:
- *   pages/api/patients.ts              ->  /patients        (all methods)
- *   pages/api/patients/[id].ts         ->  /patients/:param
- *   pages/api/patients/[...slug].ts    ->  /patients/*
- *   app/api/patients/route.ts          ->  /patients        (per exported verb)
- *   server/api/patients.get.ts         ->  /patients        (Nuxt)
+ *   pages/api/customers.ts              ->  /customers        (all methods)
+ *   pages/api/customers/[id].ts         ->  /customers/:param
+ *   pages/api/customers/[...slug].ts    ->  /customers/*
+ *   app/api/customers/route.ts          ->  /customers        (per exported verb)
+ *   server/api/customers.get.ts         ->  /customers        (Nuxt)
  */
 export interface FileRouteConfig {
   apiPrefixes: string[];
@@ -50,7 +50,7 @@ export function analyzeFileRoutes(
      * An App Router `route.ts` commonly exports `GET`, `PUT` and `DELETE` side
      * by side. Giving the file a single handler merged all three, so a flow
      * through the PUT reported the DELETE's query too — a phantom
-     * `medicines.deleteOne` on an edit. Where the verbs are separate functions
+     * `products.deleteOne` on an edit. Where the verbs are separate functions
      * they get separate handlers, and each one's queries are scoped to its own
      * body.
      */
@@ -94,7 +94,7 @@ export function analyzeFileRoutes(
 /**
  * Turn a path on disk into a URL path.
  *
- * `pages/api/clinic/[clinicId]/lab/[labId].ts` -> `/clinic/:param/lab/:param`
+ * `pages/api/shop/[shopId]/order/[orderId].ts` -> `/shop/:param/order/:param`
  */
 export function routePathFromFile(rel: string, apiPrefixes: string[] = []): string | undefined {
   const normalizedRel = rel.split('\\').join('/');
@@ -110,7 +110,7 @@ export function routePathFromFile(rel: string, apiPrefixes: string[] = []): stri
   let remainder = match[1] ?? '';
   if (remainder === 'route') remainder = '';
 
-  // Strip the extension, and any Nuxt method suffix (`patients.get.ts`).
+  // Strip the extension, and any Nuxt method suffix (`customers.get.ts`).
   remainder = remainder
     .replace(/\.[cm]?[jt]sx?$/, '')
     .replace(/\.(get|post|put|patch|delete)$/i, '');
@@ -171,7 +171,7 @@ function methodsOf(file: SourceFile, rel: string): HttpMethod[] {
     if (statement?.isExported()) found.add(name);
   }
 
-  // Nuxt file suffix: `patients.get.ts`
+  // Nuxt file suffix: `customers.get.ts`
   const suffix = /\.(get|post|put|patch|delete)\.[cm]?[jt]sx?$/i.exec(rel);
   if (suffix?.[1]) {
     const method = suffix[1].toUpperCase();

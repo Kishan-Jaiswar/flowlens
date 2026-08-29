@@ -3,8 +3,8 @@ import { existsSync, statSync } from 'node:fs';
 /**
  * Which positional arguments are project paths, and which are not.
  *
- * `flowlens flow create-patient ./my-app` and
- * `flowlens flow create-patient -p ./my-app` must behave the same, so the
+ * `flowlens flow create-customer ./my-app` and
+ * `flowlens flow create-customer -p ./my-app` must behave the same, so the
  * positionals have to be sorted out. Two things make that harder than it looks:
  *
  *   - On Windows a path is `.\my-app`, `..\api` or `C:\code\app`. An earlier

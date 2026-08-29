@@ -22,8 +22,8 @@ command work — without leaving a mark on that project.
   inside a component got a node. `async function save() {}` declarations inside a
   component were invisible for the same reason and are now included.
 - The default `requestFunctionPattern` only matched a verb at the _start_ of the
-  name, missing whole wrapper families such as `abhaPostRequest`,
-  `MedisageGetRequest`, `postAiRequest` and `getAiRequest`. The verb may now appear
+  name, missing whole wrapper families such as `crmPostRequest`,
+  `AcmeGetRequest`, `postAiRequest` and `getAiRequest`. The verb may now appear
   anywhere in the name and is matched case-insensitively, which found 31 more
   endpoints in the same frontend.
 
@@ -51,7 +51,7 @@ command work — without leaving a mark on that project.
 - The `@flowlens/runtime` sink defaulted to `.flowlens/trace.jsonl` relative to
   the traced app, putting a file in the user's repository. It now honours
   `$FLOWLENS_TRACE`, else the same machine-local cache path.
-- `examples/clinic/demo-trace.mjs` takes the output path as its first argument
+- `examples/crud/demo-trace.mjs` takes the output path as its first argument
   instead of writing inside the example project.
 
 ### Added
@@ -168,7 +168,7 @@ Recorded because each one shaped the design, and the reasoning is in
 - Request-wrapper _definitions_ produced phantom endpoints such as
   `GET /:param`, which then appeared as broken calls and could match real
   parameterised routes.
-- `clinicsettings` was pluralised to `clinicsettingses`; Mongoose only appends
+- `shopsettings` was pluralised to `shopsettingses`; Mongoose only appends
   `es` after a double `s`.
 - An invalid `--request-fn` regex failed inside every file's error handler and
   reported zero API calls instead of the real reason.

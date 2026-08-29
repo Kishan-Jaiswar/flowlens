@@ -50,7 +50,7 @@ collection — and you still do not know what else calls it.
 FlowLens turns that into:
 
 ```text
-flowlens flow create-patient
+flowlens flow customerform-create-customer
 ```
 
 ---
@@ -58,48 +58,48 @@ flowlens flow create-patient
 ## What you get
 
 ```text
-$ flowlens flow prescriptionform-submit-prescription examples/clinic
+$ flowlens flow orderform-submit-order examples/crud
 
-Submit Prescription  (prescriptionform-submit-prescription)
-web/src/components/PrescriptionForm.tsx:42
+Submit Order  (orderform-submit-order)
+web/src/components/OrderForm.tsx:42
 risk high (50)   evidence confirmed   373ms
 
 Execution path
 ──────────────
 USER ACTION
-└── [ui action]   Submit Prescription
-    web/src/components/PrescriptionForm.tsx:42
+└── [ui action]   Submit Order
+    web/src/components/OrderForm.tsx:42
 │
 ▼
 FRONTEND
-└── [handler]     PrescriptionForm.handleSubmit
-    web/src/components/PrescriptionForm.tsx:15
+└── [handler]     OrderForm.handleSubmit
+    web/src/components/OrderForm.tsx:15
 │
 ▼
 NETWORK
-├── [api call]    POST /prescriptions
-│   web/src/components/PrescriptionForm.tsx:16
-└── [route]       POST /prescriptions
-    api/src/prescriptions/prescriptions.controller.ts:9
+├── [api call]    POST /orders
+│   web/src/components/OrderForm.tsx:16
+└── [route]       POST /orders
+    api/src/orders/orders.controller.ts:9
 │
 ▼
 BACKEND
-├── [method]      PrescriptionsController.create
-├── [method]      PrescriptionsService.create
-├── [method]      PatientsService.findById
-├── [method]      MedicinesService.assertAvailable
+├── [method]      OrdersController.create
+├── [method]      OrdersService.create
+├── [method]      CustomersService.findById
+├── [method]      ProductsService.assertAvailable
 └── [method]      AuditService.record
 │
 ▼
 DATABASE
-├── [db op]       patients.findById            read
-├── [db op]       medicines.countDocuments     read
-├── [db op]       prescriptions.create         create
+├── [db op]       customers.findById           read
+├── [db op]       products.countDocuments      read
+├── [db op]       orders.create                create
 └── [db op]       auditlogs.create             create
 
 Risk factors
 ────────────
-  • writes to 2 collections: auditlogs, prescriptions
+  • writes to 2 collections: auditlogs, orders
   • AuditService.record is called from 5 places
   • touches 5 collections in one action
   • confirmed by runtime tracing
@@ -210,8 +210,8 @@ npm run flows:example
 npm run serve:example
 
 # and a synthetic recording, so the runtime merge is demoable with no server
-node examples/clinic/demo-trace.mjs /tmp/demo-trace.jsonl
-flowlens trace examples/clinic --trace /tmp/demo-trace.jsonl
+node examples/crud/demo-trace.mjs /tmp/demo-trace.jsonl
+flowlens trace examples/crud --trace /tmp/demo-trace.jsonl
 ```
 
 ### If your terminal cannot draw boxes
@@ -222,8 +222,8 @@ Windows console with a raster font, FlowLens detects it and falls back to
 `|`, `` ` `` and `v` automatically. To force either behaviour:
 
 ```bash
-FLOWLENS_ASCII=1 flowlens flow create-patient      # plain ASCII
-FLOWLENS_UNICODE=1 flowlens flow create-patient    # box characters
+FLOWLENS_ASCII=1 flowlens flow customerform-create-customer      # plain ASCII
+FLOWLENS_UNICODE=1 flowlens flow customerform-create-customer    # box characters
 NO_COLOR=1 flowlens flows                          # no colour
 ```
 
@@ -350,7 +350,7 @@ on.
 
 ## Working with a real codebase
 
-Textbook projects call `axios.post('/api/patients', body)`. Real ones do not, and
+Textbook projects call `axios.post('/api/customers', body)`. Real ones do not, and
 the defaults are built for the real ones.
 
 **Separate repos.** A frontend and backend in sibling folders are scanned into
@@ -433,20 +433,20 @@ action is named after the part of the product it belongs to as well as the thing
 the user pressed:
 
 ```text
-Prescription · Submit                    pages/prescription/[id].js
-Patient detail · Complete appointment    pages/patient_detail/[id].js
-Medication · Mapping cell click          components/medication/StockMedications.js
-Rx screen loads                          pages/rx-screen/[id].js
+Order · Submit                         pages/order/[id].js
+Customer detail · Complete shipment    pages/customer_detail/[id].js
+Inventory · Mapping cell click         components/inventory/StockProducts.js
+SKU screen loads                       pages/sku-screen/[id].js
 ```
 
 The screen comes from the path on disk, where the framework already records it:
-a route segment for a page (`pages/prescription/[id].js` → **Prescription**), the
-feature folder for a component (`components/patient_detail/…` → **Patient
+a route segment for a page (`pages/order/[id].js` → **Order**), the
+feature folder for a component (`components/customer_detail/…` → **Customer
 detail**), and the component's own name when neither says anything. The action is
 the text on the element, falling back to a labelling prop, the text just inside
 it, or the handler's name — and for an icon with none of those, the component and
 the gesture (**Mapping cell click**). A screen the button text already names is
-not repeated: `Submit Prescription` stays as it is.
+not repeated: `Submit Order` stays as it is.
 
 Both halves stay separate in the graph, so a flow keeps `label` (the words on the
 element), `screen`, and the composed `title` that lists and tiles show. `--json`
@@ -481,13 +481,13 @@ Three joins are handled explicitly because each one silently emptied a layer:
   `adjustStock()` from `lib/db/store.ts`. Neither the Nest pass (no decorators)
   nor the route pass (wrong file) reaches it, so the queries are followed into
   the module and attributed to the function that makes them.
-- **Collections behind a factory.** With the native driver, `const { medicines }
+- **Collections behind a factory.** With the native driver, `const { products }
 = await getCollections()` is a destructured binding whose literal lives in
   another file. The `name: db.collection('x')` pairs are collected project-wide,
   and the literal is read rather than the property name conventionalised —
   `smsTemplates: db.collection('smsendpointmaps')` is why.
 - **Requests inside a data hook.** React Query's idiom is `const create =
-useCreateMedicine()` then `create.mutate(values)`, so the request is two hops
+useCreateProduct()` then `create.mutate(values)`, so the request is two hops
   from the click and the middle hop is a method on a returned object. Receivers
   are resolved through the hook alias table.
 
@@ -532,8 +532,8 @@ new document and updates an existing one, and `bulkWrite` can do both plus
 delete, so the call site does not carry the answer. Naming one anyway would be a
 wrong finding rather than a missing one.
 
-A collection appears once **per effect**, so an action that reads `patients` and
-then edits them shows both — collapsing that into "writes patients" would lose
+A collection appears once **per effect**, so an action that reads `customers` and
+then edits them shows both — collapsing that into "writes customers" would lose
 where the data came from. `updateOne`/`updateMany` are reported as `update` even
 though `{ upsert: true }` can insert.
 
@@ -595,8 +595,8 @@ flowlens trace ./my-app
 To see this without running anything, the example ships a synthetic recording:
 
 ```bash
-node examples/clinic/demo-trace.mjs /tmp/demo-trace.jsonl
-node packages/cli/bin/flowlens.mjs trace examples/clinic --trace /tmp/demo-trace.jsonl
+node examples/crud/demo-trace.mjs /tmp/demo-trace.jsonl
+node packages/cli/bin/flowlens.mjs trace examples/crud --trace /tmp/demo-trace.jsonl
 ```
 
 ---
@@ -655,7 +655,7 @@ flowlens/
 ├── apps/
 │   └── dashboard/        dependency-free web UI, served by the CLI
 ├── examples/
-│   └── clinic/           React + NestJS + Mongoose fixture (source only)
+│   └── crud/             React + NestJS + Mongoose fixture (source only)
 ├── scripts/              build, clean and smoke-test helpers (plain Node)
 ├── tests/
 │   ├── fixtures/

@@ -23,7 +23,7 @@ export interface FlowLensConfig
   /** Cap on files parsed, as a safety valve on very large trees. */
   maxFiles?: number;
   /**
-   * Resolve URL constants (`url: getPatientsList`) to their literal value.
+   * Resolve URL constants (`url: getCustomersList`) to their literal value.
    * On by default — without it a codebase that keeps its endpoints in a
    * constants module looks like it makes no API calls at all.
    */
@@ -78,7 +78,7 @@ export function scan(options: ScanOptions & FlowLensConfig): ScanResult {
   });
 
   // Endpoint constants must be collected before either analyzer runs: both the
-  // frontend (`url: getPatientsList`) and the backend (`@Get(ROUTES.list)`) may
+  // frontend (`url: getCustomersList`) and the backend (`@Get(ROUTES.list)`) may
   // reference them.
   const constants = collectConstants(loaded);
   const resolveConstant =

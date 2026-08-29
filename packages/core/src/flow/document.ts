@@ -64,7 +64,7 @@ function stepLabel(step: FlowStep): string {
 /**
  * What to call a step in a tree or a tile.
  *
- * A `ui-action` carries a descriptive title (`Prescription · Submit`) because
+ * A `ui-action` carries a descriptive title (`Order · Submit`) because
  * its own label is only the words on the element. Everything else is named
  * after code, where the identifier *is* the clearest name.
  */

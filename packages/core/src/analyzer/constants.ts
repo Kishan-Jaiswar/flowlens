@@ -9,9 +9,9 @@ import type { LoadedProject } from './project.js';
  * endpoint constants —
  *
  *   // misc/apiEndPointes.js
- *   export const getPatientsList = "/doctor/patients";
+ *   export const getCustomersList = "/admin/customers";
  *
- * — and call `getRequest({ url: getPatientsList })`. Without resolving that
+ * — and call `getRequest({ url: getCustomersList })`. Without resolving that
  * identifier back to its literal, the analyzer sees a variable, gives up, and
  * every single API call in the codebase is lost.
  */
@@ -70,7 +70,7 @@ export function collectConstants(loaded: LoadedProject): ConstantTable {
  *
  * Two passes over the same file: plain literals first, then templates, so a
  * template that references an earlier constant in the same module can be
- * resolved (`const LAB = `${BASE}/lab``).
+ * resolved (`const REPORTS = `${BASE}/reports``).
  */
 function stringConstantsIn(file: SourceFile): Array<[string, string]> {
   const found: Array<[string, string]> = [];

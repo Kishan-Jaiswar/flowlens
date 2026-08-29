@@ -63,9 +63,9 @@ ${color.bold('EXAMPLES')}
   flowlens scan my-app                     # or name it — any OS, any spelling
   flowlens scan ./my-web ./my-api          # separate repos, one graph
   flowlens flows my-app
-  flowlens flow create-patient my-app
-  flowlens flow create-patient my-app --markdown --out docs/create-patient.md
-  flowlens impact PatientsService.create -p my-app
+  flowlens flow create-customer my-app
+  flowlens flow create-customer my-app --markdown --out docs/create-customer.md
+  flowlens impact CustomersService.create -p my-app
   flowlens serve my-app
 
 ${color.bold('ENVIRONMENT')}
@@ -139,7 +139,7 @@ export function main(argv = process.argv.slice(2)): number {
    * Several roots are allowed because a frontend and backend often live in
    * sibling repositories, and the seam between them is the point:
    *
-   *   flowlens scan ./clinic-web ./clinic-backend
+   *   flowlens scan ./shop-web ./shop-backend
    *
    * `splitPositionals` is what makes `flowlens scan .\my-app` (Windows) and
    * `flowlens scan my-app` (no separator at all) work rather than silently
@@ -226,7 +226,7 @@ export function main(argv = process.argv.slice(2)): number {
         const query = args[0];
         if (!query) {
           process.stderr.write(
-            `${color.red('error')} symbol required: flowlens impact PatientsService.create\n`,
+            `${color.red('error')} symbol required: flowlens impact CustomersService.create\n`,
           );
           return 1;
         }

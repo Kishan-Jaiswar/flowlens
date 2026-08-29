@@ -189,7 +189,7 @@ export function findSiblingRepositories(root: string): string[] {
   const parent = resolve(root, '..');
   if (parent === root) return [];
 
-  // shop-web -> shop, clinic_frontend -> clinic
+  // shop-web -> shop, shop_frontend -> shop
   const stem = name.replace(/[-_.](web|frontend|client|ui|api|backend|server)$/i, '');
   if (stem === name || stem === '') return [];
 
@@ -245,7 +245,7 @@ function inferConventions(
       )) {
         wrappers.add(match[1]!);
       }
-      // A controller prefix like @Controller('api/patients').
+      // A controller prefix like @Controller('api/customers').
       for (const match of text.matchAll(/@Controller\(\s*['"`]([^'"`]*)['"`]/g)) {
         const first = match[1]!.split('/').filter(Boolean)[0];
         if (first && !first.includes(':')) prefixes.add(`/${first}`);

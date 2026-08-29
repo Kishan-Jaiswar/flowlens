@@ -49,8 +49,8 @@ design:
 3. **Seam pass** (`analyzer/seam.ts`) — join the two. Until this runs there are
    two disconnected islands.
 4. **Lineage pass** (`analyzer/seam.ts`) — follow individual fields:
-   `state.diagnosis → payload.diagnosis → CreateRxDto.diagnosis →
-prescriptions.diagnosis`.
+   `state.note → payload.note → CreateOrderDto.note →
+orders.note`.
 
 Passes 1 and 2 build islands; pass 3 is where the product exists. Pass 4 can
 only run after 3, because a field's destination is on the far side of the seam.
@@ -78,11 +78,11 @@ Deliberate choices in `analyzer/project.ts`:
 finding hangs off correctly matching one string to another.
 
 ```text
-frontend:  api.post(`/api/patients/${id}/archive`, body)
-backend:   @Controller('patients') + @Patch(':id/archive')
+frontend:  api.post(`/api/customers/${id}/archive`, body)
+backend:   @Controller('customers') + @Patch(':id/archive')
 ```
 
-Both sides normalise to `/patients/:param/archive`, then match segment by
+Both sides normalise to `/customers/:param/archive`, then match segment by
 segment. Scoring is asymmetric on purpose:
 
 | Call segment | Route segment | Score | Why                                          |
@@ -93,7 +93,7 @@ segment. Scoring is asymmetric on purpose:
 | `:param`     | literal       | −1    | speculative — the frontend interpolates here |
 
 That last row is why "prefer the most literal route" is wrong:
-``api.get(`/patients/${id}`)`` should resolve to `GET /patients/:id`, not to
+``api.get(`/customers/${id}`)`` should resolve to `GET /customers/:id`, not to
 whatever fixed sub-route happens to sit at the same depth.
 
 Unmatched leftovers are findings, not failures:
@@ -145,7 +145,7 @@ getRequestV3({ url });
 
 The verb is in the _name_ and the path in an options object. The default pattern
 requires `Request` after the verb, which matters more than it looks: a looser
-`^(get|post|delete)` would swallow `getState()`, `getPatientsList()` and
+`^(get|post|delete)` would swallow `getState()`, `getCustomersList()` and
 `deleteRow()` and fill the graph with endpoints that do not exist.
 
 A `params` suffix is appended only when it extends the path (`` `/${id}` `` →
@@ -206,16 +206,16 @@ harmless: a constants module yields no components and no routes.
 Not every request is made where the button is. A very common shape is:
 
 ```ts
-// src/api/patients.ts
-export async function fetchPatients() {
-  return axios.get('/api/patients');
+// src/api/customers.ts
+export async function fetchCustomers() {
+  return axios.get('/api/customers');
 }
 
 // src/components/List.tsx
-const handleLoad = async () => setRows(await fetchPatients());
+const handleLoad = async () => setRows(await fetchCustomers());
 ```
 
-`fetchPatients` is not a hook, not a component, and not named `handle*`, so an
+`fetchCustomers` is not a hook, not a component, and not named `handle*`, so an
 earlier version had nothing to attach the request to — the chain stopped at the
 handler and the API call floated free.
 
@@ -292,11 +292,11 @@ Traces are nested, so timings come in two flavours and only one of them can be
 summed:
 
 ```text
-POST /prescriptions   (api-call)   196ms inclusive   171ms self  ← network
-POST /prescriptions   (route)       150ms inclusive    34ms self  ← framework
-PrescriptionsService.create         140ms inclusive    60ms self  ← logic
-  patients.findById                  27ms inclusive    27ms self
-  prescriptions.create               41ms inclusive    41ms self
+POST /orders   (api-call)   196ms inclusive   171ms self  ← network
+POST /orders   (route)       150ms inclusive    34ms self  ← framework
+OrdersService.create         140ms inclusive    60ms self  ← logic
+  customers.findById           27ms inclusive    27ms self
+  orders.create                41ms inclusive    41ms self
 ```
 
 `selfTimeOf()` subtracts direct children from each span. Adding inclusive times

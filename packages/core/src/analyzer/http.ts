@@ -1,8 +1,8 @@
 /**
  * The frontend/backend seam.
  *
- * The frontend says `POST /api/patients/${id}/archive`.
- * The backend says `@Controller('patients')` + `@Post(':id/archive')`.
+ * The frontend says `POST /api/customers/${id}/archive`.
+ * The backend says `@Controller('customers')` + `@Post(':id/archive')`.
  * Matching those two strings is the single most load-bearing piece of the
  * static analyzer — everything downstream (controller, service, collection)
  * hangs off getting it right.
@@ -39,8 +39,8 @@ export function normalizePath(raw: string, apiPrefixes: string[] = ['/api']): st
   /**
    * A leading interpolation is a base URL, not a path segment.
    *
-   *   `${baseUrl}/appointments/monthly`  ->  /appointments/monthly
-   *   `${API_HOST}${getPatientsList}`    ->  /doctor/patients
+   *   `${baseUrl}/shipments/monthly`  ->  /shipments/monthly
+   *   `${API_HOST}${getCustomersList}`    ->  /admin/customers
    *
    * Real frontends almost never hardcode the host, so without this every call
    * in a codebase collapses to `/:param/:param` and nothing matches a route.
@@ -89,8 +89,8 @@ function normalizeSegment(segment: string): string {
  * Join a controller prefix and a method path into one normalised route path.
  *
  * `apiPrefixes` must be the *same* list used for frontend URLs. A NestJS app
- * with `setGlobalPrefix('api')` or `@Controller('api/doctor')` declares
- * `/api/doctor/patients` while its frontend calls `/api/doctor/patients` too —
+ * with `setGlobalPrefix('api')` or `@Controller('api/admin')` declares
+ * `/api/admin/customers` while its frontend calls `/api/admin/customers` too —
  * stripping the prefix on one side only guarantees that nothing ever matches.
  */
 export function joinRoutePath(prefix: string, suffix: string, apiPrefixes: string[] = []): string {
@@ -131,15 +131,15 @@ export function routeMatches(call: RouteLike, route: RouteLike): boolean {
  * Scored segment by segment rather than by how literal the route is, because
  * the two directions are not symmetric:
  *
- *   call `/patients/stats`  → route `/patients/stats`   exact, best
- *   call `/patients/stats`  → route `/patients/:id`     plausible, weaker
- *   call `/patients/:param` → route `/patients/stats`   speculative — the
+ *   call `/customers/stats`  → route `/customers/stats`   exact, best
+ *   call `/customers/stats`  → route `/customers/:id`     plausible, weaker
+ *   call `/customers/:param` → route `/customers/stats`   speculative — the
  *                                                      frontend interpolates a
  *                                                      value here, so a literal
  *                                                      route is a poor guess
  *
- * That last case is why literal-route-wins is wrong: `api.get(`/patients/${id}`)`
- * should resolve to `GET /patients/:id`, not to whatever fixed sub-route happens
+ * That last case is why literal-route-wins is wrong: `api.get(`/customers/${id}`)`
+ * should resolve to `GET /customers/:id`, not to whatever fixed sub-route happens
  * to sit at the same depth.
  */
 export function bestRouteMatch<T extends RouteLike>(call: RouteLike, routes: T[]): T | undefined {

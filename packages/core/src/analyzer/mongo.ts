@@ -9,8 +9,8 @@ export type DbAccess = 'read' | 'write';
  * What an operation does to a collection.
  *
  * Finer than {@link DbAccess} because "writes" is not the question anyone
- * actually asks. Seeing that an action *writes* `patients` does not say whether
- * it inserted a patient, edited one, or deleted one — and those are different
+ * actually asks. Seeing that an action *writes* `customers` does not say whether
+ * it inserted a customer, edited one, or deleted one — and those are different
  * enough that lumping them together hides the thing you opened the tool to
  * find.
  *
@@ -22,7 +22,7 @@ export type DbEffect = 'read' | 'create' | 'update' | 'delete' | 'write';
 /**
  * How each effect reads in a sentence about a collection.
  *
- * Phrased from the collection's point of view ("read from `patients`") because
+ * Phrased from the collection's point of view ("read from `customers`") because
  * that is the question being answered: where did this data come from, and where
  * did it go.
  */
@@ -125,7 +125,7 @@ export function dbAccessOf(operation: string): DbAccess | undefined {
 
 /**
  * Model name -> collection name, following Mongoose's own convention:
- * lowercase the name and pluralise it (`Patient` -> `patients`).
+ * lowercase the name and pluralise it (`Customer` -> `customers`).
  */
 export function collectionNameOf(modelName: string): string {
   const base = modelName
@@ -157,8 +157,8 @@ const IRREGULAR: Record<string, string> = {
  *
  * The `ss` in the first rule is load-bearing: Mongoose adds `es` after a
  * *double* s (`address` → `addresses`) but leaves a single trailing s alone
- * (`ClinicSettings` → `clinicsettings`). Treating both the same produced
- * `clinicsettingses`, a collection that does not exist — and a wrong collection
+ * (`ShopSettings` → `shopsettings`). Treating both the same produced
+ * `shopsettingses`, a collection that does not exist — and a wrong collection
  * name is a wrong finding, not a cosmetic slip.
  */
 export function pluralize(word: string): string {

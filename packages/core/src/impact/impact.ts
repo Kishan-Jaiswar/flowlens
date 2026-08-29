@@ -35,7 +35,7 @@ export interface ImpactReport {
   affectedFlows: Array<{
     id: string;
     label: string;
-    /** Descriptive form: `Prescription · Submit`. */
+    /** Descriptive form: `Order · Submit`. */
     title: string;
     component?: string;
     risk: number;
@@ -139,8 +139,8 @@ export function analyzeImpact(graph: FlowGraph, targetId: string): ImpactReport 
 }
 
 /**
- * Find nodes by a loose query, so the CLI can take `PatientsService.create`,
- * `patients`, or a full node id.
+ * Find nodes by a loose query, so the CLI can take `CustomersService.create`,
+ * `customers`, or a full node id.
  */
 export function findNodes(graph: FlowGraph, query: string): FlowNode[] {
   const needle = query.toLowerCase();

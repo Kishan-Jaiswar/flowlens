@@ -19,9 +19,9 @@
     "format:check": "prettier --check .",
     "verify": "npm run lint && npm run format:check && npm run test",
     "flowlens": "node bin/flowlens.mjs",
-    "scan:example": "node bin/flowlens.mjs scan examples/clinic",
-    "flows:example": "node bin/flowlens.mjs flows examples/clinic",
-    "serve:example": "node bin/flowlens.mjs serve examples/clinic",
+    "scan:example": "node bin/flowlens.mjs scan examples/crud",
+    "flows:example": "node bin/flowlens.mjs flows examples/crud",
+    "serve:example": "node bin/flowlens.mjs serve examples/crud",
     "prepare": "node scripts/prepare.mjs"
   },
   "devDependencies": {

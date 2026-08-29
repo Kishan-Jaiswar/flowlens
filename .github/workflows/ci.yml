@@ -93,12 +93,12 @@ jobs:
       # copying the project onto a machine, and it has to work by itself.
       - name: ./flowlens with nothing installed
         if: runner.os != 'Windows'
-        run: ./flowlens scan examples/clinic
+        run: ./flowlens scan examples/crud
 
       - name: flowlens.cmd with nothing installed
         if: runner.os == 'Windows'
         shell: cmd
-        run: flowlens.cmd scan examples\clinic
+        run: flowlens.cmd scan examples\crud
 
   compat:
     name: compat (node 18.18)
