@@ -1,6 +1,6 @@
 {
   "name": "@flowlens/cli",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "FlowLens command line interface",
   "type": "module",
   "bin": {
@@ -16,7 +16,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "@flowlens/core": "0.1.0"
+    "@flowlens/core": "1.0.0"
   },
   "engines": {
     "node": ">=18.18"

@@ -1,6 +1,6 @@
 {
   "name": "flowlens-monorepo",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "FlowLens - trace any user action from the UI to the database",
   "workspaces": [
