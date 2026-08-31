@@ -4,7 +4,7 @@
   "description": "FlowLens command line interface",
   "type": "module",
   "bin": {
-    "flowlens": "./bin/flowlens.mjs"
+    "flowlens": "bin/flowlens.mjs"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
