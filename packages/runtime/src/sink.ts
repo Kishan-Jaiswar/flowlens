@@ -1,7 +1,61 @@
+import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 export const TRACE_VERSION = 1;
+/**
+ * Default trace destination.
+ *
+ * Deliberately outside the traced project: instrumenting an app must not add
+ * files to its repository. `$FLOWLENS_TRACE` wins so the CLI can point the app at
+ * an exact file; otherwise this mirrors the CLI's own cache layout
+ * (`packages/cli/src/paths.ts`). The logic is duplicated rather than imported
+ * because this package is installed into the user's app and must stay
+ * dependency-free.
+ */
+function defaultTraceFile(): string {
+  const explicit = process.env['FLOWLENS_TRACE'];
+  if (explicit && explicit.length > 0) return explicit;
+
+  let home: string | undefined;
+  try {
+    home = homedir() || undefined;
+  } catch {
+    home = undefined;
+  }
+
+  const override = process.env['FLOWLENS_CACHE'];
+
+  let root: string;
+  if (override && isAbsolute(override)) {
+    root = override;
+  } else if (process.platform === 'win32') {
+    const local = process.env['LOCALAPPDATA'] ?? process.env['APPDATA'];
+    root = local ? join(local, 'flowlens', 'Cache') : join(tmpdir(), 'flowlens');
+  } else if (process.platform === 'darwin' && home) {
+    root = join(home, 'Library', 'Caches', 'flowlens');
+  } else {
+    const xdg = process.env['XDG_CACHE_HOME'];
+    if (xdg && isAbsolute(xdg)) root = join(xdg, 'flowlens');
+    else if (home) root = join(home, '.cache', 'flowlens');
+    else root = join(tmpdir(), 'flowlens');
+  }
+
+  const absolute = resolve(process.cwd());
+  const canonical =
+    process.platform === 'win32' || process.platform === 'darwin'
+      ? absolute.toLowerCase()
+      : absolute;
+  const hash = createHash('sha256').update(canonical).digest('hex').slice(0, 10);
+  const slug =
+    basename(absolute)
+      .replace(/[^A-Za-z0-9._-]+/g, '-')
+      .replace(/^[-.]+/, '')
+      .replace(/[-.]+$/, '')
+      .slice(0, 40) || 'project';
+  return join(root, `${slug}-${hash}`, 'trace.jsonl');
+}
 
 export type SpanKind = 'ui-action' | 'http-client' | 'http-server' | 'method' | 'db';
 
@@ -18,7 +72,12 @@ export interface TraceEvent {
 }
 
 export interface SinkOptions {
-  /** Where to append trace events. Defaults to `.flowlens/trace.jsonl`. */
+  /**
+   * Where to append trace events.
+   *
+   * Defaults to `$FLOWLENS_TRACE`, or else a machine-local cache path derived
+   * from the current working directory — never a path inside the traced project.
+   */
   file?: string;
   /** Flush after this many buffered events. */
   batchSize?: number;
@@ -51,7 +110,7 @@ export class TraceSink {
   enabled: boolean;
 
   constructor(options: SinkOptions = {}) {
-    this.file = resolve(options.file ?? '.flowlens/trace.jsonl');
+    this.file = resolve(options.file ?? defaultTraceFile());
     this.batchSize = options.batchSize ?? 32;
     this.flushIntervalMs = options.flushIntervalMs ?? 1000;
     this.enabled = options.enabled ?? true;

@@ -3,8 +3,8 @@ import { bestRouteMatch, joinRoutePath, normalizePath, routeMatches } from '@flo
 
 describe('normalizePath', () => {
   it('strips the api prefix', () => {
-    expect(normalizePath('/api/patients')).toBe('/patients');
-    expect(normalizePath('/api/patients/')).toBe('/patients');
+    expect(normalizePath('/api/customers')).toBe('/customers');
+    expect(normalizePath('/api/customers/')).toBe('/customers');
   });
 
   it('keeps paths that merely start with the prefix letters', () => {
@@ -12,36 +12,36 @@ describe('normalizePath', () => {
   });
 
   it('drops query strings and fragments', () => {
-    expect(normalizePath('/api/patients?search=jo&page=2')).toBe('/patients');
-    expect(normalizePath('/api/patients#top')).toBe('/patients');
+    expect(normalizePath('/api/customers?search=jo&page=2')).toBe('/customers');
+    expect(normalizePath('/api/customers#top')).toBe('/customers');
   });
 
   it('reduces dynamic segments to a single placeholder', () => {
-    expect(normalizePath('/api/patients/<param>/notes')).toBe('/patients/:param/notes');
-    expect(normalizePath('/api/patients/:id/notes')).toBe('/patients/:param/notes');
-    expect(normalizePath('/api/patients/507f1f77bcf86cd799439011')).toBe('/patients/:param');
-    expect(normalizePath('/api/patients/42')).toBe('/patients/:param');
+    expect(normalizePath('/api/customers/<param>/notes')).toBe('/customers/:param/notes');
+    expect(normalizePath('/api/customers/:id/notes')).toBe('/customers/:param/notes');
+    expect(normalizePath('/api/customers/507f1f77bcf86cd799439011')).toBe('/customers/:param');
+    expect(normalizePath('/api/customers/42')).toBe('/customers/:param');
   });
 
   it('handles absolute urls', () => {
-    expect(normalizePath('https://clinic.example.com/api/patients/7')).toBe('/patients/:param');
+    expect(normalizePath('https://shop.example.com/api/customers/7')).toBe('/customers/:param');
   });
 
   it('normalises a bare or empty path', () => {
     expect(normalizePath('/api')).toBe('/');
-    expect(normalizePath('patients')).toBe('/patients');
+    expect(normalizePath('customers')).toBe('/customers');
   });
 
   it('honours a custom prefix list', () => {
-    expect(normalizePath('/v1/patients', ['/v1'])).toBe('/patients');
-    expect(normalizePath('/api/patients', [])).toBe('/api/patients');
+    expect(normalizePath('/v1/customers', ['/v1'])).toBe('/customers');
+    expect(normalizePath('/api/customers', [])).toBe('/api/customers');
   });
 });
 
 describe('joinRoutePath', () => {
   it('joins a controller prefix and a method suffix', () => {
-    expect(joinRoutePath('patients', ':id/archive')).toBe('/patients/:param/archive');
-    expect(joinRoutePath('patients', '')).toBe('/patients');
+    expect(joinRoutePath('customers', ':id/archive')).toBe('/customers/:param/archive');
+    expect(joinRoutePath('customers', '')).toBe('/customers');
     expect(joinRoutePath('', 'health')).toBe('/health');
   });
 });
@@ -49,15 +49,15 @@ describe('joinRoutePath', () => {
 describe('routeMatches', () => {
   it('matches on method and path', () => {
     expect(
-      routeMatches({ method: 'POST', path: '/patients' }, { method: 'POST', path: '/patients' }),
+      routeMatches({ method: 'POST', path: '/customers' }, { method: 'POST', path: '/customers' }),
     ).toBe(true);
   });
 
   it('rejects a method mismatch', () => {
     expect(
       routeMatches(
-        { method: 'PUT', path: '/patients/:param' },
-        { method: 'PATCH', path: '/patients/:param' },
+        { method: 'PUT', path: '/customers/:param' },
+        { method: 'PATCH', path: '/customers/:param' },
       ),
     ).toBe(false);
   });
@@ -65,14 +65,14 @@ describe('routeMatches', () => {
   it('treats :param as a wildcard segment', () => {
     expect(
       routeMatches(
-        { method: 'GET', path: '/patients/:param' },
-        { method: 'GET', path: '/patients/:param' },
+        { method: 'GET', path: '/customers/:param' },
+        { method: 'GET', path: '/customers/:param' },
       ),
     ).toBe(true);
     expect(
       routeMatches(
-        { method: 'GET', path: '/patients/abc' },
-        { method: 'GET', path: '/patients/:param' },
+        { method: 'GET', path: '/customers/abc' },
+        { method: 'GET', path: '/customers/:param' },
       ),
     ).toBe(true);
   });
@@ -80,8 +80,8 @@ describe('routeMatches', () => {
   it('requires the same number of segments', () => {
     expect(
       routeMatches(
-        { method: 'GET', path: '/patients/:param/notes' },
-        { method: 'GET', path: '/patients/:param' },
+        { method: 'GET', path: '/customers/:param/notes' },
+        { method: 'GET', path: '/customers/:param' },
       ),
     ).toBe(false);
   });
@@ -89,19 +89,19 @@ describe('routeMatches', () => {
 
 describe('bestRouteMatch', () => {
   const routes = [
-    { id: 'a', method: 'GET', path: '/patients/:param' },
-    { id: 'b', method: 'GET', path: '/patients/stats' },
+    { id: 'a', method: 'GET', path: '/customers/:param' },
+    { id: 'b', method: 'GET', path: '/customers/stats' },
   ];
 
   it('prefers the literal route over the parameterised one', () => {
-    expect(bestRouteMatch({ method: 'GET', path: '/patients/stats' }, routes)?.id).toBe('b');
+    expect(bestRouteMatch({ method: 'GET', path: '/customers/stats' }, routes)?.id).toBe('b');
   });
 
   it('falls back to the parameterised route', () => {
-    expect(bestRouteMatch({ method: 'GET', path: '/patients/:param' }, routes)?.id).toBe('a');
+    expect(bestRouteMatch({ method: 'GET', path: '/customers/:param' }, routes)?.id).toBe('a');
   });
 
   it('returns undefined when nothing matches', () => {
-    expect(bestRouteMatch({ method: 'DELETE', path: '/patients/1' }, routes)).toBeUndefined();
+    expect(bestRouteMatch({ method: 'DELETE', path: '/customers/1' }, routes)).toBeUndefined();
   });
 });

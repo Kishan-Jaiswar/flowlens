@@ -20,8 +20,8 @@ export type Functionish =
  * Read an expression as a URL/route string.
  *
  * Template literals keep their shape but lose their interpolations:
- * `` `/patients/${id}/notes` `` becomes `/patients/<param>/notes`, which
- * `normalizePath` then turns into `/patients/:param/notes`. Anything genuinely
+ * `` `/customers/${id}/notes` `` becomes `/customers/<param>/notes`, which
+ * `normalizePath` then turns into `/customers/:param/notes`. Anything genuinely
  * dynamic (a variable, a function call) returns undefined rather than a guess —
  * a wrong edge is worse than a missing one.
  */
@@ -95,7 +95,7 @@ export function readString(expression: Node | undefined): string | undefined {
   return undefined;
 }
 
-/** The dotted callee of a call expression: `axios.post`, `this.patients.create`. */
+/** The dotted callee of a call expression: `axios.post`, `this.customers.create`. */
 export function calleeName(call: CallExpression): string {
   const expression = call.getExpression();
   return expression.getText().replace(/\s+/g, '');
@@ -107,7 +107,7 @@ export function calleeMember(call: CallExpression): string {
   return parts[parts.length - 1] ?? '';
 }
 
-/** The receiver of a member call: `this.patientsService` for `this.patientsService.create()`. */
+/** The receiver of a member call: `this.customersService` for `this.customersService.create()`. */
 export function calleeReceiver(call: CallExpression): string | undefined {
   const parts = calleeName(call).split('.');
   if (parts.length < 2) return undefined;

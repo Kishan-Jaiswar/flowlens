@@ -8,7 +8,7 @@ import {
   type FlowGraph,
 } from '@flowlens/core';
 import { graphPath, loadGraph } from '../paths.js';
-import { color, evidenceBadge, heading, riskBadge, table } from '../ui.js';
+import { ascii, color, evidenceBadge, glyph, heading, riskBadge, table } from '../ui.js';
 
 export interface FlowsArgs {
   root: string;
@@ -37,14 +37,17 @@ export function runFlows(args: FlowsArgs): number {
     table(
       flows.map((flow) => [
         flow.id,
-        flow.label.slice(0, 30),
+        flow.screen ?? '',
+        flow.label.slice(0, 40),
         flow.component ?? '',
-        flow.endpoints.join(' ') || color.gray('—'),
-        flow.collections.map((c) => `${c.collection}:${c.access[0]}`).join(' ') || color.gray('—'),
+        flow.endpoints.join(' ') || color.gray(glyph.none),
+        // One letter per effect: r(ead) c(reate) u(pdate) d(elete) w(rite).
+        flow.collections.map((c) => `${c.collection}:${c.effect[0]}`).join(' ') ||
+          color.gray(glyph.none),
         riskBadge(flow.risk.level),
         evidenceBadge(flow.evidence),
       ]),
-      ['id', 'action', 'component', 'endpoint', 'data', 'risk', 'evidence'],
+      ['id', 'screen', 'action', 'component', 'endpoint', 'data', 'risk', 'evidence'],
     ) + '\n',
   );
   process.stdout.write(
@@ -73,7 +76,7 @@ export function runFlow(args: FlowArgs): number {
       `${color.red('error')} no flow matching "${args.id}"\n\nAvailable:\n` +
         flows
           .slice(0, 15)
-          .map((f) => `  ${f.id}${color.gray(`  ${f.label}`)}`)
+          .map((f) => `  ${f.id}${color.gray(`  ${f.title}`)}`)
           .join('\n') +
         '\n',
     );
@@ -101,7 +104,7 @@ export function runFlow(args: FlowArgs): number {
 }
 
 function printFlow(graph: FlowGraph, flow: FeatureFlow): void {
-  process.stdout.write(`\n${color.bold(flow.label)}  ${color.gray(`(${flow.id})`)}\n`);
+  process.stdout.write(`\n${color.bold(flow.title)}  ${color.gray(`(${flow.id})`)}\n`);
   if (flow.source) {
     process.stdout.write(color.gray(`${flow.source.file}:${flow.source.line}\n`));
   }
@@ -113,14 +116,14 @@ function printFlow(graph: FlowGraph, flow: FeatureFlow): void {
   );
 
   process.stdout.write(heading('Execution path') + '\n');
-  process.stdout.write(`${renderFlowTree(flow)}\n`);
+  process.stdout.write(`${renderFlowTree(flow, { ascii })}\n`);
 
   if (flow.state.length > 0) {
     process.stdout.write(heading('Frontend state') + '\n');
     process.stdout.write(`${flow.state.map((s) => `  ${s}`).join('\n')}\n`);
   }
 
-  const timings = renderTimings(flow);
+  const timings = renderTimings(flow, { ascii });
   if (timings) {
     process.stdout.write(heading('Timing') + '\n');
     process.stdout.write(`${timings}\n`);
@@ -129,7 +132,7 @@ function printFlow(graph: FlowGraph, flow: FeatureFlow): void {
   if (flow.risk.reasons.length > 0) {
     process.stdout.write(heading('Risk factors') + '\n');
     for (const reason of flow.risk.reasons) {
-      process.stdout.write(`  ${color.yellow('•')} ${reason}\n`);
+      process.stdout.write(`  ${color.yellow(glyph.bullet)} ${reason}\n`);
     }
   }
 
@@ -146,6 +149,8 @@ function findFlow(flows: FeatureFlow[], query: string): FeatureFlow | undefined 
     flows.find((flow) => flow.id === query) ??
     flows.find((flow) => flow.id.startsWith(needle)) ??
     flows.find((flow) => flow.label.toLowerCase() === needle) ??
-    flows.find((flow) => flow.label.toLowerCase().includes(needle))
+    flows.find((flow) => flow.title.toLowerCase() === needle) ??
+    flows.find((flow) => flow.label.toLowerCase().includes(needle)) ??
+    flows.find((flow) => flow.title.toLowerCase().includes(needle))
   );
 }

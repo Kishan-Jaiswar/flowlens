@@ -200,8 +200,9 @@ export function loadProject(options: ScanOptions): LoadedProject {
       unparsed: unparsedFileTypes,
     });
     for (const file of found) {
-      if (seenFiles.has(file)) continue;
-      seenFiles.add(file);
+      const key = pathKey(file);
+      if (seenFiles.has(key)) continue;
+      seenFiles.add(key);
       collected.push(file);
     }
   }
@@ -231,7 +232,7 @@ export function loadProject(options: ScanOptions): LoadedProject {
    *
    * With several roots the basename is prepended, so `pages/index.js` in two
    * different repos does not produce the same node id — and a developer reading
-   * `clinic-web/pages/index.js` immediately knows which repo it is.
+   * `shop-web/pages/index.js` immediately knows which repo it is.
    */
   const multiRoot = allRoots.length > 1;
   const labels = rootLabels(allRoots);
@@ -381,6 +382,19 @@ function collectSourceFiles(target: string, options: CollectOptions): string[] {
 
   // Sorted so a scan is deterministic regardless of file system ordering.
   return found.sort();
+}
+
+/**
+ * A key for "is this the same file?".
+ *
+ * Windows and macOS default to case-insensitive file systems, so two roots that
+ * differ only in the case of a shared parent (`C:\Code\app` and `C:\code\app`)
+ * would otherwise deliver every file twice — and each copy would produce its
+ * own set of graph nodes. Linux is case-sensitive, where two such paths really
+ * are two files, so the comparison stays exact there.
+ */
+function pathKey(path: string): string {
+  return process.platform === 'win32' || process.platform === 'darwin' ? path.toLowerCase() : path;
 }
 
 function tallyUnparsed(name: string, tally: Record<string, number>): void {

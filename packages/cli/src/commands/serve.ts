@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
@@ -13,7 +14,7 @@ import {
   scan,
   type FlowGraph,
 } from '@flowlens/core';
-import { dashboardDir, graphPath, saveGraph, tracePath } from '../paths.js';
+import { browserTracerFile, dashboardDir, graphPath, saveGraph, tracePath } from '../paths.js';
 import { color } from '../ui.js';
 
 export interface ServeArgs {
@@ -24,8 +25,26 @@ export interface ServeArgs {
   host?: string;
   graph?: string;
   trace?: string;
+  /**
+   * Open a browser once the server is listening.
+   *
+   * The CLI turns this on for an interactive terminal and off everywhere else,
+   * so a scripted or CI run never tries to launch a browser.
+   */
   open?: boolean;
 }
+
+const DEFAULT_PORT = 4177;
+
+/**
+ * How many ports to try before giving up.
+ *
+ * Only when the port was *not* asked for explicitly: a developer who typed
+ * `--port 4177` wants that port, and silently moving would be worse than an
+ * error. But the default being busy — a second project, or a dashboard left
+ * running yesterday — should not need a flag to work around.
+ */
+const PORT_ATTEMPTS = 20;
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -47,7 +66,7 @@ const MIME: Record<string, string> = {
  */
 export function runServe(args: ServeArgs): number {
   const root = resolve(args.root);
-  const port = args.port ?? 4177;
+  const requestedPort = args.port;
   const host = args.host ?? '127.0.0.1';
   const staticDir = dashboardDir();
 
@@ -67,6 +86,26 @@ export function runServe(args: ServeArgs): number {
         'access-control-max-age': '86400',
       });
       response.end();
+      return;
+    }
+
+    // Serve the browser tracer itself. This is what keeps runtime tracing
+    // read-only: the app being traced imports the script from here instead of
+    // having a copy dropped into its own `public/` directory.
+    if (path === '/__flowlens/browser.js') {
+      const tracer = browserTracerFile();
+      if (!tracer) {
+        response.writeHead(404, { 'content-type': 'text/plain' });
+        response.end('Browser tracer not built. Run `npm run build` in FlowLens.');
+        return;
+      }
+      response.writeHead(200, {
+        'content-type': 'text/javascript; charset=utf-8',
+        // The app runs on its own origin, so this is always a cross-origin load.
+        'access-control-allow-origin': '*',
+        'cache-control': 'no-store',
+      });
+      response.end(readFileSync(tracer, 'utf8'));
       return;
     }
 
@@ -139,22 +178,48 @@ export function runServe(args: ServeArgs): number {
     serveStatic(staticDir, path, response);
   });
 
-  server.listen(port, host, () => {
-    const url = `http://${host}:${port}`;
+  let port = requestedPort ?? DEFAULT_PORT;
+  let attempt = 0;
+
+  server.on('listening', () => {
+    const url = `http://${displayHost(host)}:${port}`;
     process.stdout.write(
       `\n${color.bold('FlowLens')} dashboard on ${color.cyan(url)}\n` +
         `${color.gray('project:')} ${root}\n` +
         `${color.gray('graph:')}   ${graph.nodeCount} nodes, ${graph.edgeCount} edges\n` +
-        `${color.gray('spans:')}   POST ${url}/__flowlens/spans\n\n` +
-        `${color.gray('Ctrl+C to stop')}\n`,
+        `${color.gray('spans:')}   POST ${url}/__flowlens/spans\n` +
+        `${color.gray('tracer:')}  ${url}/__flowlens/browser.js\n` +
+        (requestedPort === undefined && port !== DEFAULT_PORT
+          ? `${color.gray('note:')}    port ${DEFAULT_PORT} was busy, using ${port}\n`
+          : '') +
+        `\n${color.gray('Ctrl+C to stop')}\n`,
     );
+    if (args.open === true) openBrowser(url);
   });
 
   server.on('error', (error) => {
     const code = (error as NodeJS.ErrnoException).code;
+
+    // Walk up to the next port, but only if the user did not name one.
+    if (code === 'EADDRINUSE' && requestedPort === undefined && attempt < PORT_ATTEMPTS) {
+      attempt += 1;
+      port = DEFAULT_PORT + attempt;
+      server.listen(port, host);
+      return;
+    }
+
     if (code === 'EADDRINUSE') {
       process.stderr.write(
         `${color.red('error')} port ${port} is busy. Try \`flowlens serve ${args.root} --port ${port + 1}\`\n`,
+      );
+    } else if (code === 'EACCES') {
+      process.stderr.write(
+        `${color.red('error')} not allowed to listen on ${host}:${port}` +
+          `${port < 1024 ? ' (ports below 1024 need elevated privileges)' : ''}\n`,
+      );
+    } else if (code === 'EADDRNOTAVAIL') {
+      process.stderr.write(
+        `${color.red('error')} no interface with address ${host}. Try \`--host 127.0.0.1\`\n`,
       );
     } else {
       process.stderr.write(`${color.red('error')} ${String(error)}\n`);
@@ -162,7 +227,64 @@ export function runServe(args: ServeArgs): number {
     process.exit(1);
   });
 
+  server.listen(port, host);
   return 0;
+}
+
+/** `0.0.0.0` is a valid thing to bind but not a valid thing to click. */
+function displayHost(host: string): string {
+  if (host === '0.0.0.0' || host === '::') return '127.0.0.1';
+  // A bare IPv6 address needs brackets in a URL.
+  return host.includes(':') ? `[${host}]` : host;
+}
+
+/**
+ * The command that opens a URL on a given platform.
+ *
+ * Split out from {@link openBrowser} so the per-platform mapping can be
+ * asserted without launching anything: a test that called the real opener would
+ * open tabs on the developer's desktop, and could only ever check that it did
+ * not throw.
+ */
+export function browserCommand(
+  url: string,
+  platform: string = process.platform,
+): [string, string[]] {
+  if (platform === 'win32') {
+    // The empty string is `start`'s title argument — without it, a quoted URL
+    // would be treated as the window title and nothing would open.
+    return [process.env['ComSpec'] ?? 'cmd', ['/c', 'start', '', url]];
+  }
+  if (platform === 'darwin') return ['open', [url]];
+  return ['xdg-open', [url]];
+}
+
+/**
+ * Open the dashboard in the default browser.
+ *
+ * Best effort on purpose: on a headless machine, in a container, or over SSH
+ * there is nothing to open, and the URL is already printed above. A failure here
+ * must never take the server down with it, so every path is swallowed.
+ *
+ * `launch` is injectable so tests can prove that failure is swallowed without
+ * spawning a real process.
+ */
+export function openBrowser(
+  url: string,
+  platform: string = process.platform,
+  launch: typeof spawn = spawn,
+): void {
+  const [command, args] = browserCommand(url, platform);
+
+  try {
+    const child = launch(command, args, { stdio: 'ignore', detached: true });
+    child.on('error', () => {
+      /* no browser available — the URL is printed, that is enough */
+    });
+    child.unref();
+  } catch {
+    /* same */
+  }
 }
 
 /** Scan, then fold in any trace file that already exists. */

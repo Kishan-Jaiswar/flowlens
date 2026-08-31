@@ -56,6 +56,7 @@ export {
   analyzeFrontend,
   humanizeHandler,
   isConcreteEndpoint,
+  queryKeysOf,
   readHttpCall,
   type DetectedRequest,
   type FrontendConfig,
@@ -67,6 +68,15 @@ export {
   type BackendIndex,
 } from './analyzer/backend.js';
 export { collectConstants, emptyConstantTable, type ConstantTable } from './analyzer/constants.js';
+export {
+  TITLE_SEPARATOR,
+  composeTitle,
+  eventVerb,
+  humanizeName,
+  pageRouteOf,
+  screenOf,
+  type ScreenName,
+} from './analyzer/screens.js';
 export {
   DYNAMIC_MARKER,
   HTTP_METHODS,
@@ -80,11 +90,15 @@ export {
   type RouteLike,
 } from './analyzer/http.js';
 export {
+  DB_EFFECT_LABEL,
+  DB_EFFECT_ORDER,
   DB_OPERATIONS,
   collectionNameOf,
   dbAccessOf,
+  dbEffectOf,
   pluralize,
   type DbAccess,
+  type DbEffect,
 } from './analyzer/mongo.js';
 export { linkDataLineage, linkFrontendToBackend, type SeamResult } from './analyzer/seam.js';
 
@@ -99,7 +113,34 @@ export {
   type ResolveOptions,
   type RiskScore,
 } from './flow/resolve.js';
-export { renderFeatureDocument, renderFlowTree, renderTimings } from './flow/document.js';
+export {
+  isWhereFailure,
+  parseLocation,
+  resolveGraphFile,
+  whereIs,
+  type Location,
+  type ResolvedFile,
+  type WhereFailure,
+  type WhereFlowHit,
+  type WhereNode,
+  type WhereOptions,
+  type WhereReport,
+} from './flow/where.js';
+export {
+  renderFeatureDocument,
+  renderFlowTree,
+  renderTimings,
+  stepTitle,
+  type RenderOptions,
+} from './flow/document.js';
+export {
+  ASCII_GLYPHS,
+  UNICODE_GLYPHS,
+  glyphsFor,
+  preferAscii,
+  type AsciiProbe,
+  type Glyphs,
+} from './ui/glyphs.js';
 
 export {
   analyzeImpact,

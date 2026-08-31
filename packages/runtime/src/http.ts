@@ -81,7 +81,7 @@ export function flowlensHttp(options: HttpTracerOptions = {}) {
         durationMs: Date.now() - startedAt,
         attrs: {
           httpMethod: method,
-          // Prefer the route pattern (`/patients/:id`) over the concrete URL.
+          // Prefer the route pattern (`/customers/:id`) over the concrete URL.
           path: routePattern(request) ?? path,
           url: path,
           statusCode: response.statusCode,
@@ -102,7 +102,7 @@ export function flowlensHttp(options: HttpTracerOptions = {}) {
  * Useful for the handful of service methods you actually care about timing:
  *
  *   async create(dto) {
- *     return traceMethod('PatientsService', 'create', () => this.doCreate(dto));
+ *     return traceMethod('CustomersService', 'create', () => this.doCreate(dto));
  *   }
  */
 export async function traceMethod<T>(

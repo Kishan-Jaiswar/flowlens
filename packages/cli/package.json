@@ -10,10 +10,13 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
-    "bin"
+    "bin",
+    "dashboard",
+    "runtime"
   ],
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "prepack": "node ../../scripts/prepack.mjs"
   },
   "dependencies": {
     "@flowlens/core": "1.0.0"

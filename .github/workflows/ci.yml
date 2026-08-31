@@ -14,16 +14,27 @@ concurrency:
 
 jobs:
   test:
-    name: test (node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # FlowLens is pointed at whatever a developer has on disk, on whatever
+        # machine they have — so every supported OS runs the suite. Path
+        # handling, case sensitivity and symlink permissions all differ, and
+        # none of those differences show up on Linux alone.
+        #
         # Vitest 4 cannot start on Node 18 — rolldown imports `styleText` from
         # node:util, which arrived in 20.12. Node 18 compatibility is therefore
         # proven by the `compat` job below, which exercises the product itself
         # rather than the test runner.
+        os: [ubuntu-latest]
         node: ['20', '22', '24', '26']
+        include:
+          - os: windows-latest
+            node: '24'
+          - os: macos-latest
+            node: '24'
     steps:
       - uses: actions/checkout@v7
 
@@ -39,6 +50,81 @@ jobs:
 
       - name: Test
         run: npx vitest run
+
+  smoke:
+    name: smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      # The CLI is the product, so exercise the real commands on every OS
+      # rather than trusting unit tests alone. scripts/smoke.mjs is plain Node
+      # with no shell, so it is the same test everywhere.
+      - name: Every command a user actually types
+        run: npm run smoke
+
+  package:
+    name: install as a stranger (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # Every other job runs against the working tree, where the dashboard and
+      # the browser tracer simply exist. `npm pack` cannot reach outside a
+      # package directory, so a published CLI once shipped neither and answered
+      # `serve` with a 500 while all of CI stayed green. This packs the real
+      # tarballs, installs them into a throwaway project, and drives the result
+      # over HTTP — the only check that would have caught it.
+      - name: Pack, install elsewhere, and serve
+        run: npm run test:package
+
+  launcher:
+    name: launcher from a bare checkout (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # No `npm ci`, no build: this is the first command a new user runs after
+      # copying the project onto a machine, and it has to work by itself.
+      - name: ./flowlens with nothing installed
+        if: runner.os != 'Windows'
+        run: ./flowlens scan examples/crud
+
+      - name: flowlens.cmd with nothing installed
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: flowlens.cmd scan examples\crud
 
   compat:
     name: compat (node 18.18)
@@ -61,13 +147,7 @@ jobs:
       - name: The CLI works on the oldest supported Node
         run: |
           node --version
-          node packages/cli/bin/flowlens.mjs --version
-          node packages/cli/bin/flowlens.mjs scan examples/clinic
-          node packages/cli/bin/flowlens.mjs flows examples/clinic
-          node packages/cli/bin/flowlens.mjs doctor examples/clinic
-          node examples/clinic/demo-trace.mjs
-          node packages/cli/bin/flowlens.mjs trace examples/clinic
-          node packages/cli/bin/flowlens.mjs impact AuditService.record -p examples/clinic
+          npm run smoke
 
   quality:
     name: lint, format, typecheck
@@ -90,52 +170,3 @@ jobs:
 
       - name: Format
         run: npm run format:check
-
-  smoke:
-    name: end-to-end smoke test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-
-      - run: npm ci
-      - run: npm run build
-
-      # The CLI is the product, so exercise the real commands rather than
-      # trusting unit tests alone.
-      - name: Scan the example project
-        run: node packages/cli/bin/flowlens.mjs scan examples/clinic
-
-      - name: List flows
-        run: node packages/cli/bin/flowlens.mjs flows examples/clinic
-
-      - name: Merge a runtime trace
-        run: |
-          node examples/clinic/demo-trace.mjs
-          node packages/cli/bin/flowlens.mjs trace examples/clinic
-
-      - name: Generate a feature document
-        run: |
-          node packages/cli/bin/flowlens.mjs flow prescriptionform-submit-prescription \
-            examples/clinic --markdown --out /tmp/feature.md
-          test -s /tmp/feature.md
-
-      - name: Impact analysis
-        run: node packages/cli/bin/flowlens.mjs impact AuditService.record -p examples/clinic
-
-      - name: Doctor
-        run: node packages/cli/bin/flowlens.mjs doctor examples/clinic
-
-      - name: Dashboard responds
-        run: |
-          node packages/cli/bin/flowlens.mjs serve examples/clinic --port 4177 &
-          for i in $(seq 1 30); do
-            if curl -sf -o /dev/null http://127.0.0.1:4177/; then break; fi
-            sleep 1
-          done
-          curl -sf -o /dev/null http://127.0.0.1:4177/
-          curl -sf http://127.0.0.1:4177/api/flows | head -c 200

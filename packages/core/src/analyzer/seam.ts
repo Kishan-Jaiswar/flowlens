@@ -15,7 +15,7 @@ export interface SeamResult {
  *
  * Until this runs, FlowLens holds two disconnected islands: a frontend that
  * makes requests and a backend that answers them. This is where
- * `POST /api/patients` in a React handler becomes `PatientsController.create`.
+ * `POST /api/customers` in a React handler becomes `CustomersController.create`.
  *
  * The leftovers are as useful as the matches: an unmatched call is usually a
  * typo'd URL or a method mismatch, and an orphan route is usually dead code.
@@ -70,7 +70,7 @@ export function linkFrontendToBackend(graph: FlowGraph): SeamResult {
  * Field-level data lineage: follow one value from the input the user typed to
  * the column it lands in.
  *
- *   state.diagnosis -> payload.diagnosis -> CreateRxDto.diagnosis -> prescriptions.diagnosis
+ *   state.note -> payload.note -> CreateOrderDto.note -> orders.note
  *
  * Matching is by name, which is what the code itself relies on — a DTO field
  * and a schema path only line up because they share a name.

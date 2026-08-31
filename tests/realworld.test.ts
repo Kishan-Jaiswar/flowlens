@@ -36,35 +36,35 @@ const legacyScan = () => (cached ??= scan({ root: LEGACY_ROOT }));
 
 describe('global api prefix', () => {
   it('strips the prefix from backend routes as well as frontend calls', () => {
-    // @Controller('api/doctor') + @Get('patients') -> /doctor/patients
-    expect(joinRoutePath('api/doctor', 'patients', ['/api'])).toBe('/doctor/patients');
+    // @Controller('api/admin') + @Get('customers') -> /admin/customers
+    expect(joinRoutePath('api/admin', 'customers', ['/api'])).toBe('/admin/customers');
   });
 
   it('leaves routes alone when no prefix is configured', () => {
-    expect(joinRoutePath('api/doctor', 'patients', [])).toBe('/api/doctor/patients');
+    expect(joinRoutePath('api/admin', 'customers', [])).toBe('/api/admin/customers');
   });
 
   it('matches a prefixed frontend call to a prefixed backend route', () => {
     const { graph } = legacyScan();
-    const call = graph.nodesOfKind('api-call').find((n) => n.label === 'GET /doctor/patients');
+    const call = graph.nodesOfKind('api-call').find((n) => n.label === 'GET /admin/customers');
     expect(call).toBeDefined();
     expect(graph.successors(call!.id, ['handled-by']).map((n) => n.label)).toEqual([
-      'GET /doctor/patients',
+      'GET /admin/customers',
     ]);
   });
 });
 
 describe('interpolated base urls', () => {
   it('drops a leading interpolation', () => {
-    expect(normalizePath('<param>/appointments/monthly')).toBe('/appointments/monthly');
+    expect(normalizePath('<param>/shipments/monthly')).toBe('/shipments/monthly');
   });
 
   it('drops it when the endpoint follows immediately', () => {
-    expect(normalizePath('<param>appointments/monthly')).toBe('/appointments/monthly');
+    expect(normalizePath('<param>shipments/monthly')).toBe('/shipments/monthly');
   });
 
   it('keeps later interpolations as route parameters', () => {
-    expect(normalizePath('<param>/patients/<param>/notes')).toBe('/patients/:param/notes');
+    expect(normalizePath('<param>/customers/<param>/notes')).toBe('/customers/:param/notes');
   });
 
   it('only drops the first one', () => {
@@ -72,20 +72,20 @@ describe('interpolated base urls', () => {
   });
 
   it('does not touch a path that starts with a literal', () => {
-    expect(normalizePath('/patients/<param>')).toBe('/patients/:param');
+    expect(normalizePath('/customers/<param>')).toBe('/customers/:param');
   });
 });
 
 describe('url constants', () => {
   it('collects module-level string constants', () => {
     const table = collectConstants(loadProject({ root: LEGACY_ROOT }));
-    expect(table.resolve('getPatientsList')).toBe('/api/doctor/patients');
-    expect(table.resolve('createAppointment')).toBe('/api/appointments');
+    expect(table.resolve('getCustomersList')).toBe('/api/admin/customers');
+    expect(table.resolve('createShipment')).toBe('/api/shipments');
   });
 
   it('resolves a template constant built from another constant', () => {
     const table = collectConstants(loadProject({ root: LEGACY_ROOT }));
-    expect(table.resolve('getPatientById')).toBe('/api/doctor/patients');
+    expect(table.resolve('getCustomerById')).toBe('/api/admin/customers');
   });
 
   it('refuses to guess when a name is declared twice with different values', () => {
@@ -104,24 +104,24 @@ describe('house-built request wrappers', () => {
   it('reads the verb from the function name and the url from options', () => {
     const { graph } = legacyScan();
     const labels = graph.nodesOfKind('api-call').map((n) => n.label);
-    expect(labels).toContain('GET /doctor/patients');
-    expect(labels).toContain('POST /appointments');
+    expect(labels).toContain('GET /admin/customers');
+    expect(labels).toContain('POST /shipments');
   });
 
   it('supports name suffixes like NoLoader and V3', () => {
     const labels = legacyScan()
       .graph.nodesOfKind('api-call')
       .map((n) => n.label);
-    expect(labels).toContain('PATCH /doctor/patients/:param');
-    expect(labels).toContain('GET /clinic/settings');
+    expect(labels).toContain('PATCH /admin/customers/:param');
+    expect(labels).toContain('GET /shop/settings');
   });
 
   it('appends a params suffix that extends the path', () => {
-    // getRequest({ url: getPatientsList, params: `/${id}` }) -> /doctor/patients/:id
+    // getRequest({ url: getCustomersList, params: `/${id}` }) -> /admin/customers/:id
     const labels = legacyScan()
       .graph.nodesOfKind('api-call')
       .map((n) => n.label);
-    expect(labels).toContain('GET /doctor/patients/:param');
+    expect(labels).toContain('GET /admin/customers/:param');
   });
 
   it('ignores a params suffix that is only a query string', () => {
@@ -195,7 +195,7 @@ describe('house-built request wrappers', () => {
 describe('action labels in real markup', () => {
   it('humanizes a handler name', () => {
     expect(humanizeHandler('handleDownloadReport')).toBe('Download Report');
-    expect(humanizeHandler('onSaveRx')).toBe('Save Rx');
+    expect(humanizeHandler('onSaveSku')).toBe('Save Sku');
     expect(humanizeHandler('handleClick')).toBeUndefined();
   });
 
@@ -221,16 +221,16 @@ describe('plain JavaScript frontends', () => {
 
   it('reaches the database through a wrapper call', () => {
     const flow = resolveFlows(legacyScan().graph).find((f) =>
-      f.endpoints.includes('POST /appointments'),
+      f.endpoints.includes('POST /shipments'),
     );
-    expect(flow?.collections.map((c) => c.collection)).toContain('appointments');
+    expect(flow?.collections.map((c) => c.collection)).toContain('shipments');
   });
 });
 
 describe('mongoose collection naming', () => {
   it('leaves an already-plural model name alone', () => {
-    // `class ClinicSettings` -> clinicsettings, NOT clinicsettingses
-    expect(pluralize('clinicsettings')).toBe('clinicsettings');
+    // `class ShopSettings` -> shopsettings, NOT shopsettingses
+    expect(pluralize('shopsettings')).toBe('shopsettings');
     expect(pluralize('settings')).toBe('settings');
   });
 
@@ -243,7 +243,7 @@ describe('mongoose collection naming', () => {
     const collections = legacyScan()
       .graph.nodesOfKind('collection')
       .map((n) => n.label);
-    expect(collections).toContain('pharma_stock_maps');
+    expect(collections).toContain('stock_maps');
   });
 });
 

@@ -1,0 +1,30 @@
+#!/bin/sh
+# FlowLens launcher for macOS and Linux.
+#
+# Run FlowLens straight from a checkout — no install step, no global package:
+#
+#   ./flowlens init ~/code/my-app
+#   ./flowlens scan ~/code/my-app
+#
+# The first run installs dependencies and builds; later runs go straight
+# through. See bin/flowlens.mjs.
+set -e
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "FlowLens needs Node.js (18.18 or newer). Install it from https://nodejs.org" >&2
+  exit 1
+fi
+
+# Resolve this script's directory even when it is reached through a symlink,
+# so the launcher can live on a PATH.
+target="$0"
+while [ -L "$target" ]; do
+  link=$(readlink "$target")
+  case "$link" in
+    /*) target="$link" ;;
+    *) target="$(dirname "$target")/$link" ;;
+  esac
+done
+here=$(cd "$(dirname "$target")" && pwd)
+
+exec node "$here/bin/flowlens.mjs" "$@"

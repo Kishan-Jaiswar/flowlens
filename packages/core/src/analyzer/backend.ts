@@ -4,6 +4,7 @@ import {
   type ClassDeclaration,
   type MethodDeclaration,
   type ParameterDeclaration,
+  type PropertyDeclaration,
   type SourceFile,
 } from 'ts-morph';
 import type { FlowGraph } from '../graph/graph.js';
@@ -23,9 +24,9 @@ import {
   readString,
 } from './ast.js';
 import { classifyFile, isServerCandidate } from './classify.js';
-import { linkDbOperations } from './dbaccess.js';
+import { linkDbOperations, type CollectionAliases } from './dbaccess.js';
 import { HTTP_METHODS, joinRoutePath, normalizePath, type HttpMethod } from './http.js';
-import { collectionNameOf, dbAccessOf } from './mongo.js';
+import { collectionNameOf, dbEffectOf, type DbEffect } from './mongo.js';
 import type { LoadedProject } from './project.js';
 
 /** Nest route decorators, mapped to their HTTP verb. */
@@ -44,7 +45,7 @@ const ROUTE_DECORATORS: Record<string, HttpMethod | 'ALL'> = {
  * Names that may hold an Express/Fastify router — but only in a file that
  * actually imports one.
  *
- * Without that guard, a frontend HTTP client (`api.post('/patients', body)`)
+ * Without that guard, a frontend HTTP client (`api.post('/customers', body)`)
  * looks exactly like a route declaration and the analyzer invents phantom
  * backend routes for every call the frontend makes.
  */
@@ -70,9 +71,9 @@ interface ClassInfo {
   role: ClassRole;
   routePrefix: string;
   declaration: ClassDeclaration;
-  /** `this.patientsService` -> `PatientsService` */
+  /** `this.customersService` -> `CustomersService` */
   injected: Map<string, string>;
-  /** `this.patientModel` -> `Patient` */
+  /** `this.customerModel` -> `Customer` */
   models: Map<string, string>;
   methods: Map<string, MethodDeclaration>;
 }
@@ -88,13 +89,15 @@ export interface BackendConfig {
   /**
    * Prefixes stripped from route paths — must match the frontend list.
    *
-   * A Nest app with `setGlobalPrefix('api')` or `@Controller('api/doctor')`
-   * serves `/api/doctor/patients`; its frontend calls the same URL. Stripping
+   * A Nest app with `setGlobalPrefix('api')` or `@Controller('api/admin')`
+   * serves `/api/admin/customers`; its frontend calls the same URL. Stripping
    * on only one side is why a 506-route backend matched zero frontend calls.
    */
   apiPrefixes: string[];
   /** Resolve identifiers (route path constants) to their literal value. */
   resolveConstant?: (name: string) => string | undefined;
+  /** Collection handles produced by a factory; see `collectionAliasesOf`. */
+  collectionAliases?: CollectionAliases;
 }
 
 export const DEFAULT_BACKEND_CONFIG: BackendConfig = {
@@ -143,7 +146,7 @@ export function analyzeBackend(
   }
 
   for (const info of index.classes.values()) {
-    safely(info.file, () => resolveConstructor(info, graph, index));
+    safely(info.file, () => resolveInjection(info, graph, index));
   }
 
   for (const info of index.classes.values()) {
@@ -255,7 +258,7 @@ function nodeIdFor(role: ClassRole, rel: string, name: string): string {
   }
 }
 
-/** `@Schema() class Patient { @Prop() name: string }` */
+/** `@Schema() class Customer { @Prop() name: string }` */
 function declareSchemaClass(
   declaration: ClassDeclaration,
   name: string,
@@ -324,7 +327,7 @@ function declareDto(
   }
 }
 
-/** Plain Mongoose: `new Schema({...})` + `model('Patient', schema)`. */
+/** Plain Mongoose: `new Schema({...})` + `model('Customer', schema)`. */
 function declareMongooseModels(
   file: SourceFile,
   rel: string,
@@ -402,28 +405,44 @@ function registerModel(
 // Pass 2 — resolution
 // ---------------------------------------------------------------------------
 
-/** Read constructor injection: services and Mongoose models. */
-function resolveConstructor(info: ClassInfo, graph: FlowGraph, index: BackendIndex): void {
+/**
+ * Read dependency injection: services and Mongoose models.
+ *
+ * Nest supports two forms, and a real codebase mixes them in the same class:
+ *
+ *   constructor(@InjectModel(Vendor.name) private vendorModel: Model<D>) {}
+ *
+ *   @InjectModel(VendorProduct.name)
+ *   private readonly vendorProductModel: Model<VendorProductDocument>;
+ *
+ * Reading only the constructor silently drops every query made through a
+ * property-injected model, so the flow stops at the service and the collection
+ * never appears — a missing layer, not a missing detail.
+ */
+function resolveInjection(info: ClassInfo, graph: FlowGraph, index: BackendIndex): void {
   const [constructor] = info.declaration.getConstructors();
-  if (!constructor) return;
+  const members: Array<ParameterDeclaration | PropertyDeclaration> = [
+    ...(constructor?.getParameters() ?? []),
+    ...info.declaration.getProperties(),
+  ];
 
-  for (const parameter of constructor.getParameters()) {
-    const receiver = `this.${parameter.getName()}`;
+  for (const member of members) {
+    const receiver = `this.${member.getName()}`;
 
-    const modelName = injectedModelName(parameter);
+    const modelName = injectedModelName(member);
     if (modelName) {
       info.models.set(receiver, modelName);
       if (!index.collections.has(modelName)) {
         registerModel(graph, index, modelName, collectionNameOf(modelName), {
           file: info.file,
-          line: lineOf(parameter),
+          line: lineOf(member),
         });
       }
       graph.addEdge({ from: info.nodeId, to: ids.model(modelName), kind: 'injects' });
       continue;
     }
 
-    const typeName = baseTypeName(parameter);
+    const typeName = baseTypeName(member);
     if (!typeName) continue;
     const target = index.classes.get(typeName);
     if (!target || (target.role !== 'service' && target.role !== 'controller')) continue;
@@ -432,9 +451,9 @@ function resolveConstructor(info: ClassInfo, graph: FlowGraph, index: BackendInd
   }
 }
 
-/** `@InjectModel(Patient.name)` or `@InjectModel('Patient')`. */
-function injectedModelName(parameter: ParameterDeclaration): string | undefined {
-  const decorator = parameter.getDecorators().find((d) => d.getName() === 'InjectModel');
+/** `@InjectModel(Customer.name)` or `@InjectModel('Customer')`. */
+function injectedModelName(member: ParameterDeclaration | PropertyDeclaration): string | undefined {
+  const decorator = member.getDecorators().find((d) => d.getName() === 'InjectModel');
   if (decorator) {
     const [argument] = decorator.getArguments();
     if (argument) {
@@ -446,21 +465,21 @@ function injectedModelName(parameter: ParameterDeclaration): string | undefined 
       return argument.getText().replace(/\.name$/, '');
     }
   }
-  // Plain Mongoose in a service: `private patientModel: Model<Patient>`
-  const typeText = parameter.getTypeNode()?.getText() ?? '';
+  // Plain Mongoose in a service: `private customerModel: Model<Customer>`
+  const typeText = member.getTypeNode()?.getText() ?? '';
   const generic = /^Model<\s*([A-Za-z0-9_]+)/.exec(typeText);
   if (generic?.[1]) return generic[1].replace(/(Document|Entity)$/, '');
   return undefined;
 }
 
-function baseTypeName(parameter: ParameterDeclaration): string | undefined {
-  const typeText = parameter.getTypeNode()?.getText();
+function baseTypeName(member: ParameterDeclaration | PropertyDeclaration): string | undefined {
+  const typeText = member.getTypeNode()?.getText();
   if (!typeText) return undefined;
   const match = /^([A-Za-z0-9_$]+)/.exec(typeText.trim());
   return match?.[1];
 }
 
-/** Turn `@Controller('patients')` + `@Post(':id/notes')` into route nodes. */
+/** Turn `@Controller('customers')` + `@Post(':id/notes')` into route nodes. */
 function resolveRoutes(info: ClassInfo, graph: FlowGraph, config: BackendConfig): void {
   if (info.role !== 'controller') return;
 
@@ -496,7 +515,7 @@ function resolveRoutes(info: ClassInfo, graph: FlowGraph, config: BackendConfig)
   }
 }
 
-/** `@Body() dto: CreatePatientDto` -> route validates dto. */
+/** `@Body() dto: CreateCustomerDto` -> route validates dto. */
 function linkRouteDto(method: MethodDeclaration, graph: FlowGraph, routeId: string): void {
   for (const parameter of method.getParameters()) {
     const isBody = parameter
@@ -523,11 +542,11 @@ function resolveMethodBodies(info: ClassInfo, graph: FlowGraph, index: BackendIn
       const member = calleeMember(call);
       if (!receiver) continue;
 
-      // 1. Database access: this.patientModel.find(...)
+      // 1. Database access: this.customerModel.find(...)
       const modelName = resolveModelReceiver(receiver, info);
       if (modelName) {
-        const access = dbAccessOf(member);
-        if (!access) continue;
+        const effect = dbEffectOf(member);
+        if (!effect) continue;
         recordDbOp(graph, index, {
           methodId,
           modelName,
@@ -535,12 +554,12 @@ function resolveMethodBodies(info: ClassInfo, graph: FlowGraph, index: BackendIn
           file: info.file,
           line: lineOf(call),
           site: `${info.name}.${methodName}`,
-          access,
+          effect,
         });
         continue;
       }
 
-      // 2. Injected service: this.patientsService.create(...)
+      // 2. Injected service: this.customersService.create(...)
       const targetClass = info.injected.get(receiver);
       if (targetClass) {
         const target = index.classes.get(targetClass);
@@ -576,7 +595,7 @@ function resolveMethodBodies(info: ClassInfo, graph: FlowGraph, index: BackendIn
       }
     }
 
-    // `new this.patientModel(dto).save()` — the document-style write.
+    // `new this.customerModel(dto).save()` — the document-style write.
     for (const expression of method.getDescendantsOfKind(SyntaxKind.NewExpression)) {
       const target = expression.getExpression().getText().replace(/\s+/g, '');
       const modelName = resolveModelReceiver(target, info);
@@ -588,7 +607,9 @@ function resolveMethodBodies(info: ClassInfo, graph: FlowGraph, index: BackendIn
         file: info.file,
         line: lineOf(expression),
         site: `${info.name}.${methodName}`,
-        access: 'write',
+        // `save()` alone is ambiguous, but `new Model(...)` is not: the document
+        // is new here, so this is an insert rather than an unknown write.
+        effect: 'create',
       });
     }
   }
@@ -619,7 +640,7 @@ function recordDbOp(
     file: string;
     line: number;
     site: string;
-    access: 'read' | 'write';
+    effect: DbEffect;
   },
 ): void {
   const collection = index.collections.get(input.modelName) ?? collectionNameOf(input.modelName);
@@ -632,7 +653,8 @@ function recordDbOp(
     meta: {
       collection,
       operation: input.operation,
-      access: input.access,
+      access: input.effect === 'read' ? 'read' : 'write',
+      effect: input.effect,
       model: input.modelName,
     },
   });
@@ -640,11 +662,11 @@ function recordDbOp(
   graph.addEdge({
     from: opId,
     to: ids.collection(collection),
-    kind: input.access === 'read' ? 'reads' : 'writes',
+    kind: input.effect === 'read' ? 'reads' : 'writes',
   });
 }
 
-/** `router.post('/patients', createPatient)` — Express/Fastify style. */
+/** `router.post('/customers', createCustomer)` — Express/Fastify style. */
 function declareExpressRoutes(
   file: SourceFile,
   rel: string,
@@ -709,7 +731,7 @@ function declareExpressRoutes(
       ? (file.getVariableDeclaration(handler.getText())?.getInitializer() ??
         file.getFunction(handler.getText()))
       : handler;
-    if (body) linkDbOperations(body, file, rel, graph, handlerId);
+    if (body) linkDbOperations(body, file, rel, graph, handlerId, config.collectionAliases);
   }
 }
 

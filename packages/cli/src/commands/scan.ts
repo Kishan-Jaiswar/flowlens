@@ -1,13 +1,22 @@
 import { relative } from 'node:path';
 import { findBrokenCalls, findDeadEndpoints, resolveFlows, scan } from '@flowlens/core';
 import { graphPath, saveGraph } from '../paths.js';
-import { color, heading, table } from '../ui.js';
+import { color, glyph, heading, table } from '../ui.js';
 
 export interface ScanArgs {
   root: string;
   /** Sibling repositories scanned into the same graph. */
   extraRoots?: string[];
+  /** `--out`: where to write the graph. */
   out?: string;
+  /**
+   * `--graph`: the graph file the other commands will read.
+   *
+   * Honoured here as well as by `flows`/`flow`/`impact`, so that
+   * `flowlens scan -g g.json && flowlens flows -g g.json` works. Writing the
+   * graph somewhere the next command does not look is never what anyone meant.
+   */
+  graph?: string;
   json?: boolean;
   quiet?: boolean;
   includeTests?: boolean;
@@ -41,7 +50,7 @@ export function runScan(args: ScanArgs): number {
     ...(args.maxFiles ? { maxFiles: args.maxFiles } : {}),
   });
 
-  const target = saveGraph(graphPath(args.root, args.out), result.graph);
+  const target = saveGraph(graphPath(args.root, args.out ?? args.graph), result.graph);
 
   const flows = resolveFlows(result.graph);
   const broken = findBrokenCalls(result.graph);
@@ -109,7 +118,7 @@ export function runScan(args: ScanArgs): number {
     );
   }
 
-  process.stdout.write(heading('Frontend ↔ backend') + '\n');
+  process.stdout.write(heading(`Frontend ${glyph.exchange} backend`) + '\n');
   process.stdout.write(
     `${color.green(String(result.seam.matched))} API calls matched a backend route\n`,
   );
@@ -122,7 +131,7 @@ export function runScan(args: ScanArgs): number {
         call.meta?.['mismatch'] === 'method'
           ? ` ${color.gray(`(backend has ${(call.meta['availableMethods'] as string[]).join(', ')})`)}`
           : '';
-      process.stdout.write(`  ${color.yellow('⚠')} ${call.label}${hint}\n`);
+      process.stdout.write(`  ${color.yellow(glyph.warn)} ${call.label}${hint}\n`);
     }
     if (broken.length > 8) process.stdout.write(color.gray(`  … ${broken.length - 8} more\n`));
   }
@@ -146,7 +155,7 @@ export function runScan(args: ScanArgs): number {
       table(
         flows.slice(0, 10).map((flow) => [
           flow.id,
-          flow.label.slice(0, 32),
+          flow.title.slice(0, 40),
           flow.endpoints[0] ?? '',
           // A collection read *and* written appears twice in `collections`;
           // the summary only needs the name once.
@@ -162,7 +171,7 @@ export function runScan(args: ScanArgs): number {
   if (result.diagnostics.length > 0) {
     process.stdout.write(heading('Notes') + '\n');
     for (const note of result.diagnostics) {
-      process.stdout.write(`  ${color.yellow('•')} ${note}\n`);
+      process.stdout.write(`  ${color.yellow(glyph.bullet)} ${note}\n`);
     }
   }
 
@@ -170,7 +179,7 @@ export function runScan(args: ScanArgs): number {
     const shown = result.warnings.slice(0, 5);
     process.stdout.write(heading(`Skipped (${result.warnings.length})`) + '\n');
     for (const warning of shown) {
-      process.stdout.write(`  ${color.gray('·')} ${warning}\n`);
+      process.stdout.write(`  ${color.gray(glyph.dot)} ${warning}\n`);
     }
     if (result.warnings.length > shown.length) {
       process.stdout.write(color.gray(`  … ${result.warnings.length - shown.length} more\n`));
