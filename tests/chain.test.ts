@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { queryKeysOf, resolveFlows, scan } from '@flowlens/core';
+import { queryKeysOf, resolveFlows, scan } from '@flowslens/core';
 
 /**
  * The product promise, end to end: click a thing, and see the component, the

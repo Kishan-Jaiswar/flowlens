@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FlowGraph, collectionNameOf, dbAccessOf, dbEffectOf, pluralize } from '@flowlens/core';
+import { FlowGraph, collectionNameOf, dbAccessOf, dbEffectOf, pluralize } from '@flowslens/core';
 
 function sample(): FlowGraph {
   const graph = new FlowGraph({ root: '/tmp/example' });

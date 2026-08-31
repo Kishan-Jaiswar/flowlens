@@ -18,7 +18,7 @@ import {
   preferAscii,
   renderFlowTree,
   resolveFlows,
-} from '@flowlens/core';
+} from '@flowslens/core';
 import { looksLikePath, splitPositionals } from '../packages/cli/dist/args.js';
 import { detectSetup, findSiblingRepositories } from '../packages/cli/dist/commands/init.js';
 import { browserCommand, openBrowser } from '../packages/cli/dist/commands/serve.js';

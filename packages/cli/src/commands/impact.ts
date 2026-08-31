@@ -4,7 +4,7 @@ import {
   findDeadEndpoints,
   findNodes,
   findSharedWrites,
-} from '@flowlens/core';
+} from '@flowslens/core';
 import { graphPath, loadGraph } from '../paths.js';
 import { color, glyph, heading, table } from '../ui.js';
 

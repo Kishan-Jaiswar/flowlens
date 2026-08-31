@@ -6,7 +6,7 @@ import {
   resolveFlows,
   type FeatureFlow,
   type FlowGraph,
-} from '@flowlens/core';
+} from '@flowslens/core';
 import { graphPath, loadGraph } from '../paths.js';
 import { ascii, color, evidenceBadge, glyph, heading, riskBadge, table } from '../ui.js';
 

@@ -5,7 +5,7 @@ import {
   parseLocation,
   resolveGraphFile,
   whereIs,
-} from '@flowlens/core';
+} from '@flowslens/core';
 import { splitPositionals } from '../packages/cli/src/args.js';
 import { exampleScan } from './helpers.js';
 

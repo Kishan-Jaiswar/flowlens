@@ -7,7 +7,7 @@ import {
   renderFeatureDocument,
   renderFlowTree,
   resolveFlows,
-} from '@flowlens/core';
+} from '@flowslens/core';
 import { exampleScan } from './helpers.js';
 
 describe('scanning the example shop app', () => {

@@ -6,7 +6,7 @@ import {
   resolveFlows,
   scan,
   type TraceEvent,
-} from '@flowlens/core';
+} from '@flowslens/core';
 import { EXAMPLE_ROOT } from './helpers.js';
 
 /**

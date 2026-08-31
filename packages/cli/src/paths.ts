@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FlowGraph, type SerializedGraph } from '@flowlens/core';
+import { FlowGraph, type SerializedGraph } from '@flowslens/core';
 
 export const GRAPH_FILE = 'graph.json';
 export const TRACE_FILE = 'trace.jsonl';

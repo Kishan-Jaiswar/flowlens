@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { mergeRuntimeTrace, parseTraceFile } from '@flowlens/core';
+import { mergeRuntimeTrace, parseTraceFile } from '@flowslens/core';
 import { graphPath, loadGraph, saveGraph, tracePath } from '../paths.js';
 import { color, heading, table } from '../ui.js';
 

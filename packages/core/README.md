@@ -19,7 +19,7 @@ code it analyses.
 ## Usage
 
 ```js
-import { resolveFlows, scan, whereIs } from '@flowlens/core';
+import { resolveFlows, scan, whereIs } from '@flowslens/core';
 
 const { graph, seam, stats } = scan({ root: './my-app' });
 

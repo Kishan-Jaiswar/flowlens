@@ -1,5 +1,5 @@
 {
-  "name": "@flowlens/core",
+  "name": "@flowslens/core",
   "version": "1.0.0",
   "description": "FlowLens graph engine, static analyzers, flow resolver and impact analysis",
   "type": "module",

@@ -13,7 +13,7 @@ import {
   resolveFlows,
   scan,
   type FlowGraph,
-} from '@flowlens/core';
+} from '@flowslens/core';
 import { browserTracerFile, dashboardDir, graphPath, saveGraph, tracePath } from '../paths.js';
 import { color } from '../ui.js';
 

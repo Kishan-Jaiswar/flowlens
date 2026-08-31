@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bestRouteMatch, joinRoutePath, normalizePath, routeMatches } from '@flowlens/core';
+import { bestRouteMatch, joinRoutePath, normalizePath, routeMatches } from '@flowslens/core';
 
 describe('normalizePath', () => {
   it('strips the api prefix', () => {

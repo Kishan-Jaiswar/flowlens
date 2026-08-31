@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, resolveFlows, routePathFromFile, scan } from '@flowlens/core';
+import { loadConfig, resolveFlows, routePathFromFile, scan } from '@flowslens/core';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const STRUCTURES = resolve(here, 'fixtures', 'structures');

@@ -1,4 +1,4 @@
-import { isWhereFailure, whereIs, type WhereFlowHit, type WhereNode } from '@flowlens/core';
+import { isWhereFailure, whereIs, type WhereFlowHit, type WhereNode } from '@flowslens/core';
 import { graphPath, loadGraph } from '../paths.js';
 import { ascii, color, glyph, heading, riskBadge, table } from '../ui.js';
 

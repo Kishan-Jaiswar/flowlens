@@ -1,5 +1,5 @@
 import { parseArgs } from 'node:util';
-import { loadConfig } from '@flowlens/core';
+import { loadConfig } from '@flowslens/core';
 import { splitPositionals } from './args.js';
 import { runFlow, runFlows } from './commands/flows.js';
 import { runDoctor, runImpact } from './commands/impact.js';

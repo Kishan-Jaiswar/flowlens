@@ -12,7 +12,7 @@ import {
   traceMethod,
   type TraceEvent,
 } from '@flowlens/runtime';
-import { mergeRuntimeTrace, parseTraceFile, resolveFlows, scan } from '@flowlens/core';
+import { mergeRuntimeTrace, parseTraceFile, resolveFlows, scan } from '@flowslens/core';
 import { EXAMPLE_ROOT } from './helpers.js';
 
 /**

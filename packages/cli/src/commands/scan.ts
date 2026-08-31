@@ -1,5 +1,5 @@
 import { relative } from 'node:path';
-import { findBrokenCalls, findDeadEndpoints, resolveFlows, scan } from '@flowlens/core';
+import { findBrokenCalls, findDeadEndpoints, resolveFlows, scan } from '@flowslens/core';
 import { graphPath, saveGraph } from '../paths.js';
 import { color, glyph, heading, table } from '../ui.js';
 

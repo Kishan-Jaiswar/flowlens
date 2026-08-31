@@ -10,7 +10,7 @@ import {
   resolveFlows,
   screenOf,
   stepTitle,
-} from '@flowlens/core';
+} from '@flowslens/core';
 import { exampleScan } from './helpers.js';
 
 const here = dirname(fileURLToPath(import.meta.url));

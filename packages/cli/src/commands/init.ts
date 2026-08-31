@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, relative, resolve, sep } from 'node:path';
-import { CONFIG_FILENAMES } from '@flowlens/core';
+import { CONFIG_FILENAMES } from '@flowslens/core';
 import { color, glyph, heading } from '../ui.js';
 
 export interface InitArgs {

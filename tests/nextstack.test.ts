@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { resolveFlows, scan } from '@flowlens/core';
+import { resolveFlows, scan } from '@flowslens/core';
 
 /**
  * The other common full-stack shape: one Next.js App Router project, the native

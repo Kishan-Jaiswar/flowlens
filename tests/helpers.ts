@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { scan, type ScanResult } from '@flowlens/core';
+import { scan, type ScanResult } from '@flowslens/core';
 
 const here = dirname(fileURLToPath(import.meta.url));
 

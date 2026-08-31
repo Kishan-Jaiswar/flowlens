@@ -1,5 +1,5 @@
 {
-  "name": "@flowlens/cli",
+  "name": "@flowslens/cli",
   "version": "1.0.0",
   "description": "FlowLens command line interface",
   "type": "module",
@@ -19,7 +19,7 @@
     "prepack": "node ../../scripts/prepack.mjs"
   },
   "dependencies": {
-    "@flowlens/core": "1.0.0"
+    "@flowslens/core": "1.0.0"
   },
   "engines": {
     "node": ">=18.18"

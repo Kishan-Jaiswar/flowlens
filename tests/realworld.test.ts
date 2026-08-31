@@ -11,7 +11,7 @@ import {
   pluralize,
   resolveFlows,
   scan,
-} from '@flowlens/core';
+} from '@flowslens/core';
 
 const here = dirname(fileURLToPath(import.meta.url));
 

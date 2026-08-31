@@ -1,5 +1,5 @@
 {
-  "name": "@flowlens/runtime",
+  "name": "@flowslens/runtime",
   "version": "1.0.0",
   "description": "Zero-dependency runtime tracer for FlowLens (HTTP + Mongoose + browser)",
   "type": "module",
@@ -10,7 +10,9 @@
     "./browser": "./dist/browser.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -b"

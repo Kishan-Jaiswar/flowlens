@@ -1,6 +1,6 @@
 /** Terminal output helpers: colour when it helps, plain text when piped. */
 
-import { glyphsFor, preferAscii } from '@flowlens/core';
+import { glyphsFor, preferAscii } from '@flowslens/core';
 
 const useColor =
   process.stdout.isTTY === true &&
