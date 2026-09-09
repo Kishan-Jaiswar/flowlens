@@ -7,8 +7,107 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-The theme is: point FlowLens at any project, on any machine, and have the first
-command work — without leaving a mark on that project.
+Nothing yet.
+
+## [1.0.1] - 2026-09-09
+
+**A documentation release, and an important one.** The READMEs published with
+1.0.0 still named the pre-rename `@flowlens` scope, so all three npm pages told
+readers to run `npx @flowlens/cli` — a package that does not exist. Anyone who
+copied the install command off npm got "package not found". The package
+manifests were renamed for 1.0.0; the READMEs inside the tarballs were not.
+
+No runtime behaviour changes, apart from the `--version` and `--help` fixes
+below.
+
+### Fixed
+
+- **`flowlens --version` reported `0.1.0` while the published packages were
+  `1.0.0`.** The version was a literal in `packages/cli/src/index.ts`; it is now
+  read from the package manifest, and a test asserts the two agree.
+- **The scope rename to `@flowslens` was applied incompletely**, which left the
+  repository in a state where `npm test` and `npm run test:package` both failed:
+  - `tests/tracer.test.ts` still imported `@flowslens/runtime`'s old name, so the
+    whole suite failed to load — 26 tests never ran.
+  - `scripts/package-test.mjs` looked for `flowlens-*.tgz` tarballs and a
+    `node_modules/@flowlens` directory that `npm pack` no longer produces. It now
+    derives the scope from `packages/cli/package.json` rather than hardcoding it.
+  - The remaining stale references were in the runtime and CLI help text, the
+    example app's tracer wiring, and the docs.
+- **`npm run lint` failed with 43 errors on any checkout where `prepack` had
+  run.** `packages/cli/dashboard/` and `packages/cli/runtime/` are generated
+  copies, gitignored but not ignored by ESLint, so browser globals in the copied
+  dashboard were reported as `no-undef`. They are ignored now; the originals are
+  still linted where they live.
+
+### Documentation
+
+- **`flowlens --help` advertised the wrong defaults.** It said the graph and
+  trace default to `<project>/.flowlens/…`, which is where they went before
+  1.0.0 — the opposite of the guarantee the tool is built on. The closing note
+  said runtime tracing "writes to a local `.flowlens/trace.jsonl` in your own
+  project", which is also no longer true. Both corrected, and `FLOWLENS_CACHE`
+  and `FLOWLENS_TRACE` are now listed under ENVIRONMENT.
+- **The published `@flowslens/runtime` README documented `traceMethod`
+  incorrectly.** It showed `traceMethod('OrdersService.create', fn)` returning a
+  wrapped function. The real signature is
+  `traceMethod(className, methodName, fn, options?)` — it is `async` and wraps a
+  _call_, so the documented form threw `TypeError: fn is not a function`.
+- The npm READMEs for all three packages were rewritten for a first-time
+  reader: what each one is for, whether you need it, install, then a numbered
+  path to a working result.
+  - `@flowslens/cli` now opens with **"will this work on my project?"** — a
+    reads/does-not-read table — because installing a tool that cannot see your
+    stack is the most expensive way to find that out. It also gained a
+    troubleshooting section for the failures people actually hit.
+  - `@flowslens/runtime` gained copy-paste blocks per stack (Express CommonJS,
+    Express ESM, NestJS, Next.js) rather than one generic snippet, and full
+    option tables.
+  - `@flowslens/core` gained a complete runnable first script and a
+    fail-CI-on-findings example.
+  - All three now state that the packages are **ESM-only**, and that
+    `require()` throws `ERR_REQUIRE_ESM` on Node 18–22.11 while working on
+    22.12+. Verified on 18.20, 24.18 and 26.5.
+  - Every command and API example in them was executed against
+    `examples/crud`. That caught `analyzeImpact` needing a node id rather than
+    a symbol name, `resolveFlow` taking an entry node id rather than a flow id,
+    `renderFeatureDocument` taking `(graph, flow)`, and the `scan` option being
+    `requestFunctionPattern` rather than a shortened form.
+- Stale `.flowlens/` paths corrected in the NestJS example's comments and in
+  four source comments that told contributors the graph is written into the
+  scanned project.
+
+- Corrected claims that had drifted: the test count (200 → 305), the project
+  status (`v0.1, pre-release` → 1.0.0 on npm), the roadmap's "not published"
+  entry, the dashboard's line count, and the milestone numbering after 1.0.
+- **`SECURITY.md` said output goes to a `.flowlens/` directory inside your
+  project.** It does not, and has not since 0.1.0 — artifacts live in the OS
+  cache. Corrected, with the per-platform paths.
+- `packages/runtime/README.md` told users to pass `--trace .flowlens/trace.jsonl`,
+  reintroducing the file-in-your-repo behaviour that 1.0.0 removed.
+- Documented that **development requires Node 20+** even though the published
+  CLI supports 18.18: Vitest 4 cannot start on Node 18, so `npm test` there dies
+  with a `SyntaxError` about `styleText` rather than a useful message.
+- Documented the naming split — packages are `@flowslens/*`, the command is
+  `flowlens` — in the README, the CLI package README and the changelog.
+
+## [1.0.0] - 2026-08-31
+
+First published release. The theme is: point FlowLens at any project, on any
+machine, and have the first command work — without leaving a mark on that
+project.
+
+### Packaging
+
+- **Published to npm** as `@flowslens/cli`, `@flowslens/core` and
+  `@flowslens/runtime`. `npx @flowslens/cli scan .` now works without cloning
+  anything. Note the scope: the packages are `@flowslens/*` while the command,
+  the config file and the cache directory stay `flowlens`.
+- **`npm run test:package`** packs the real tarballs, installs them into a
+  throwaway project and drives the result over HTTP. Every other check runs
+  against the working tree, where the dashboard and browser tracer simply
+  exist — so a published CLI once shipped neither while all of CI stayed
+  green.
 
 ### Fixed
 
@@ -60,7 +159,7 @@ command work — without leaving a mark on that project.
   directory**, which is usually the project being scanned — the one place it must
   not write. It now falls back to the temp directory, keeping the project key so
   two projects cannot overwrite each other's graph.
-- The `@flowlens/runtime` sink defaulted to `.flowlens/trace.jsonl` relative to
+- The `@flowslens/runtime` sink defaulted to `.flowlens/trace.jsonl` relative to
   the traced app, putting a file in the user's repository. It now honours
   `$FLOWLENS_TRACE`, else the same machine-local cache path.
 - `examples/crud/demo-trace.mjs` takes the output path as its first argument
@@ -152,7 +251,7 @@ application (see `docs/ROADMAP.md`).
   the graph backwards.
 - **Doctor** — broken API calls, dead endpoints, and collections written by more
   than one service.
-- **Runtime tracer** (`@flowlens/runtime`) — zero-dependency HTTP middleware,
+- **Runtime tracer** (`@flowslens/runtime`) — zero-dependency HTTP middleware,
   Mongoose plugin, and browser tracer that correlates a click with the requests
   it causes.
 - **Static + runtime merge** with inclusive and exclusive timings.
@@ -187,5 +286,7 @@ Recorded because each one shaped the design, and the reasoning is in
 - Chained Mongoose modifiers (`.lean()`, `.sort()`) were counted as separate
   database operations.
 
-[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/Kishan-Jaiswar/flowlens/releases/tag/v0.1.0

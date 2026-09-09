@@ -130,7 +130,7 @@ export interface ScanOptions {
 
 export interface LoadedProject {
   project: Project;
-  /** The primary root — where `.flowlens/` is written. */
+  /** The primary root — the project the graph is keyed on. */
   root: string;
   /** Every scanned root, primary first. */
   roots: string[];

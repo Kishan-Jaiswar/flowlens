@@ -3,9 +3,10 @@
 **Trace any user action from the UI to the database.**
 
 [![CI](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml/badge.svg)](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@flowslens/cli)](https://www.npmjs.com/package/@flowslens/cli)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-200%20passing-brightgreen)](tests)
+[![Tests](https://img.shields.io/badge/tests-305%20passing-brightgreen)](tests)
 
 > FlowLens helps developers understand and safely modify unfamiliar applications
 > by tracing a feature from the user's UI action through frontend state and
@@ -21,15 +22,16 @@ codebase:
 
 ## Project status
 
-**v0.1, pre-release.** Honest summary of what is and is not proven:
+**v1.0.1, published on npm.** Honest summary of what is and is not proven:
 
-|                        | State                                                                                                                                         |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Static analysis        | Verified against a real production codebase — ~1,500 files, 204 API calls, 197 matched to backend routes                                      |
-| Structure independence | 11 project layouts covered by tests, including hostile inputs                                                                                 |
-| Operating systems      | Windows, macOS and Linux: unit suite, every CLI command, and a from-scratch launcher run, all three in CI                                     |
-| Runtime tracing        | **Implemented, not yet proven.** Every trace so far came from a script that fabricates spans. Wiring it into a live app is the next milestone |
-| Stacks read            | React/Next, NestJS/Express, Mongoose. Vue, Prisma and SQL are not read yet, and the CLI tells you so                                          |
+|                        | State                                                                                                                                                                                          |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Static analysis        | Verified against a real production codebase — ~1,500 files, 204 API calls, 197 matched to backend routes                                                                                       |
+| Structure independence | Every layout in the table below has a fixture, hostile inputs included                                                                                                                         |
+| Operating systems      | Windows, macOS and Linux: unit suite, every CLI command, and a from-scratch launcher run, all three in CI                                                                                      |
+| Runtime tracing        | **Implemented, not yet proven end to end.** The tracer has 26 unit tests, but every trace so far came from fakes or a span-fabricating script. Wiring it into a live app is the next milestone |
+| Stacks read            | React/Next, NestJS/Express, Mongoose. Vue, Prisma and SQL are not read yet, and the CLI tells you so                                                                                           |
+| Test suite             | 305 tests across 13 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                      |
 
 `docs/ROADMAP.md` leads with what is missing rather than what is planned.
 
@@ -109,14 +111,36 @@ Risk factors
 
 ## Install
 
-Requires **Node 18.18 or newer** — nothing else. No database, no global config,
-no per-project plugin.
+Requires **Node 18.18 or newer** to run — nothing else. No database, no global
+config, no per-project plugin. (Working _on_ FlowLens needs Node 20 or newer;
+see [Development](#development).)
 
 Works on **Windows, macOS and Linux**. CI runs the suite on all three, and
 separately runs every command a user actually types on all three, from a bare
 checkout with nothing installed.
 
-### The short way
+### The short way — no install at all
+
+```bash
+npx @flowslens/cli scan ~/code/my-app
+npx @flowslens/cli serve ~/code/my-app
+```
+
+### Or install it once
+
+```bash
+npm install -g @flowslens/cli
+flowlens scan ~/code/my-app
+```
+
+> **A note on the name.** The npm packages live under the **`@flowslens`**
+> scope — `@flowslens/cli`, `@flowslens/core`, `@flowslens/runtime` — while the
+> command you type, the config file and the cache directory are all spelled
+> **`flowlens`**. So you install `@flowslens/cli` and then run `flowlens`.
+
+### From source
+
+If you want to modify FlowLens, or run it without touching npm:
 
 ```bash
 git clone https://github.com/Kishan-Jaiswar/flowlens.git
@@ -139,14 +163,15 @@ otherwise stays out of the way. It is also why the project works from a USB
 stick: copy the folder to any machine with Node on it and the first command
 still works.
 
-### On your PATH
+### On your PATH, from a clone
 
-If you would rather type `flowlens` from anywhere:
+`npm install -g @flowslens/cli` above is the easy route. From a clone, link the
+workspace instead, so the `flowlens` on your PATH is the code you are editing:
 
 ```bash
 npm install
 npm run build
-npm link -w @flowlens/cli
+npm link -w @flowslens/cli
 ```
 
 Or, without installing anything globally:
@@ -239,7 +264,7 @@ names are the least reliable thing about a real repository — `api/` is a Nest
 backend in one project, an axios client in the next, and Next.js route handlers
 in a third — so classification comes from decorators, imports and JSX.
 
-Verified against a fixture for each of these layouts (`tests/structures.test.ts`):
+Every layout below has a fixture in `tests/structures.test.ts`:
 
 | Layout                                                                   | Handled |
 | ------------------------------------------------------------------------ | ------- |
@@ -601,7 +626,7 @@ Tracing is **opt-in** and lives in your app, not in FlowLens:
 
 ```ts
 // NestJS / Express — development only
-import { flowlensHttp, flowlensMongoose } from '@flowlens/runtime';
+import { flowlensHttp, flowlensMongoose } from '@flowslens/runtime';
 
 app.use(flowlensHttp());
 mongoose.plugin(flowlensMongoose());
@@ -609,7 +634,7 @@ mongoose.plugin(flowlensMongoose());
 
 ```ts
 // Browser — links a click to the requests it causes
-import { installBrowserTracer } from '@flowlens/runtime/browser';
+import { installBrowserTracer } from '@flowslens/runtime/browser';
 
 installBrowserTracer();
 ```
@@ -654,12 +679,13 @@ about its own boundaries:
 - **It makes no network calls.** No telemetry, no cloud, no account. The
   dashboard binds to `127.0.0.1`.
 - **It never writes to your project.** The graph and any trace live in your OS
-  cache directory (`~/.cache/flowlens` on Linux, `~/Library/Caches/flowlens` on
-  macOS, `%LOCALAPPDATA%\flowlens` on Windows), keyed by project path. `git
-status` after a scan is empty. `flowlens init` is the one exception, and only
-  because writing a config is what you asked it to do — `--print` avoids even
-  that. Pass `-g` / `--trace` to choose your own paths, or set `FLOWLENS_CACHE`
-  to move the whole cache.
+  cache directory (`~/.cache/flowlens` on Linux, honouring `XDG_CACHE_HOME`;
+  `~/Library/Caches/flowlens` on macOS; `%LOCALAPPDATA%\flowlens\Cache` on
+  Windows), keyed by project path, so `git status` after a scan is empty.
+  `flowlens init` is the one exception, and only because writing a config is
+  what you asked it to do — `--print` avoids even that. Pass `-g` / `--trace`
+  to choose your own paths, or set `FLOWLENS_CACHE` (absolute paths only) to
+  move the whole cache.
 
 ---
 
@@ -707,14 +733,26 @@ flowlens/
 
 ## Development
 
+**Use Node 20 or newer to work on FlowLens.** The published CLI still supports
+18.18, and CI proves it, but Vitest 4 cannot start on Node 18 at all — rolldown
+imports `styleText` from `node:util`, which arrived in 20.12, so `npm test` dies
+with a `SyntaxError` rather than a useful message. `.nvmrc` pins the version
+this project is developed on:
+
+```bash
+nvm use              # or `nvm install` the first time
+node --version       # expect the version in .nvmrc
+```
+
 ```bash
 npm install          # also builds, via the prepare script
 npm run build        # compile all three packages
-npm test             # build, then run the suite
+npm test             # build, then run the suite — 305 tests, ~10s
 npm run test:watch
 npm run smoke        # run every CLI command for real, on this OS
+npm run test:package # pack, install into a throwaway project, drive over HTTP
 npm run clean
-npm run verify       # lint + format + test
+npm run verify       # lint + format check + build + test
 npm run scan:example
 npm run serve:example
 ```
@@ -722,6 +760,10 @@ npm run serve:example
 Uses npm workspaces rather than pnpm — same layout, one less thing to install.
 Every script is plain Node, with no shell built in, so they all work the same on
 Windows, macOS and Linux.
+
+The three packages are published under the `@flowslens` scope while the command
+stays `flowlens`; `scripts/package-test.mjs` reads the scope out of
+`packages/cli/package.json` rather than hardcoding it.
 
 CI runs the unit suite on Node 20/22/24/26 on Linux plus Node 24 on Windows and
 macOS, the smoke test on all three operating systems, and — separately — the

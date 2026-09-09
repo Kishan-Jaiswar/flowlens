@@ -428,6 +428,22 @@ describe('the launcher', () => {
     expect(readFileSync(join(REPO, 'flowlens.cmd'), 'utf8')).toContain('\r\n');
   });
 
+  it('reports the version in package.json, not a hardcoded literal', () => {
+    // A literal in index.ts drifted: 1.0.0 was published while `--version`
+    // still answered 0.1.0, which is the number a user quotes in a bug report.
+    const declared = JSON.parse(
+      readFileSync(join(REPO, 'packages', 'cli', 'package.json'), 'utf8'),
+    ).version;
+
+    const result = spawnSync(process.execPath, [BIN, '--version'], {
+      cwd: REPO,
+      encoding: 'utf8',
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe(declared);
+  });
+
   it('explains itself instead of crashing when the build is missing', () => {
     // Simulated by pointing the bin at a checkout with no dist: the message a
     // first-time user sees has to say what to do.
@@ -435,7 +451,7 @@ describe('the launcher', () => {
     mkdirSync(join(fake, 'bin'), { recursive: true });
     writeFileSync(
       join(fake, 'package.json'),
-      JSON.stringify({ name: '@flowlens/cli', version: '0.1.0' }),
+      JSON.stringify({ name: '@flowslens/cli', version: '0.1.0' }),
       'utf8',
     );
     writeFileSync(join(fake, 'bin', 'flowlens.mjs'), readFileSync(BIN, 'utf8'), 'utf8');

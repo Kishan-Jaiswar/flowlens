@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { loadConfig } from '@flowslens/core';
 import { splitPositionals } from './args.js';
@@ -10,7 +13,25 @@ import { runTrace } from './commands/trace.js';
 import { runWhere } from './commands/where.js';
 import { color } from './ui.js';
 
-const VERSION = '0.1.0';
+/**
+ * Read from the package manifest rather than hardcoded.
+ *
+ * A literal here drifted: the packages were published as 1.0.0 while
+ * `flowlens --version` still answered `0.1.0`, which is the one thing a user
+ * quotes in a bug report. `dist/index.js` sits one level under the package
+ * root, in the published tarball as well as in this repo.
+ */
+const VERSION: string = (() => {
+  try {
+    const manifest = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    const parsed: unknown = JSON.parse(readFileSync(manifest, 'utf8'));
+    const version = (parsed as { version?: unknown }).version;
+    if (typeof version === 'string' && version) return version;
+  } catch {
+    // Fall through: a missing or unreadable manifest must not stop the CLI.
+  }
+  return 'unknown';
+})();
 
 const HELP = `
 ${color.bold('FlowLens')} — trace any user action from the UI to the database.
@@ -31,8 +52,8 @@ ${color.bold('COMMANDS')}
 
 ${color.bold('OPTIONS')}
   -p, --project <dir>     Project root (repeatable — scan siblings together)
-  -g, --graph <file>      Graph file (default: <project>/.flowlens/graph.json)
-      --trace <file>      Trace file (default: <project>/.flowlens/trace.jsonl)
+  -g, --graph <file>      Graph file (default: a machine-local cache path)
+      --trace <file>      Trace file (default: a machine-local cache path)
   -o, --out <file>        Write output to a file
       --json              Machine-readable output
       --markdown          Render a feature document (flow command)
@@ -75,10 +96,13 @@ ${color.bold('ENVIRONMENT')}
   FLOWLENS_ASCII=1        Draw trees with plain ASCII (old Windows consoles)
   FLOWLENS_UNICODE=1      Force box-drawing characters back on
   NO_COLOR=1              Disable colour
+  FLOWLENS_CACHE=<dir>    Move the whole cache (absolute paths only)
+  FLOWLENS_TRACE=<file>   Where the runtime tracer writes, and where trace reads
 
 ${color.gray('FlowLens reads source files only. It never connects to a database and')}
-${color.gray('never executes the code it analyzes. Runtime tracing is opt-in and')}
-${color.gray('writes to a local .flowlens/trace.jsonl in your own project.')}
+${color.gray('never executes the code it analyzes. Nothing is written into the')}
+${color.gray('project you scan — the graph and any trace live in your OS cache,')}
+${color.gray('and scan and serve both print the path they used.')}
 `;
 
 export function main(argv = process.argv.slice(2)): number {

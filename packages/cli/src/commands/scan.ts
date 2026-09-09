@@ -32,7 +32,7 @@ export interface ScanArgs {
 
 /**
  * `flowlens scan <project>` — read the source, build the graph, write it to
- * `.flowlens/graph.json`.
+ * the machine-local cache (never into the project itself).
  *
  * Reads files only. No database connection, no network calls, no code executed
  * from the project being scanned.

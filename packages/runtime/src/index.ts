@@ -1,5 +1,5 @@
 /**
- * `@flowlens/runtime` — opt-in instrumentation for the app you are studying.
+ * `@flowslens/runtime` — opt-in instrumentation for the app you are studying.
  *
  * Nothing here opens a database connection or talks to a network service of its
  * own. It observes the work your app was already doing and appends spans to a
@@ -7,7 +7,7 @@
  *
  * Wire it up in development only:
  *
- *   import { flowlensHttp, flowlensMongoose } from '@flowlens/runtime';
+ *   import { flowlensHttp, flowlensMongoose } from '@flowslens/runtime';
  *   app.use(flowlensHttp());
  *   mongoose.plugin(flowlensMongoose());
  */

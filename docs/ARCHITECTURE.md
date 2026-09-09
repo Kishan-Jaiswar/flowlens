@@ -10,7 +10,7 @@ The question they _do_ ask is "what happens when I click this?" — so the graph
 built out of the steps of one execution: an action, a handler, some state, a
 request, a route, a controller, a service, a query, a collection.
 
-## Five engines
+## The engines
 
 ```text
                     FlowLens
@@ -26,6 +26,9 @@ request, a route, a controller, a service, a query, a collection.
                        ▼
                  Visualization
 ```
+
+Five boxes above; the table splits two of them into the modules that do the
+work:
 
 | Engine             | Package                    | Job                                    |
 | ------------------ | -------------------------- | -------------------------------------- |

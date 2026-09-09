@@ -12,14 +12,14 @@ import { AppModule } from './app.module';
  *
  * Nothing here is FlowLens connecting to your database. `flowlensMongoose` is a
  * Mongoose plugin that times the queries *your* app already makes and appends
- * them to a local file (.flowlens/trace.jsonl). If you never register it, the
- * tracer records nothing.
+ * them to a machine-local file outside your repository. If you never register it,
+ * the tracer records nothing.
  */
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
   if (process.env.NODE_ENV !== 'production') {
-    const { flowlensHttp, flowlensMongoose } = await import('@flowlens/runtime');
+    const { flowlensHttp, flowlensMongoose } = await import('@flowslens/runtime');
 
     // 1. One span per HTTP request, and the trace context every child span joins.
     app.use(flowlensHttp());

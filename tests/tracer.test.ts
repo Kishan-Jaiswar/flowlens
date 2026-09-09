@@ -11,7 +11,7 @@ import {
   flowlensMongoose,
   traceMethod,
   type TraceEvent,
-} from '@flowlens/runtime';
+} from '@flowslens/runtime';
 import { mergeRuntimeTrace, parseTraceFile, resolveFlows, scan } from '@flowslens/core';
 import { EXAMPLE_ROOT } from './helpers.js';
 

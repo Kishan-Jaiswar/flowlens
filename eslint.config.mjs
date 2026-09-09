@@ -19,6 +19,10 @@ export default tseslint.config(
       'examples/**',
       'tests/fixtures/**',
       '.flowlens/**',
+      // Generated copies staged into the CLI package by scripts/prepack.mjs.
+      // The originals are linted where they actually live.
+      'packages/cli/dashboard/**',
+      'packages/cli/runtime/**',
     ],
   },
   js.configs.recommended,

@@ -27,8 +27,8 @@ export function runTrace(args: TraceArgs): number {
   if (!existsSync(traceFile)) {
     process.stderr.write(
       `${color.red('error')} no trace file at ${traceFile}\n\n` +
-        `Record one by adding @flowlens/runtime to the app you are studying:\n` +
-        `  ${color.cyan("import { flowlensHttp, flowlensMongoose } from '@flowlens/runtime';")}\n` +
+        `Record one by adding @flowslens/runtime to the app you are studying:\n` +
+        `  ${color.cyan("import { flowlensHttp, flowlensMongoose } from '@flowslens/runtime';")}\n` +
         `  ${color.cyan('app.use(flowlensHttp());')}\n` +
         `  ${color.cyan('mongoose.plugin(flowlensMongoose());')}\n\n` +
         `Then use the app, and run this command again.\n`,

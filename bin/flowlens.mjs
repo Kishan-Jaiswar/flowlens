@@ -16,7 +16,7 @@
  * before the dependencies exist. It is also the only part of FlowLens that
  * shells out, and it only ever shells out to npm.
  *
- * The published `@flowlens/cli` package ships a built `dist` and uses
+ * The published `@flowslens/cli` package ships a built `dist` and uses
  * `packages/cli/bin/flowlens.mjs` directly — this file is for the repository.
  */
 import { spawn, spawnSync } from 'node:child_process';

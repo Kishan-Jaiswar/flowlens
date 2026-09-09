@@ -15,15 +15,12 @@ _already been built_, and they are worth more than any new feature.
       produce `confirmed` evidence. What is still missing is the real thing: a
       running Express or NestJS app with a real database, clicked through by
       hand. Until that happens, the integration is verified only against fakes.
-- [ ] **Not published.** `npm link -w @flowlens/cli` works and is documented,
-      but installing means cloning the repo. Publishing `@flowlens/cli` to npm
-      would make `npx flowlens scan .` the first-run experience.
 - [ ] **The dashboard's browser code is untested.** Its server and JSON API now
       have 16 integration tests that drive the real `flowlens serve` process, but
-      the 356 lines of DOM rendering in `apps/dashboard/public/app.js` have no
+      the DOM rendering in `apps/dashboard/public/app.js` — 661 lines — has no
       direct coverage.
 
-## Done — v0.1 (this repo)
+## Done — v1.0 (published)
 
 - [x] Graph engine with evidence tracking and JSON round trip
 - [x] React/Next analyzer: components, actions, handlers, state, hooks
@@ -47,14 +44,20 @@ _already been built_, and they are worth more than any new feature.
 - [x] Multi-root scanning for frontend/backend in separate repositories
 - [x] `flowlens.config.json`
 - [x] Verified against a production codebase: 1,519 files, 197/204 calls matched
+- [x] Published to npm as `@flowslens/cli`, `@flowslens/core` and
+      `@flowslens/runtime` (2026-08-31), so `npx @flowslens/cli scan .` is the
+      first-run experience
+- [x] Pack-and-install test (`npm run test:package`) that installs the real
+      tarballs into a throwaway project and drives the dashboard over HTTP
 
-## Next — v0.2
+## Next — v1.1
 
-- [ ] **Prove the tracer end to end.** Wire `@flowlens/runtime` into a small
-      throwaway Express + Mongoose app, click through it, and check that
-      `flowlens trace` reports `confirmed` with real timings. Then unit-test the
-      sink, the middleware, the Mongoose plugin and the browser tracer. This is
-      the highest-value work left in the project.
+- [ ] **Prove the tracer end to end.** The sink, the middleware, `traceMethod`
+      and the Mongoose plugin now have 26 unit tests against fakes. What is left
+      is the real thing: wire `@flowslens/runtime` into a small throwaway
+      Express + Mongoose app, click through it, and check that `flowlens trace`
+      reports `confirmed` with real timings. This is the highest-value work left
+      in the project.
 - [ ] **VS Code extension.** The natural home for "show me where this feature
       lives": a tree view of flows, `Ctrl+Click` to any step, inline risk on the
       handler you are editing. Higher value than the browser extension because
@@ -66,7 +69,7 @@ _already been built_, and they are worth more than any new feature.
       endpoints appeared, which collection gained a writer. This is the CI story
       — fail a PR that silently adds a second writer to a collection.
 
-## v0.3 — more of the stack
+## v1.2 — more of the stack
 
 - [ ] PostgreSQL/MySQL via Prisma and TypeORM adapters
 - [ ] Redis: cache reads/writes as first-class data nodes
@@ -74,7 +77,7 @@ _already been built_, and they are worth more than any new feature.
 - [ ] Vue and Svelte frontend analyzers
 - [ ] tRPC and GraphQL resolvers as route equivalents
 
-## v0.4 — analysis
+## v1.3 — analysis
 
 - [ ] **N+1 detection.** A trace where one request produces _n_ similar queries.
       Cheap to detect once spans exist, and immediately actionable.
@@ -84,7 +87,7 @@ _already been built_, and they are worth more than any new feature.
       directly" and fail CI when a new edge violates it.
 - [ ] **Feature health.** Error rate and p95 per flow, from the same spans.
 
-## v0.5 — Chrome DevTools panel
+## v1.4 — Chrome DevTools panel
 
 Deliberately late. The browser is the most _demoable_ surface but the least
 essential: the core value is the chain from code to database, and that lives in

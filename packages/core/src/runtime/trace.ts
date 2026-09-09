@@ -1,6 +1,6 @@
 /**
- * The trace event contract shared by `@flowlens/runtime` (which writes it) and
- * `@flowlens/core` (which merges it into the graph).
+ * The trace event contract shared by `@flowslens/runtime` (which writes it) and
+ * `@flowslens/core` (which merges it into the graph).
  *
  * Deliberately a flat, boring JSONL record: it has to be writable from a
  * browser, a Node process and a Mongoose hook without a transport library, and
@@ -49,7 +49,7 @@ export interface TraceEvent {
   attrs?: TraceAttributes;
 }
 
-/** Parse a `.flowlens/trace.jsonl` file, skipping malformed lines. */
+/** Parse a `trace.jsonl` file, skipping malformed lines. */
 export function parseTraceFile(contents: string): TraceEvent[] {
   const events: TraceEvent[] = [];
   for (const line of contents.split('\n')) {

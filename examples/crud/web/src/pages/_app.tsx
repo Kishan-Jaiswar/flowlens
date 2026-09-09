@@ -18,7 +18,7 @@ export default function App({
     if (process.env.NODE_ENV === 'production') return;
     let uninstall: (() => void) | undefined;
 
-    void import('@flowlens/runtime/browser').then(({ installBrowserTracer }) => {
+    void import('@flowslens/runtime/browser').then(({ installBrowserTracer }) => {
       uninstall = installBrowserTracer({
         endpoint: 'http://localhost:4177/__flowlens/spans',
       });

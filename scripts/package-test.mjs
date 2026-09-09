@@ -32,10 +32,17 @@ const project = join(temp, 'consumer');
 mkdirSync(tarballs, { recursive: true });
 mkdirSync(project, { recursive: true });
 
-/** Read from disk, so a version bump does not silently stop testing anything. */
-const version = JSON.parse(readFileSync(join(root, 'packages', 'cli', 'package.json'), 'utf8'))
-  .version;
-const tarball = (name) => join(tarballs, `flowlens-${name}-${version}.tgz`);
+/**
+ * Read from disk, so a version bump does not silently stop testing anything.
+ *
+ * The npm scope is read the same way, and for the same reason: renaming the
+ * scope once left this script hunting for tarballs that `npm pack` no longer
+ * produces. `npm pack` names a scoped tarball `scope-name-version.tgz`.
+ */
+const cliManifest = JSON.parse(readFileSync(join(root, 'packages', 'cli', 'package.json'), 'utf8'));
+const version = cliManifest.version;
+const scope = cliManifest.name.split('/')[0].replace('@', '');
+const tarball = (name) => join(tarballs, `${scope}-${name}-${version}.tgz`);
 
 let failures = 0;
 
@@ -72,7 +79,7 @@ function run(name, command, args, options = {}) {
 run('build', npm, ['run', 'build'], { cwd: root, env: { ...process.env } });
 
 for (const name of ['core', 'runtime', 'cli']) {
-  run(`pack @flowlens/${name}`, npm, ['pack', '--pack-destination', tarballs], {
+  run(`pack @flowslens/${name}`, npm, ['pack', '--pack-destination', tarballs], {
     cwd: join(root, 'packages', name),
   });
 }
@@ -81,20 +88,25 @@ for (const name of ['core', 'runtime', 'cli']) {
 run('create a consumer project', npm, ['init', '-y'], { cwd: project });
 
 /**
- * Install what `npx @flowlens/cli` actually gives you: the CLI and its one
- * dependency, `@flowlens/core`.
+ * Install what `npx @flowslens/cli` actually gives you: the CLI and its one
+ * dependency, `@flowslens/core`.
  *
- * `@flowlens/runtime` is deliberately *not* installed. It is a dev dependency a
+ * `@flowslens/runtime` is deliberately *not* installed. It is a dev dependency a
  * user adds to their own app to record traces, not something the CLI depends
  * on — so if the browser tracer is only reachable through a sibling
- * `@flowlens/runtime` directory, it is not reachable for a real user at all.
+ * `@flowslens/runtime` directory, it is not reachable for a real user at all.
  * Installing it here would hide exactly that.
  */
-const install = run('install the published packages', npm, ['install', tarball('core'), tarball('cli')], {
-  cwd: project,
-});
+const install = run(
+  'install the published packages',
+  npm,
+  ['install', tarball('core'), tarball('cli')],
+  {
+    cwd: project,
+  },
+);
 
-const installed = join(project, 'node_modules', '@flowlens', 'cli', 'bin', 'flowlens.mjs');
+const installed = join(project, 'node_modules', `@${scope}`, 'cli', 'bin', 'flowlens.mjs');
 
 /** Drive the installed CLI through Node, so bin shims are not part of the test. */
 function flowlens(name, args) {

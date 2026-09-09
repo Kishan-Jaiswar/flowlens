@@ -3,7 +3,7 @@
  * Stage the files the CLI serves at runtime but does not own.
  *
  * Two of them live outside `packages/cli` in this repository, and `npm pack`
- * cannot reach outside a package directory — so a published `@flowlens/cli`
+ * cannot reach outside a package directory — so a published `@flowslens/cli`
  * shipped `dist/` and `bin/` and nothing else. The result was a tool that
  * installed cleanly, scanned correctly, and then answered its most demoable
  * command with a 500:
