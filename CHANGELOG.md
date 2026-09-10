@@ -7,7 +7,39 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`.gitignore` help for the artifacts you asked FlowLens to put in your
+  repository.** By default there is nothing to ignore — the graph and the trace
+  are written to the OS cache, not the project — but `-g graph.json`,
+  `--trace`, and `$FLOWLENS_TRACE` all put a generated file inside a work tree,
+  where it then shows up as an untracked change on every branch until someone
+  remembers to delete it before pushing.
+  - `scan` and `serve` now print a one-line note when a file they write is
+    inside a git repository and not ignored. They change nothing on their own:
+    a tool asked to read a repository does not get to edit it.
+  - `flowlens init --gitignore` adds exactly those paths — not a block of
+    speculative patterns — to a managed section of `.gitignore`, marked with
+    `# flowlens:begin` / `# flowlens:end`. It is idempotent, leaves every line
+    the developer wrote untouched, anchors each pattern with a leading `/` so
+    `/graph.json` cannot also hide a `src/graph.json`, skips anything the
+    project already ignores, and reports files that are already committed
+    (where `git rm --cached` is the actual fix). It works on an
+    already-configured project, leaving the config alone, and writes nothing
+    under `--print`.
+  - `"gitignore": true` in `flowlens.config.json` opts a project in for
+    everyone, so the block stays current on every scan; `--gitignore` /
+    `--no-gitignore` override the config for one run.
+  - 21 new tests, against real git repositories in a temp directory.
+
+### Fixed
+
+- **`packages/cli` was type-checking and running against the _published_
+  `@flowslens/core` 1.0.0**, not the local workspace: a stale
+  `packages/cli/node_modules/@flowslens/core` left over from an earlier install
+  shadowed the workspace link, so any new core API was invisible to the CLI
+  build. The lockfile never referenced it; removing the directory restores the
+  intended link.
 
 ## [1.0.1] - 2026-09-09
 

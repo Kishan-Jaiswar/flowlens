@@ -14,6 +14,7 @@ import {
   scan,
   type FlowGraph,
 } from '@flowslens/core';
+import { artifactPaths, guardArtifacts } from '../gitignore.js';
 import { browserTracerFile, dashboardDir, graphPath, saveGraph, tracePath } from '../paths.js';
 import { color } from '../ui.js';
 
@@ -25,6 +26,8 @@ export interface ServeArgs {
   host?: string;
   graph?: string;
   trace?: string;
+  /** `"gitignore": true` in the config — keep the managed block up to date. */
+  gitignore?: boolean;
   /**
    * Open a browser once the server is listening.
    *
@@ -72,6 +75,22 @@ export function runServe(args: ServeArgs): number {
 
   let graph = buildGraph(root, args);
   let lastScan = new Date();
+
+  /**
+   * `serve` writes twice — the graph on every re-scan, the trace on every batch
+   * of spans the browser sends — so the warning belongs here too, before the
+   * developer walks away and lets a session's worth of spans accumulate in a
+   * file git can see.
+   */
+  const gitNotice = guardArtifacts(
+    artifactPaths(graphPath(root, args.graph), tracePath(root, args.trace)),
+    {
+      ...(args.gitignore !== undefined ? { auto: args.gitignore } : {}),
+      ...(args.graph ? { graphFlag: args.graph } : {}),
+      ...(args.trace ? { traceFlag: args.trace } : {}),
+    },
+  );
+  if (gitNotice) process.stderr.write(`\n${gitNotice}`);
 
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);

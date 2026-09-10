@@ -1,6 +1,7 @@
 import { relative } from 'node:path';
 import { findBrokenCalls, findDeadEndpoints, resolveFlows, scan } from '@flowslens/core';
-import { graphPath, saveGraph } from '../paths.js';
+import { artifactPaths, guardArtifacts } from '../gitignore.js';
+import { graphPath, saveGraph, tracePath } from '../paths.js';
 import { color, glyph, heading, table } from '../ui.js';
 
 export interface ScanArgs {
@@ -17,6 +18,10 @@ export interface ScanArgs {
    * graph somewhere the next command does not look is never what anyone meant.
    */
   graph?: string;
+  /** `--trace`: only used here to warn if it points inside the repository. */
+  trace?: string;
+  /** `"gitignore": true` in the config — keep the managed block up to date. */
+  gitignore?: boolean;
   json?: boolean;
   quiet?: boolean;
   includeTests?: boolean;
@@ -51,6 +56,17 @@ export function runScan(args: ScanArgs): number {
   });
 
   const target = saveGraph(graphPath(args.root, args.out ?? args.graph), result.graph);
+
+  /**
+   * Run even for `--json` and `--quiet`: a project that opted into
+   * `"gitignore": true` expects the file kept up to date by a scripted scan as
+   * much as by an interactive one. Only the printing is suppressed.
+   */
+  const gitNotice = guardArtifacts(artifactPaths(target, tracePath(args.root, args.trace)), {
+    ...(args.gitignore !== undefined ? { auto: args.gitignore } : {}),
+    ...((args.out ?? args.graph) ? { graphFlag: args.out ?? args.graph } : {}),
+    ...(args.trace ? { traceFlag: args.trace } : {}),
+  });
 
   const flows = resolveFlows(result.graph);
   const broken = findBrokenCalls(result.graph);
@@ -185,6 +201,8 @@ export function runScan(args: ScanArgs): number {
       process.stdout.write(color.gray(`  … ${result.warnings.length - shown.length} more\n`));
     }
   }
+
+  if (gitNotice) process.stdout.write(`\n${gitNotice}`);
 
   process.stdout.write(
     `\n${color.gray('graph:')} ${relative(process.cwd(), target) || target}\n` +

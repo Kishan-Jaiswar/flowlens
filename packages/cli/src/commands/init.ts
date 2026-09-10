@@ -1,6 +1,15 @@
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import { CONFIG_FILENAMES } from '@flowslens/core';
+import {
+  addToGitignore,
+  artifactPaths,
+  byRoot,
+  inspect,
+  type AddResult,
+  type Artifact,
+} from '../gitignore.js';
+import { graphPath, tracePath } from '../paths.js';
 import { color, glyph, heading } from '../ui.js';
 
 export interface InitArgs {
@@ -15,8 +24,26 @@ export interface InitArgs {
    * that is what the developer asked for. `--print` keeps even that read-only.
    */
   print?: boolean;
+  /**
+   * Also add the artifacts FlowLens writes to `.gitignore`.
+   *
+   * Off by default, because on a normal project there is nothing to add: the
+   * graph and the trace live in the OS cache. It matters when `-g`,
+   * `--trace` or `$FLOWLENS_TRACE` puts one of them inside the repository.
+   */
+  gitignore?: boolean;
+  /** `-g`: where the graph goes, if not the cache. */
+  graph?: string;
+  /** `--trace`: where the trace goes, if not the cache. */
+  trace?: string;
   json?: boolean;
   quiet?: boolean;
+}
+
+/** One `.gitignore` updated by `--gitignore`. */
+export interface IgnoreSummary extends AddResult {
+  /** The work tree the file belongs to. */
+  gitRoot: string;
 }
 
 /** What `init` worked out about a project, before writing anything. */
@@ -53,12 +80,26 @@ export function runInit(args: InitArgs): number {
   const existing = CONFIG_FILENAMES.map((name) => join(root, name)).find((path) =>
     existsSync(path),
   );
-  if (existing && !args.force) {
+  /**
+   * A second `init` is refused so an edited config is never silently replaced —
+   * but `--gitignore` on an already-configured project is a perfectly sensible
+   * thing to ask for, and it is what the note printed by `scan` suggests. In
+   * that case the config is left exactly as it is and only the ignore step runs.
+   */
+  const configOnlyBlocked = existing !== undefined && args.force !== true;
+  if (configOnlyBlocked && args.gitignore !== true) {
     process.stderr.write(
       `${color.red('error')} ${displayPath(existing)} already exists.\n` +
         `Edit it, or re-run with --force to replace it.\n`,
     );
     return 1;
+  }
+
+  const ignored =
+    args.gitignore === true ? updateGitignore(root, args, args.print === true) : undefined;
+
+  if (configOnlyBlocked) {
+    return reportIgnoreOnly(existing, ignored ?? [], args);
   }
 
   const detection = detectSetup(root, args.extraRoots ?? []);
@@ -74,7 +115,9 @@ export function runInit(args: InitArgs): number {
   writeFileSync(target, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 
   if (args.json) {
-    process.stdout.write(`${JSON.stringify({ config: target, ...config }, null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify({ config: target, ...config, ...(ignored ? { gitignore: ignored } : {}) }, null, 2)}\n`,
+    );
     return 0;
   }
   if (args.quiet) {
@@ -94,10 +137,86 @@ export function runInit(args: InitArgs): number {
       color.gray(`  no separate frontend or backend directory — scanning the whole project\n`),
     );
   }
+  if (ignored) process.stdout.write(describeIgnore(ignored));
+
   process.stdout.write(
     `\n${color.gray('wrote:')}  ${displayPath(target)} ${color.gray('(the only file FlowLens creates in your project)')}\n` +
       `${color.gray('next:')}   flowlens scan\n` +
       `${color.gray('   or:')}   flowlens serve\n`,
+  );
+  return 0;
+}
+
+/**
+ * `--gitignore`: ignore the artifacts this project will actually produce.
+ *
+ * Only the paths FlowLens would really write are considered — the graph, the
+ * trace, and whatever `$FLOWLENS_TRACE` points at — and only if they land
+ * inside a work tree. On a default setup they land in the OS cache, so the
+ * honest answer is "nothing to do" rather than a block of speculative patterns
+ * that would sit in the repository forever matching nothing.
+ */
+function updateGitignore(root: string, args: InitArgs, dryRun: boolean): IgnoreSummary[] {
+  const candidates = artifactPaths(graphPath(root, args.graph), tracePath(root, args.trace));
+  const summaries: IgnoreSummary[] = [];
+  for (const [gitRoot, group] of byRoot(candidates.map(inspect).filter(isArtifact))) {
+    const result = addToGitignore(
+      gitRoot,
+      group.map((artifact) => artifact.entry),
+      { dryRun },
+    );
+    summaries.push({ gitRoot, ...result });
+  }
+  return summaries;
+}
+
+function isArtifact(value: Artifact | undefined): value is Artifact {
+  return value !== undefined;
+}
+
+function describeIgnore(summaries: IgnoreSummary[]): string {
+  const added = summaries.flatMap((summary) =>
+    summary.added.map(
+      (entry) =>
+        `  ${color.green(glyph.bullet)} ${entry} ${color.gray(`in ${displayPath(summary.path)}`)}`,
+    ),
+  );
+  const tracked = summaries.flatMap((summary) =>
+    summary.tracked.map(
+      (entry) =>
+        `  ${color.yellow(glyph.warn)} ${entry.replace(/^\//, '')} is already committed — ` +
+        color.gray(`git rm --cached ${entry.replace(/^\//, '')}`),
+    ),
+  );
+
+  let out = heading('Ignored') + '\n';
+  if (added.length === 0) {
+    out += color.gray(
+      '  nothing to ignore — FlowLens writes the graph and trace to your OS cache,\n' +
+        '  not into the project. Pass -g or --trace if you keep them in the repo.\n',
+    );
+  } else {
+    out += `${added.join('\n')}\n`;
+  }
+  if (tracked.length > 0) out += `${tracked.join('\n')}\n`;
+  return out;
+}
+
+/** `--gitignore` on a project that already has a config: do that, and only that. */
+function reportIgnoreOnly(existing: string, ignored: IgnoreSummary[], args: InitArgs): number {
+  if (args.json) {
+    process.stdout.write(`${JSON.stringify({ config: existing, gitignore: ignored }, null, 2)}\n`);
+    return 0;
+  }
+  if (args.quiet) {
+    for (const summary of ignored) {
+      if (summary.added.length > 0) process.stdout.write(`${summary.path}\n`);
+    }
+    return 0;
+  }
+  process.stdout.write(describeIgnore(ignored));
+  process.stdout.write(
+    `\n${color.gray('kept:')}   ${displayPath(existing)} ${color.gray('(unchanged)')}\n`,
   );
   return 0;
 }

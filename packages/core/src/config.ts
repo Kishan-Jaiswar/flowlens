@@ -18,6 +18,15 @@ export const CONFIG_FILENAMES = [
 export interface FileConfig extends FlowLensConfig {
   /** Extra roots, resolved relative to the config file. */
   roots?: string[];
+  /**
+   * Keep FlowLens's own artifacts in `.gitignore`.
+   *
+   * Only relevant to a project that moved the graph or the trace into the
+   * repository with `-g`, `--trace` or `$FLOWLENS_TRACE`; by default they live
+   * in the OS cache and git never sees them. Committing `true` here is how a
+   * team opts in once instead of every developer being told by the CLI.
+   */
+  gitignore?: boolean;
 }
 
 export interface LoadedConfig {

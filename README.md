@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/@flowslens/cli)](https://www.npmjs.com/package/@flowslens/cli)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-305%20passing-brightgreen)](tests)
+[![Tests](https://img.shields.io/badge/tests-326%20passing-brightgreen)](tests)
 
 > FlowLens helps developers understand and safely modify unfamiliar applications
 > by tracing a feature from the user's UI action through frontend state and
@@ -31,7 +31,7 @@ codebase:
 | Operating systems      | Windows, macOS and Linux: unit suite, every CLI command, and a from-scratch launcher run, all three in CI                                                                                      |
 | Runtime tracing        | **Implemented, not yet proven end to end.** The tracer has 26 unit tests, but every trace so far came from fakes or a span-fabricating script. Wiring it into a live app is the next milestone |
 | Stacks read            | React/Next, NestJS/Express, Mongoose. Vue, Prisma and SQL are not read yet, and the CLI tells you so                                                                                           |
-| Test suite             | 305 tests across 13 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                      |
+| Test suite             | 326 tests across 14 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                      |
 
 `docs/ROADMAP.md` leads with what is missing rather than what is planned.
 
@@ -686,6 +686,32 @@ about its own boundaries:
   what you asked it to do — `--print` avoids even that. Pass `-g` / `--trace`
   to choose your own paths, or set `FLOWLENS_CACHE` (absolute paths only) to
   move the whole cache.
+- **If you do move an artifact into the repo, FlowLens says so** rather than
+  letting you discover it in `git status` the next time you push. A
+  `-g graph.json`, a `--trace`, or a `$FLOWLENS_TRACE` pointing inside a work
+  tree earns one line:
+
+  ```text
+  ⚠ graph.json is inside a git repository and is not ignored
+    add it: flowlens init --gitignore -g graph.json
+  ```
+
+  That command adds exactly the paths FlowLens writes — not a block of
+  speculative patterns — to a managed section of `.gitignore`:
+
+  ```gitignore
+  # flowlens:begin (managed by FlowLens)
+  /graph.json
+  # flowlens:end
+  ```
+
+  It is idempotent, it never rewrites a line you wrote, the patterns are
+  anchored so `/graph.json` cannot hide a `src/graph.json` of your own, and it
+  tells you when the file is already committed — in which case
+  `git rm --cached` is the real fix. A team that keeps the graph in the
+  repository on purpose can set `"gitignore": true` in `flowlens.config.json`
+  and have every scan keep the block current; `--no-gitignore` opts out for a
+  single run.
 
 ---
 
@@ -747,7 +773,7 @@ node --version       # expect the version in .nvmrc
 ```bash
 npm install          # also builds, via the prepare script
 npm run build        # compile all three packages
-npm test             # build, then run the suite — 305 tests, ~10s
+npm test             # build, then run the suite — 326 tests, ~10s
 npm run test:watch
 npm run smoke        # run every CLI command for real, on this OS
 npm run test:package # pack, install into a throwaway project, drive over HTTP

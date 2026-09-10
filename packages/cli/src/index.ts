@@ -76,6 +76,11 @@ ${color.bold('OPTIONS')}
       --no-open           Do not open a browser
       --force             Overwrite an existing config (init)
       --print             Print the config instead of writing it (init)
+      --gitignore         Add the graph/trace files to .gitignore, but only if
+                          you moved them into the repo with -g, --trace or
+                          $FLOWLENS_TRACE. Off by default: the cache is outside
+                          your project, so there is normally nothing to ignore.
+      --no-gitignore      Never touch .gitignore, whatever the config says
   -q, --quiet             Print only the essentials
   -h, --help              Show this help
   -v, --version           Show the version
@@ -132,6 +137,8 @@ export function main(argv = process.argv.slice(2)): number {
         open: { type: 'boolean' },
         'no-open': { type: 'boolean', default: false },
         force: { type: 'boolean', default: false },
+        gitignore: { type: 'boolean' },
+        'no-gitignore': { type: 'boolean', default: false },
         print: { type: 'boolean', default: false },
         quiet: { type: 'boolean', short: 'q', default: false },
         help: { type: 'boolean', short: 'h', default: false },
@@ -184,6 +191,14 @@ export function main(argv = process.argv.slice(2)): number {
   const { config: fileConfig, path: configPath } = loadConfig(cliRoots[0] ?? '.', values.config);
   const roots = cliRoots.length > 0 ? cliRoots : (fileConfig.roots ?? ['.']);
 
+  /**
+   * `--gitignore` beats `"gitignore": true` in the config, in both directions:
+   * a project can turn the managed block on for everyone, and one developer can
+   * still say `--no-gitignore` on a single run. Undefined means "not asked",
+   * which for `scan` and `serve` is the default of warning and changing nothing.
+   */
+  const gitignore = values['no-gitignore'] ? false : (values.gitignore ?? fileConfig.gitignore);
+
   const common = {
     root: roots[0]!,
     ...(roots.length > 1 ? { extraRoots: roots.slice(1) } : {}),
@@ -201,6 +216,7 @@ export function main(argv = process.argv.slice(2)): number {
           force: values.force,
           print: values.print,
           quiet: values.quiet,
+          ...(gitignore !== undefined ? { gitignore } : {}),
         });
 
       case 'scan':
@@ -229,6 +245,7 @@ export function main(argv = process.argv.slice(2)): number {
           ...(values['http-client'] ? { httpClients: values['http-client'] } : {}),
           ...(values['max-files'] ? { maxFiles: Number(values['max-files']) } : {}),
           ...(values['no-constants'] ? { resolveConstants: false } : {}),
+          ...(gitignore !== undefined ? { gitignore } : {}),
           ...(configPath ? { configPath } : {}),
         });
 
@@ -280,6 +297,7 @@ export function main(argv = process.argv.slice(2)): number {
       case 'serve':
         return runServe({
           ...common,
+          ...(gitignore !== undefined ? { gitignore } : {}),
           ...(values.port ? { port: Number(values.port) } : {}),
           ...(values.host ? { host: values.host } : {}),
           // A browser is a convenience for a person at a terminal. A piped or

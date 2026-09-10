@@ -37,6 +37,15 @@
   // Extra directories to skip, on top of node_modules, dist, .next and friends.
   'ignore': ['legacy', 'generated', 'public'],
 
+  // Keep FlowLens's own artifacts out of `git status`.
+  //
+  // Only matters if you moved them into the repository with `-g`, `--trace` or
+  // `$FLOWLENS_TRACE`: by default the graph and the trace live in your OS cache
+  // and git never sees them. With this on, every scan keeps a managed block in
+  // `.gitignore` up to date, listing exactly the files FlowLens writes.
+  // `--no-gitignore` overrides it for one run.
+  'gitignore': false,
+
   // Resolve endpoint constants (`url: getCustomersList`) to their literal value.
   // Turn off only if it ever resolves something wrongly.
   'resolveConstants': true,
