@@ -19,9 +19,11 @@ export default function App({
     let uninstall: (() => void) | undefined;
 
     void import('@flowslens/runtime/browser').then(({ installBrowserTracer }) => {
-      uninstall = installBrowserTracer({
-        endpoint: 'http://localhost:4177/__flowlens/spans',
-      });
+      // The collector requires the token `flowlens serve` prints, so that a
+      // page you did not write cannot forge spans into your graph. Put it in
+      // your dev env file rather than here.
+      const endpoint = process.env.NEXT_PUBLIC_FLOWLENS_SPANS;
+      uninstall = installBrowserTracer(endpoint ? { endpoint } : {});
     });
 
     return () => uninstall?.();

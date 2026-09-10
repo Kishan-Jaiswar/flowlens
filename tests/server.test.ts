@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -22,6 +23,14 @@ const PORT = 4181;
 const base = `http://127.0.0.1:${PORT}`;
 
 /**
+ * A fixed token, so the tests can post spans.
+ *
+ * `serve` generates one per run and prints it; pinning it here is what the
+ * `--token` flag is for, and it keeps these tests from having to scrape stdout.
+ */
+const TOKEN = 'server-test-token';
+
+/**
  * Artifacts go to a temp directory, explicitly.
  *
  * FlowLens defaults to a machine-local cache outside the project, so a test that
@@ -42,7 +51,19 @@ beforeAll(async () => {
   // A stale trace from another test run would change the evidence assertions.
   rmSync(TRACE, { force: true });
 
-  const argv = [BIN, 'serve', PROJECT, '--port', String(PORT), '-g', GRAPH, '--trace', TRACE];
+  const argv = [
+    BIN,
+    'serve',
+    PROJECT,
+    '--port',
+    String(PORT),
+    '-g',
+    GRAPH,
+    '--trace',
+    TRACE,
+    '--token',
+    TOKEN,
+  ];
   server = spawn(process.execPath, argv, {
     cwd: REPO,
     stdio: 'ignore',
@@ -200,7 +221,7 @@ describe('span collection', () => {
       },
     ];
 
-    const response = await get('/__flowlens/spans', {
+    const response = await get(`/__flowlens/spans?token=${TOKEN}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(spans),
@@ -214,7 +235,7 @@ describe('span collection', () => {
   });
 
   it('rejects a malformed payload without dying', async () => {
-    const response = await get('/__flowlens/spans', {
+    const response = await get(`/__flowlens/spans?token=${TOKEN}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: 'not json at all',
@@ -250,3 +271,105 @@ describe('rescan', () => {
     expect(['runtime', 'confirmed']).toContain(submit.evidence);
   });
 });
+
+/**
+ * The dashboard is a local server holding a map of your codebase, reachable by
+ * anything that can make an HTTP request from this machine — which includes
+ * every page open in your browser. These are the rules that make "it only
+ * binds to localhost" mean something.
+ */
+describe('security', () => {
+  it('does not let another origin read the graph', async () => {
+    const response = await get('/api/graph', { headers: { Origin: 'https://evil.example' } });
+    expect(response.status).toBe(403);
+  });
+
+  it('sends no wildcard CORS header on the data API', async () => {
+    // Belt and braces: even the allowed same-origin response must not carry a
+    // header that would make the body readable from anywhere.
+    const response = await get('/api/graph');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('refuses a cross-origin rescan, which needs no readable response to hurt', async () => {
+    const response = await get('/api/rescan', {
+      method: 'POST',
+      headers: { Origin: 'https://evil.example', 'content-type': 'text/plain' },
+    });
+    expect(response.status).toBe(403);
+  });
+
+  it('answers no preflight for the data API', async () => {
+    const response = await get('/api/graph', { method: 'OPTIONS' });
+    expect(response.status).toBe(404);
+    expect(response.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  // `fetch` refuses to set Host — it is a forbidden header — so these go out
+  // over a raw request, which is also how a rebinding victim's browser sends it.
+  it('rejects a request addressed by name, which is how rebinding arrives', async () => {
+    expect(await statusWithHost('evil.example')).toBe(403);
+    expect(await statusWithHost(`evil.example:${PORT}`)).toBe(403);
+  });
+
+  it('still serves a request addressed by IP or localhost', async () => {
+    expect(await statusWithHost(`localhost:${PORT}`)).toBe(200);
+    expect(await statusWithHost(`127.0.0.1:${PORT}`)).toBe(200);
+  });
+
+  it('will not take spans without the token', async () => {
+    const span = [{ v: 1, traceId: 'forged', spanId: 'f1', kind: 'ui-action', name: 'x' }];
+    const missing = await get('/__flowlens/spans', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(span),
+    });
+    expect(missing.status).toBe(401);
+
+    const wrong = await get('/__flowlens/spans?token=guess', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(span),
+    });
+    expect(wrong.status).toBe(401);
+
+    // Nothing forged reached the trace.
+    expect(readFileSync(TRACE, 'utf8')).not.toContain('forged');
+  });
+
+  it('still accepts spans from another origin, because the tracer is on one', async () => {
+    const response = await get(`/__flowlens/spans?token=${TOKEN}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', Origin: 'http://localhost:3000' },
+      body: JSON.stringify([
+        {
+          v: 1,
+          traceId: 'cross-origin-1',
+          spanId: 'co-1',
+          kind: 'ui-action',
+          name: 'Click',
+          startedAt: 1_735_000_000_000,
+          durationMs: 1,
+        },
+      ]),
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('access-control-allow-origin')).toBe('*');
+  });
+});
+
+/** GET /api/graph with an arbitrary Host header, which `fetch` will not send. */
+function statusWithHost(host: string): Promise<number> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const req = httpRequest(
+      { host: '127.0.0.1', port: PORT, path: '/api/graph', method: 'GET', headers: { host } },
+      (response) => {
+        response.resume();
+        resolvePromise(response.statusCode ?? 0);
+      },
+    );
+    req.on('error', rejectPromise);
+    req.end();
+  });
+}

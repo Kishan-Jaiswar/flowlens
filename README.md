@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/@flowslens/cli)](https://www.npmjs.com/package/@flowslens/cli)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-326%20passing-brightgreen)](tests)
+[![Tests](https://img.shields.io/badge/tests-347%20passing-brightgreen)](tests)
 
 > FlowLens helps developers understand and safely modify unfamiliar applications
 > by tracing a feature from the user's UI action through frontend state and
@@ -31,7 +31,7 @@ codebase:
 | Operating systems      | Windows, macOS and Linux: unit suite, every CLI command, and a from-scratch launcher run, all three in CI                                                                                      |
 | Runtime tracing        | **Implemented, not yet proven end to end.** The tracer has 26 unit tests, but every trace so far came from fakes or a span-fabricating script. Wiring it into a live app is the next milestone |
 | Stacks read            | React/Next, NestJS/Express, Mongoose. Vue, Prisma and SQL are not read yet, and the CLI tells you so                                                                                           |
-| Test suite             | 326 tests across 14 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                      |
+| Test suite             | 347 tests across 15 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                      |
 
 `docs/ROADMAP.md` leads with what is missing rather than what is planned.
 
@@ -636,18 +636,28 @@ mongoose.plugin(flowlensMongoose());
 // Browser — links a click to the requests it causes
 import { installBrowserTracer } from '@flowslens/runtime/browser';
 
-installBrowserTracer();
+// The endpoint, token and all, is printed by `flowlens serve`.
+installBrowserTracer({
+  endpoint: 'http://127.0.0.1:4177/__flowlens/spans?token=…',
+});
 ```
 
 If you would rather not add a dependency to the app you are tracing, load the
 tracer from the running dashboard instead — nothing is copied into your project:
 
 ```js
-// development only
-import('http://127.0.0.1:4177/__flowlens/browser.js').then((m) =>
+// development only — copy this line from the `tracer:` line `flowlens serve` prints
+import('http://127.0.0.1:4177/__flowlens/browser.js?token=…').then((m) =>
   m.installBrowserTracer(),
 );
 ```
+
+Loaded that way the tracer reads its own URL, so the token comes along and there
+is nothing else to configure. The collector requires it: the endpoint has to
+accept requests from your app's origin, so it cannot tell who is asking and asks
+what they know instead — otherwise any page in your browser could forge spans,
+and a forged span is worse than a missing one, because merged into the graph it
+reads as `confirmed`.
 
 The tracer is served by the dashboard, so there is no file to copy into your
 project. Spans append to a machine-local cache — never to your repository — and
@@ -678,6 +688,14 @@ about its own boundaries:
   a project with a broken build still scans fine.
 - **It makes no network calls.** No telemetry, no cloud, no account. The
   dashboard binds to `127.0.0.1`.
+- **The dashboard answers the dashboard, and nothing else.** Binding to
+  localhost is not by itself protection — every page open in your browser is
+  already on localhost — so `/api/*` sends no CORS headers, rejects a request
+  carrying another page's `Origin`, and rejects one addressed to a _name_
+  rather than an address, which is how DNS rebinding arrives. Span collection
+  has to accept cross-origin writes, so it requires the per-run token that
+  `serve` prints. Bind somewhere reachable with `--host` and the token guards
+  the whole API, with a warning at startup saying so.
 - **It never writes to your project.** The graph and any trace live in your OS
   cache directory (`~/.cache/flowlens` on Linux, honouring `XDG_CACHE_HOME`;
   `~/Library/Caches/flowlens` on macOS; `%LOCALAPPDATA%\flowlens\Cache` on
@@ -773,7 +791,7 @@ node --version       # expect the version in .nvmrc
 ```bash
 npm install          # also builds, via the prepare script
 npm run build        # compile all three packages
-npm test             # build, then run the suite — 326 tests, ~10s
+npm test             # build, then run the suite — 347 tests, ~10s
 npm run test:watch
 npm run smoke        # run every CLI command for real, on this OS
 npm run test:package # pack, install into a throwaway project, drive over HTTP

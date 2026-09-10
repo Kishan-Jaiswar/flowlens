@@ -137,7 +137,8 @@ export default function App({ Component, pageProps }) {
     void import('@flowslens/runtime/browser').then(
       ({ installBrowserTracer }) => {
         uninstall = installBrowserTracer({
-          endpoint: 'http://localhost:4177/__flowlens/spans',
+          // `flowlens serve` prints this line, token included.
+          endpoint: 'http://localhost:4177/__flowlens/spans?token=…',
         });
       },
     );
@@ -153,7 +154,7 @@ export default function App({ Component, pageProps }) {
 serves the tracer itself — paste this in your browser console:
 
 ```js
-import('http://127.0.0.1:4177/__flowlens/browser.js').then((m) =>
+import('http://127.0.0.1:4177/__flowlens/browser.js?token=…').then((m) =>
   m.installBrowserTracer(),
 );
 ```
@@ -228,11 +229,11 @@ Every option is optional; the defaults are meant to be right.
 
 **`installBrowserTracer(options)`**
 
-| Option           | Type     | Purpose                                         |
-| ---------------- | -------- | ----------------------------------------------- |
-| `endpoint`       | `string` | Where to POST spans. Defaults to the dashboard. |
-| `ignoreSelector` | `string` | Ignore clicks matching this CSS selector.       |
-| `maxLabelLength` | `number` | Max characters of element text used as a label. |
+| Option           | Type     | Purpose                                                                                                                                      |
+| ---------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `endpoint`       | `string` | Where to POST spans, token included — `flowlens serve` prints it. Loaded from the dashboard, the tracer reads its own URL and needs nothing. |
+| `ignoreSelector` | `string` | Ignore clicks matching this CSS selector.                                                                                                    |
+| `maxLabelLength` | `number` | Max characters of element text used as a label.                                                                                              |
 
 Returns a function that uninstalls it again.
 

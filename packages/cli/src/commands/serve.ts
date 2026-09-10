@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { isIP } from 'node:net';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import {
   analyzeImpact,
@@ -29,6 +31,12 @@ export interface ServeArgs {
   /** `"gitignore": true` in the config — keep the managed block up to date. */
   gitignore?: boolean;
   /**
+   * The secret that authorises span collection, and the whole API on a
+   * non-loopback bind. Generated per run unless given, so the common case needs
+   * no setup: `serve` prints the URLs with the token already in them.
+   */
+  token?: string;
+  /**
    * Open a browser once the server is listening.
    *
    * The CLI turns this on for an interactive terminal and off everywhere else,
@@ -49,6 +57,9 @@ const DEFAULT_PORT = 4177;
  */
 const PORT_ATTEMPTS = 20;
 
+/** Reported once per run: a warning per span batch would be its own denial of service. */
+let traceLimitReported = false;
+
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -59,6 +70,95 @@ const MIME: Record<string, string> = {
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
 };
+
+/**
+ * How large `trace.jsonl` may grow before the collector stops appending.
+ *
+ * A browser left open on a busy page posts spans indefinitely, and the endpoint
+ * is reachable by anything that can talk to the port. A cap turns "fills the
+ * disk overnight" into a message telling you to delete the file.
+ */
+export const TRACE_LIMIT_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Is this bind address reachable only from this machine?
+ *
+ * The default is, and the security model leans on it: the API is same-origin
+ * only and unauthenticated. Bind anywhere else and the token is required, since
+ * "only people at this keyboard can reach it" has stopped being true.
+ */
+export function isLoopbackHost(host: string): boolean {
+  const bare = host.replace(/^\[/, '').replace(/\]$/, '');
+  return bare === 'localhost' || bare === '::1' || /^127\./.test(bare);
+}
+
+/** The hostname in a `Host` header, without the port or IPv6 brackets. */
+export function hostnameOf(header: string | undefined): string | undefined {
+  if (header === undefined || header === '') return undefined;
+  if (header.startsWith('[')) {
+    const close = header.indexOf(']');
+    return close === -1 ? undefined : header.slice(1, close);
+  }
+  const [name] = header.split(':');
+  return name === '' ? undefined : name;
+}
+
+/**
+ * Reject requests addressed to this server by *name*.
+ *
+ * A DNS rebinding attack works like this: you visit evil.example, whose DNS
+ * answer flips to 127.0.0.1 a second later. The browser now believes
+ * `http://evil.example:4177` is same-origin with the dashboard, so every
+ * same-origin protection below is void and the page can read your graph. The
+ * defence is to insist on being addressed the way a local tool is addressed —
+ * by IP literal, or by `localhost`. An attacker cannot rebind either.
+ */
+export function hostAllowed(header: string | undefined, boundHost: string): boolean {
+  const name = hostnameOf(header);
+  if (name === undefined) return false;
+  if (name === 'localhost' || name === boundHost) return true;
+  return isIP(name) !== 0;
+}
+
+/**
+ * Same-origin check for the data API.
+ *
+ * `Origin` is absent on curl, on scripts, and on top-level navigation, so its
+ * absence cannot mean "reject". Its *presence* is a browser telling you which
+ * page is asking — and the only page allowed to ask for the graph is the
+ * dashboard itself. This is what stops a random tab from POSTing to
+ * `/api/rescan`, which needs no readable response to be worth doing.
+ */
+export function originAllowed(origin: string | undefined, hostHeader: string | undefined): boolean {
+  if (origin === undefined) return true;
+  if (origin === 'null' || hostHeader === undefined) return false;
+  try {
+    return new URL(origin).host === hostHeader;
+  } catch {
+    return false;
+  }
+}
+
+/** Constant-time token comparison, so the port cannot be used as an oracle. */
+export function tokenMatches(presented: string | undefined, expected: string): boolean {
+  if (presented === undefined) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+function presentedToken(url: URL, request: IncomingMessage): string | undefined {
+  const fromQuery = url.searchParams.get('token');
+  if (fromQuery !== null) return fromQuery;
+  const header = request.headers['x-flowlens-token'];
+  return Array.isArray(header) ? header[0] : header;
+}
+
+function deny(response: ServerResponse, status: number, message: string): void {
+  response.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
+  response.end(`${message}\n`);
+}
 
 /**
  * `flowlens serve` — the dashboard.
@@ -72,6 +172,18 @@ export function runServe(args: ServeArgs): number {
   const requestedPort = args.port;
   const host = args.host ?? '127.0.0.1';
   const staticDir = dashboardDir();
+
+  /**
+   * One secret per run.
+   *
+   * It authorises span collection — which is a write, from another origin, and
+   * therefore cannot be protected by a same-origin rule — and the whole API
+   * when the server is bound somewhere other than loopback. Generated rather
+   * than configured so that the secure path is also the default one: the URLs
+   * printed below already carry it.
+   */
+  const token = args.token ?? process.env['FLOWLENS_TOKEN'] ?? randomBytes(16).toString('hex');
+  const local = isLoopbackHost(host);
 
   let graph = buildGraph(root, args);
   let lastScan = new Date();
@@ -95,13 +207,30 @@ export function runServe(args: ServeArgs): number {
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
     const path = url.pathname;
+    const origin = headerOf(request, 'origin');
 
-    // The tracer runs on the app's origin (localhost:3000), so it needs CORS.
+    // Before anything else: is this request even addressed to us?
+    if (!hostAllowed(request.headers.host, host)) {
+      deny(response, 403, 'FlowLens: unexpected Host header');
+      return;
+    }
+
+    /**
+     * Only the tracer endpoints answer a preflight.
+     *
+     * They are the two that are cross-origin by design — the app being traced
+     * runs on its own port. Everything else is same-origin, and a preflight
+     * that says otherwise would be an invitation.
+     */
     if (request.method === 'OPTIONS') {
+      if (!path.startsWith('/__flowlens/')) {
+        deny(response, 404, 'not found');
+        return;
+      }
       response.writeHead(204, {
         'access-control-allow-origin': '*',
         'access-control-allow-methods': 'GET, POST, OPTIONS',
-        'access-control-allow-headers': 'content-type',
+        'access-control-allow-headers': 'content-type, x-flowlens-token',
         'access-control-max-age': '86400',
       });
       response.end();
@@ -128,10 +257,43 @@ export function runServe(args: ServeArgs): number {
       return;
     }
 
-    // The browser tracer posts spans here.
+    /**
+     * The browser tracer posts spans here.
+     *
+     * A write endpoint that has to accept cross-origin requests cannot be
+     * protected by checking who is asking, so it checks what they know. Without
+     * this, any page in your browser could forge spans — and a forged span is
+     * worse than a missing one, because merged into the graph it reads as
+     * `confirmed`: the one thing FlowLens says it has actually observed.
+     */
     if (path === '/__flowlens/spans' && request.method === 'POST') {
+      if (!tokenMatches(presentedToken(url, request), token)) {
+        response.writeHead(401, {
+          'content-type': 'text/plain; charset=utf-8',
+          'access-control-allow-origin': '*',
+        });
+        response.end('FlowLens: missing or wrong token\n');
+        return;
+      }
       collectSpans(request, response, root, args);
       return;
+    }
+
+    /**
+     * Everything under /api describes your codebase, so it answers the
+     * dashboard and nothing else: no CORS headers (see `sendJson`), an origin
+     * check for browsers that send one, and — once the server is reachable from
+     * off this machine — the token as well.
+     */
+    if (path.startsWith('/api/')) {
+      if (!originAllowed(origin, request.headers.host)) {
+        deny(response, 403, 'FlowLens: cross-origin requests are not allowed');
+        return;
+      }
+      if (!local && !tokenMatches(presentedToken(url, request), token)) {
+        deny(response, 401, 'FlowLens: missing or wrong token');
+        return;
+      }
     }
 
     if (path === '/api/graph') {
@@ -202,18 +364,27 @@ export function runServe(args: ServeArgs): number {
 
   server.on('listening', () => {
     const url = `http://${displayHost(host)}:${port}`;
+    // The token belongs in the URLs people copy, not in a paragraph telling
+    // them to add it: the secure spelling should be the one to hand.
+    const dashboard = local ? url : `${url}/?token=${token}`;
     process.stdout.write(
-      `\n${color.bold('FlowLens')} dashboard on ${color.cyan(url)}\n` +
+      `\n${color.bold('FlowLens')} dashboard on ${color.cyan(dashboard)}\n` +
         `${color.gray('project:')} ${root}\n` +
         `${color.gray('graph:')}   ${graph.nodeCount} nodes, ${graph.edgeCount} edges\n` +
-        `${color.gray('spans:')}   POST ${url}/__flowlens/spans\n` +
-        `${color.gray('tracer:')}  ${url}/__flowlens/browser.js\n` +
+        `${color.gray('spans:')}   POST ${url}/__flowlens/spans?token=${token}\n` +
+        `${color.gray('tracer:')}  ${url}/__flowlens/browser.js?token=${token}\n` +
         (requestedPort === undefined && port !== DEFAULT_PORT
           ? `${color.gray('note:')}    port ${DEFAULT_PORT} was busy, using ${port}\n`
           : '') +
+        (local
+          ? ''
+          : `\n${color.yellow('warning')} ${host} is not loopback: this dashboard is reachable\n` +
+            `        from other machines. The token above is the only thing\n` +
+            `        protecting your source graph. Bind 127.0.0.1 unless you\n` +
+            `        meant this.\n`) +
         `\n${color.gray('Ctrl+C to stop')}\n`,
     );
-    if (args.open === true) openBrowser(url);
+    if (args.open === true) openBrowser(dashboard);
   });
 
   server.on('error', (error) => {
@@ -344,10 +515,31 @@ function collectSpans(
       const spans = Array.isArray(payload) ? payload : [payload];
       const file = tracePath(root, args.trace);
       mkdirSync(dirname(file), { recursive: true });
+
+      /**
+       * Stop appending rather than fill the disk.
+       *
+       * A tab left open on a busy page produces spans forever, and the trace
+       * is only ever appended to. Refusing loudly at a fixed ceiling is kinder
+       * than a machine that runs out of space overnight.
+       */
+      if (fileSize(file) >= TRACE_LIMIT_BYTES) {
+        if (!traceLimitReported) {
+          traceLimitReported = true;
+          process.stderr.write(
+            `${color.yellow('warning')} trace file has reached ` +
+              `${Math.round(TRACE_LIMIT_BYTES / 1024 / 1024)}MB and is no longer being ` +
+              `appended to:\n  ${file}\n  Delete it, or point --trace somewhere else.\n`,
+          );
+        }
+        sendJson(response, { error: 'trace file is full' }, 413, true);
+        return;
+      }
+
       appendFileSync(file, `${spans.map((span) => JSON.stringify(span)).join('\n')}\n`, 'utf8');
-      sendJson(response, { ok: true, received: spans.length });
+      sendJson(response, { ok: true, received: spans.length }, 200, true);
     } catch {
-      sendJson(response, { error: 'invalid span payload' }, 400);
+      sendJson(response, { error: 'invalid span payload' }, 400, true);
     }
   });
 }
@@ -381,15 +573,38 @@ function serveStatic(dir: string, path: string, response: ServerResponse): void 
   response.end(readFileSync(file));
 }
 
-function sendJson(response: ServerResponse, body: unknown, status = 200): void {
+/**
+ * No `Access-Control-Allow-Origin` here, deliberately.
+ *
+ * These responses carry the graph: absolute file paths, every route, every
+ * collection. A wildcard would let any page you happen to have open read all of
+ * it — binding to 127.0.0.1 is no protection at all against a browser that is
+ * already on this machine. The tracer endpoints send their own CORS headers,
+ * because they need them and carry nothing.
+ */
+function sendJson(response: ServerResponse, body: unknown, status = 200, cors = false): void {
   const payload = JSON.stringify(body);
   response.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(payload),
-    // The tracer runs on the app's own origin (localhost:3000), not ours.
-    'access-control-allow-origin': '*',
+    // Only the span collector opts in, and only so the tracer's own fetch does
+    // not log a CORS error at the developer. Its body is `{ok:true}`.
+    ...(cors ? { 'access-control-allow-origin': '*' } : {}),
   });
   response.end(payload);
+}
+
+function fileSize(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
+  }
+}
+
+function headerOf(request: IncomingMessage, name: string): string | undefined {
+  const value = request.headers[name];
+  return Array.isArray(value) ? value[0] : value;
 }
 
 function summarize(node: { id: string; label: string; source?: unknown; meta?: unknown }) {

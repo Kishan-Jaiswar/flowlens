@@ -32,6 +32,42 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `--no-gitignore` override the config for one run.
   - 21 new tests, against real git repositories in a temp directory.
 
+### Security
+
+- **`flowlens serve` sent `Access-Control-Allow-Origin: *` on every JSON
+  response**, so while the dashboard was open, any page in your browser could
+  read `/api/graph` — every absolute file path, route, DTO field and collection
+  name in the project — and send it anywhere. Binding to `127.0.0.1` was no
+  defence: a browser is already on this machine. The wildcard now appears only
+  on the span endpoints, which need it and return `{ok:true}`.
+- **`POST /api/rescan` was reachable cross-origin.** With `content-type:
+text/plain` it is a CORS simple request, so no preflight stood in the way and
+  no readable response was needed to make it worth doing — a page could pin a
+  core re-scanning a large project. `/api/*` now rejects any request carrying a
+  foreign `Origin`.
+- **`POST /__flowlens/spans` accepted spans from anyone.** Forged spans merge
+  into the graph as `confirmed` evidence, which is precisely the claim FlowLens
+  makes that nothing else does, and the trace file grew without limit. The
+  endpoint now requires a token, generated per run and printed as part of the
+  URLs to copy (`--token` / `$FLOWLENS_TOKEN` to fix it), and the trace file
+  stops at 64 MB with a warning rather than filling the disk.
+- **No `Host` header validation** left the server open to DNS rebinding, which
+  defeats every same-origin rule above. Requests must now be addressed by IP
+  literal or `localhost` — the two things an attacker cannot rebind.
+- **`--host` exposed everything above to the network silently.** A non-loopback
+  bind now requires the token for the whole API and prints a warning saying
+  what it has done. The dashboard passes on the token it was opened with, so
+  the printed URL just works.
+- **A `flowlens.config.json` is discovered by walking up from the scanned
+  path**, so an unfamiliar repository could choose its own scan settings.
+  `roots` pointing outside the project now produce a warning naming the
+  directory, and `requestFunctionPattern` is length-capped before compilation
+  and matched only against plausible identifiers — bounding what a hostile
+  pattern can cost. The pattern is also compiled once instead of once per
+  member expression, which was a real cost on a large frontend.
+- 21 new tests: the rules as functions, and the attacks themselves replayed
+  against a live `flowlens serve`.
+
 ### Fixed
 
 - **`packages/cli` was type-checking and running against the _published_

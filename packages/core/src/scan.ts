@@ -13,6 +13,9 @@ import { collectionAliasesOf } from './analyzer/dbaccess.js';
 import { detectProjects, loadProject, type ScanOptions } from './analyzer/project.js';
 import { linkDataLineage, linkFrontendToBackend, type SeamResult } from './analyzer/seam.js';
 
+/** Cap on `requestFunctionPattern`: see the check in {@link scan}. */
+const MAX_PATTERN_LENGTH = 500;
+
 export interface FlowLensConfig
   extends
     Partial<Omit<FrontendConfig, 'resolveConstant'>>,
@@ -96,6 +99,21 @@ export function scan(options: ScanOptions & FlowLensConfig): ScanResult {
    * with the real reason buried in warnings — which reads as "my project is
    * unsupported" rather than "you mistyped a regex".
    */
+  /**
+   * A length cap before the syntax check.
+   *
+   * `flowlens.config.json` is discovered by walking up from the path being
+   * scanned, so on an unfamiliar repository the pattern is, strictly speaking,
+   * untrusted input that gets compiled and run. Identifiers are short and so
+   * are the patterns that match them; anything else is either a mistake or an
+   * attempt to make the scan expensive.
+   */
+  if (requestFunctionPattern.length > MAX_PATTERN_LENGTH) {
+    throw new Error(
+      `FlowLens: requestFunctionPattern is ${requestFunctionPattern.length} characters; ` +
+        `the limit is ${MAX_PATTERN_LENGTH}. It matches function names, which are short.`,
+    );
+  }
   try {
     new RegExp(requestFunctionPattern);
   } catch (error) {

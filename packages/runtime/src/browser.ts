@@ -53,7 +53,7 @@ export function installBrowserTracer(options: BrowserTracerOptions = {}): () => 
   if (installed || typeof window === 'undefined') return () => {};
   installed = true;
 
-  const endpoint = options.endpoint ?? 'http://localhost:4177/__flowlens/spans';
+  const endpoint = options.endpoint ?? defaultEndpoint();
   const maxLabel = options.maxLabelLength ?? 60;
   const queue: BrowserSpan[] = [];
 
@@ -285,6 +285,31 @@ function pathOf(url: string): string {
   } catch {
     return url.split('?')[0] ?? url;
   }
+}
+
+/**
+ * Where to post spans when the caller did not say.
+ *
+ * The dashboard serves this very module, so when it was imported from there —
+ * `import('http://127.0.0.1:4177/__flowlens/browser.js?token=…')`, which is
+ * what `flowlens serve` prints — its own URL already names the right origin
+ * *and* carries the token the collector requires. Deriving the endpoint from
+ * it means the documented setup needs no second copy of either.
+ *
+ * Bundled from npm instead, `import.meta.url` is a local file path and there is
+ * nothing to derive: fall back to the default port and let the developer paste
+ * the endpoint that `serve` printed.
+ */
+function defaultEndpoint(): string {
+  try {
+    const self = new URL(import.meta.url);
+    if (self.protocol === 'http:' || self.protocol === 'https:') {
+      return new URL(`spans${self.search}`, self).href;
+    }
+  } catch {
+    // No import.meta URL to speak of — use the default below.
+  }
+  return 'http://localhost:4177/__flowlens/spans';
 }
 
 function randomId(bytes: number): string {

@@ -66,8 +66,24 @@ const el = {
   docLink: document.getElementById('doc-link'),
 };
 
+/**
+ * The token the server asked for, if any.
+ *
+ * On the default loopback bind the API is protected by being same-origin and
+ * nothing else is needed. When the server is bound somewhere reachable it
+ * requires a token, and prints a dashboard URL that carries it — so the page
+ * simply passes on whatever it was opened with.
+ */
+const TOKEN = new URLSearchParams(window.location.search).get('token') ?? '';
+
+/** Add the token to a same-origin API path, when there is one. */
+function apiUrl(path) {
+  if (!TOKEN) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(TOKEN)}`;
+}
+
 async function getJson(url) {
-  const response = await fetch(url);
+  const response = await fetch(apiUrl(url));
   if (!response.ok) throw new Error(`${url} → ${response.status}`);
   return response.json();
 }
@@ -172,7 +188,7 @@ function selectFlow(id) {
   if (!flow) return;
   state.selectedFlow = flow;
   state.selectedNode = null;
-  el.docLink.href = `/api/document?flow=${encodeURIComponent(flow.id)}`;
+  el.docLink.href = apiUrl(`/api/document?flow=${encodeURIComponent(flow.id)}`);
   renderFlowList();
   renderFlowHeader(flow);
   renderGraph(flow);
@@ -605,7 +621,7 @@ el.rescan.addEventListener('click', async () => {
   el.rescan.disabled = true;
   el.rescan.textContent = 'Scanning…';
   try {
-    await fetch('/api/rescan', { method: 'POST' });
+    await fetch(apiUrl('/api/rescan'), { method: 'POST' });
     await load();
   } finally {
     el.rescan.disabled = false;

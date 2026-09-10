@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { FlowLensConfig } from './scan.js';
 
 /**
@@ -33,6 +33,8 @@ export interface LoadedConfig {
   config: FileConfig;
   /** Absolute path of the file the config came from, if any. */
   path?: string;
+  /** Things worth saying out loud about the file that was found. */
+  warnings?: string[];
 }
 
 /**
@@ -47,7 +49,7 @@ export function loadConfig(fromDir: string, explicitPath?: string): LoadedConfig
     if (!existsSync(path)) {
       throw new Error(`FlowLens: config file not found: ${path}`);
     }
-    return { config: parse(path), path };
+    return loaded(parse(path), path);
   }
 
   let current = resolve(fromDir);
@@ -55,13 +57,51 @@ export function loadConfig(fromDir: string, explicitPath?: string): LoadedConfig
     for (const name of CONFIG_FILENAMES) {
       const candidate = join(current, name);
       if (existsSync(candidate)) {
-        return { config: parse(candidate), path: candidate };
+        return loaded(parse(candidate), candidate);
       }
     }
     const parent = dirname(current);
     if (parent === current) return { config: {} };
     current = parent;
   }
+}
+
+function loaded(config: FileConfig, path: string): LoadedConfig {
+  const warnings = farRoots(config, path);
+  return { config, path, ...(warnings.length > 0 ? { warnings } : {}) };
+}
+
+/**
+ * Roots that reach outside the neighbourhood of the config file.
+ *
+ * A config is *discovered*, by walking up from whatever path you pointed the
+ * CLI at — so on a repository you have only just cloned, the repository decides
+ * what gets read. `"roots": ["/"]` would walk your whole disk into a graph you
+ * then serve over HTTP. This is a warning rather than a refusal: sibling
+ * repositories (`../shop-api`) are the documented layout and must keep working,
+ * and a developer who is told which directories are about to be read can judge
+ * the rest. The neighbourhood is the config file's directory and its parent.
+ */
+function farRoots(config: FileConfig, path: string): string[] {
+  if (!config.roots) return [];
+  const configDir = dirname(path);
+  const neighbourhood = dirname(configDir);
+  const warnings: string[] = [];
+  for (const root of config.roots) {
+    const target = resolve(root);
+    if (target === neighbourhood || contains(neighbourhood, target)) continue;
+    warnings.push(
+      `${path} points a scan root outside its own project: ${target}\n` +
+        `  Check the file if you did not write it — a scanned directory ends up in the graph.`,
+    );
+  }
+  return warnings;
+}
+
+/** Is `target` inside `parent`? Path-segment aware, so /a/bc is not inside /a/b. */
+function contains(parent: string, target: string): boolean {
+  const rel = relative(parent, target);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
 function parse(path: string): FileConfig {

@@ -872,6 +872,31 @@ export function readHttpCall(
  * This is the shape most house-built API layers use, and the one that made a
  * 500-endpoint frontend look like it had twelve API calls.
  */
+/**
+ * The wrapper regex, compiled once per pattern.
+ *
+ * It was being rebuilt for every member expression in the project — wasteful,
+ * and it made the cost of a pathological pattern scale with the codebase. The
+ * cache is keyed by the pattern string, so a config change in the same process
+ * (the dashboard re-scanning) still takes effect.
+ */
+const wrapperPatterns = new Map<string, RegExp>();
+
+/** No real request wrapper is called anything like this long. */
+const MAX_WRAPPER_NAME = 200;
+
+function wrapperPattern(pattern: string): RegExp {
+  let compiled = wrapperPatterns.get(pattern);
+  if (!compiled) {
+    compiled = new RegExp(pattern, 'i');
+    wrapperPatterns.set(pattern, compiled);
+  }
+  // Reset: a pattern someone wrote with /g would otherwise carry lastIndex
+  // between calls and match every other identifier.
+  compiled.lastIndex = 0;
+  return compiled;
+}
+
 function readWrapperCall(
   call: CallExpression,
   member: string,
@@ -881,7 +906,13 @@ function readWrapperCall(
 ): DetectedRequest | undefined {
   // Case-insensitive: the verb shows up as `get`, `Get` and `GET` across the
   // wrapper families real codebases grow (`crmPostRequest`, `AcmeGetRequest`).
-  const match = new RegExp(config.requestFunctionPattern, 'i').exec(member);
+  /**
+   * A regex only backtracks catastrophically on a long subject, and this one is
+   * matched against an identifier. Refusing the absurd ones puts a ceiling on
+   * what a `requestFunctionPattern` from an untrusted repository can cost.
+   */
+  if (member.length > MAX_WRAPPER_NAME) return undefined;
+  const match = wrapperPattern(config.requestFunctionPattern).exec(member);
   const verb = match?.[1]?.toUpperCase();
   if (!verb || !isHttpMethod(verb)) return undefined;
 

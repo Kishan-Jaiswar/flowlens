@@ -72,6 +72,8 @@ ${color.bold('OPTIONS')}
       --port <n>          Dashboard port (serve, default 4177; the next free
                           port is used if it is busy)
       --host <h>          Dashboard host (serve, default 127.0.0.1)
+      --token <t>         Fix the span-collection token instead of generating
+                          one per run (serve). Also read from $FLOWLENS_TOKEN.
       --open              Open a browser (serve; on by default in a terminal)
       --no-open           Do not open a browser
       --force             Overwrite an existing config (init)
@@ -103,6 +105,7 @@ ${color.bold('ENVIRONMENT')}
   NO_COLOR=1              Disable colour
   FLOWLENS_CACHE=<dir>    Move the whole cache (absolute paths only)
   FLOWLENS_TRACE=<file>   Where the runtime tracer writes, and where trace reads
+  FLOWLENS_TOKEN=<t>      Fixed dashboard token, instead of one per run
 
 ${color.gray('FlowLens reads source files only. It never connects to a database and')}
 ${color.gray('never executes the code it analyzes. Nothing is written into the')}
@@ -134,6 +137,7 @@ export function main(argv = process.argv.slice(2)): number {
         'include-tests': { type: 'boolean', default: false },
         port: { type: 'string' },
         host: { type: 'string' },
+        token: { type: 'string' },
         open: { type: 'boolean' },
         'no-open': { type: 'boolean', default: false },
         force: { type: 'boolean', default: false },
@@ -188,8 +192,22 @@ export function main(argv = process.argv.slice(2)): number {
    * Explicit paths and flags always win over the file.
    */
   const cliRoots = projects.length > 0 ? projects : pathLike;
-  const { config: fileConfig, path: configPath } = loadConfig(cliRoots[0] ?? '.', values.config);
+  const {
+    config: fileConfig,
+    path: configPath,
+    warnings: configWarnings,
+  } = loadConfig(cliRoots[0] ?? '.', values.config);
   const roots = cliRoots.length > 0 ? cliRoots : (fileConfig.roots ?? ['.']);
+
+  /**
+   * On stderr, before anything runs: a config file is *found*, not asked for,
+   * so a repository you have just cloned can point the scan at directories you
+   * did not intend to read. Saying so costs one line and is the difference
+   * between a surprise and a decision.
+   */
+  for (const warning of configWarnings ?? []) {
+    process.stderr.write(`${color.yellow('warning')} ${warning}\n`);
+  }
 
   /**
    * `--gitignore` beats `"gitignore": true` in the config, in both directions:
@@ -300,6 +318,7 @@ export function main(argv = process.argv.slice(2)): number {
           ...(gitignore !== undefined ? { gitignore } : {}),
           ...(values.port ? { port: Number(values.port) } : {}),
           ...(values.host ? { host: values.host } : {}),
+          ...(values.token ? { token: values.token } : {}),
           // A browser is a convenience for a person at a terminal. A piped or
           // scripted run gets the URL on stdout and nothing else.
           open: values['no-open']
