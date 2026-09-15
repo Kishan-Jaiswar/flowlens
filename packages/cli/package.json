@@ -1,6 +1,6 @@
 {
   "name": "@flowslens/cli",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Trace any user action from the UI to the database. Maps React/Next + NestJS/Express + Prisma/Mongoose features, shows what a change would break, and serves a local dashboard.",
   "type": "module",
   "bin": {
@@ -19,22 +19,13 @@
     "prepack": "node ../../scripts/prepack.mjs"
   },
   "dependencies": {
-    "@flowslens/core": "1.1.1"
+    "@flowslens/core": "1.1.2"
   },
   "engines": {
     "node": ">=18.18"
   },
   "license": "MIT",
   "author": "Kishan Jaiswar",
-  "bugs": {
-    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues"
-  },
-  "homepage": "https://github.com/Kishan-Jaiswar/flowlens#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
-    "directory": "packages/cli"
-  },
   "keywords": [
     "cli",
     "devtools",
@@ -63,5 +54,9 @@
   ],
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "bugs": {
+    "email": "jaiswarkishan78@gmail.com"
+  },
+  "homepage": "https://www.npmjs.com/package/@flowslens/cli"
 }

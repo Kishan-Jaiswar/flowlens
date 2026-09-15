@@ -1,6 +1,6 @@
 {
   "name": "@flowslens/runtime",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Zero-dependency runtime tracer for Flowslens: HTTP, Mongoose and browser spans that turn a statically analysed flow into a confirmed one.",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,15 +22,6 @@
   },
   "license": "MIT",
   "author": "Kishan Jaiswar",
-  "bugs": {
-    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues"
-  },
-  "homepage": "https://github.com/Kishan-Jaiswar/flowlens#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
-    "directory": "packages/runtime"
-  },
   "keywords": [
     "tracing",
     "request-tracing",
@@ -53,5 +44,9 @@
   ],
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "bugs": {
+    "email": "jaiswarkishan78@gmail.com"
+  },
+  "homepage": "https://www.npmjs.com/package/@flowslens/runtime"
 }

@@ -1,7 +1,7 @@
 # @flowslens/runtime
 
 Optional, development-only tracer for
-[Flowslens](https://github.com/Kishan-Jaiswar/flowlens). Records what a request
+[Flowslens](https://www.npmjs.com/package/@flowslens/cli). Records what a request
 _actually did_, so a path Flowslens found in your source can be confirmed rather
 than assumed.
 
@@ -284,7 +284,12 @@ from `@flowslens/runtime`.
 
 ## Documentation
 
-**https://github.com/Kishan-Jaiswar/flowlens**
+[`@flowslens/cli`](https://www.npmjs.com/package/@flowslens/cli) documents the
+commands that read what this package records, and
+[`@flowslens/core`](https://www.npmjs.com/package/@flowslens/core) documents the
+graph the spans are merged into.
+
+Questions and bug reports: **jaiswarkishan78@gmail.com**.
 
 ## Licence
 

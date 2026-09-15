@@ -1,6 +1,6 @@
 # @flowslens/core
 
-The graph engine behind [Flowslens](https://github.com/Kishan-Jaiswar/flowlens):
+The graph engine behind [Flowslens](https://www.npmjs.com/package/@flowslens/cli):
 static analyzers, the flow resolver, field-level data lineage and impact
 analysis.
 
@@ -274,8 +274,11 @@ Ships its own TypeScript types — no `@types` package needed.
 
 ## Documentation
 
-**https://github.com/Kishan-Jaiswar/flowlens** —
-[architecture notes](https://github.com/Kishan-Jaiswar/flowlens/blob/main/docs/ARCHITECTURE.md).
+This page is the reference for the package. The CLI that wraps it —
+[`@flowslens/cli`](https://www.npmjs.com/package/@flowslens/cli) — documents the
+commands, the dashboard and the runtime tracer.
+
+Questions and bug reports: **jaiswarkishan78@gmail.com**.
 
 ## Licence
 

@@ -7,6 +7,31 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-09-15
+
+### Changed
+
+- **The published packages no longer depend on the repository being reachable.**
+  The source repository is going private, so `repository`, `homepage` and `bugs`
+  pointing at GitHub would have become three dead links on every npm page — the
+  first thing a reader clicks. All three packages now carry an npm homepage and
+  an email for bug reports instead, and the six GitHub links inside the
+  published READMEs point at the sibling packages or are gone.
+- **`@flowslens/cli`'s npm page is now the landing page.** With the repository
+  private, the long root README stops being public, so the content that explains
+  what the tool actually does had to move to the page people can still reach:
+  the six dashboard tabs and what each answers, why **Breaks** is the one that
+  changes how you work, and the table of request shapes — awaited chains,
+  `.then`, `Promise.all`, a `useEffect` waiting on state, `if`/`else`
+  alternatives, and error paths.
+
+### Note
+
+Making the repository private stops browsing and cloning. It does not make the
+code unreadable: an npm package is JavaScript, and every version published so
+far is MIT-licensed and permanently available. This release is about not
+shipping broken links, not about secrecy.
+
 ## [1.1.1] - 2026-09-15
 
 ### Changed
@@ -928,7 +953,8 @@ Recorded because each one shaped the design, and the reasoning is in
 - Chained Mongoose modifiers (`.lean()`, `.sort()`) were counted as separate
   database operations.
 
-[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.1.1...HEAD
+[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.0.0...v1.0.1

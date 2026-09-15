@@ -1,6 +1,6 @@
 {
   "name": "@flowslens/core",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "The graph engine behind Flowslens: static analyzers that map a UI action to the API, the service and the database, with field-level data lineage and impact analysis.",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,15 +22,6 @@
   },
   "license": "MIT",
   "author": "Kishan Jaiswar",
-  "bugs": {
-    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues"
-  },
-  "homepage": "https://github.com/Kishan-Jaiswar/flowlens#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
-    "directory": "packages/core"
-  },
   "keywords": [
     "static-analysis",
     "ast",
@@ -58,5 +49,9 @@
   ],
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "bugs": {
+    "email": "jaiswarkishan78@gmail.com"
+  },
+  "homepage": "https://www.npmjs.com/package/@flowslens/core"
 }

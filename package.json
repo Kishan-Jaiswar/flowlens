@@ -1,6 +1,6 @@
 {
   "name": "flowslens-monorepo",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "description": "Flowslens - trace any user action from the UI to the database: static analysis and runtime tracing for React/Next, NestJS/Express, Prisma and Mongoose codebases.",
   "workspaces": [
@@ -40,14 +40,6 @@
   "engines": {
     "node": ">=18.18"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git"
-  },
-  "bugs": {
-    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues"
-  },
-  "homepage": "https://github.com/Kishan-Jaiswar/flowlens#readme",
   "author": "Kishan Jaiswar",
   "license": "MIT",
   "keywords": [

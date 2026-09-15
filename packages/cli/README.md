@@ -134,9 +134,50 @@ DATABASE
 flowlens serve
 ```
 
-A local dashboard on `http://127.0.0.1:4177`. Click any step to see what it ran
-_with_: the state a handler sets, the body a request sends, the DTO a route
-validates against, the schema behind a query.
+A local dashboard on `http://127.0.0.1:4177`, which asks six questions about the
+feature you have open. Each tab carries its own headline number, so the worrying
+one is visible before you open it:
+
+```text
+Flow · 24   APIs · 1   Timing · no runs   Breaks · 2   Tests · none   Changed · 5
+```
+
+| Tab         | The question                              | Where the answer comes from                                    |
+| ----------- | ----------------------------------------- | -------------------------------------------------------------- |
+| **Flow**    | What happens when a user does this?       | click → handler → request → route → service → collection       |
+| **APIs**    | What exactly does it request?             | body, guards, DTO, the code it runs, every collection, callers |
+| **Timing**  | Where does the time go?                   | runtime spans only — no spans, no numbers, never an estimate   |
+| **Breaks**  | What else would a change here break?      | the graph walked backwards from every step                     |
+| **Tests**   | What would catch it if you broke it?      | which test files import the files this flow runs through       |
+| **Changed** | What do my uncommitted edits put at risk? | `git status` crossed with the graph                            |
+
+**Breaks** is the one that changes how you work. A flow read on its own is
+quietly misleading: most of the chain is shared, and editing one service because
+one screen needs a field is a five-minute change that breaks four other screens.
+Breaks splits the same steps into "shared with other features" and "only this
+one uses", and keeps infrastructure — a toast hook, a cache, an audit trail —
+out of the way so the real findings are not competing with wallpaper.
+
+**Changed** needs no instrumentation and no tests, so it works on the first run:
+
+```text
+high risk   1 changed file is used by 5 features; 5 of them have no test.
+```
+
+An action that makes several requests is shown as a sequence, and the shapes are
+told apart rather than lumped together:
+
+| In your code                                              | What the APIs tab says                        |
+| --------------------------------------------------------- | --------------------------------------------- |
+| `const a = await get(); post({ id: a.id })`               | needs the response from `GET …`               |
+| `post(…).then(() => put(…))`                              | only after `POST …` resolves                  |
+| `Promise.all([get(a), get(b)])`                           | sent at the same time as `GET …`              |
+| `useEffect(() => get(…), [user])` + a call setting `user` | re-runs when the state set by `GET …` arrives |
+| `if (isEdit) put() else post()`                           | one step, two alternatives, joined with `or`  |
+| a call inside a `catch`                                   | only when the request fails                   |
+
+Every `file:line` in every tab opens your editor (`?editor=vscode`, `cursor`,
+`idea`, `zed`, …).
 
 **That is the whole workflow.** Everything below is for when you want more.
 
@@ -300,7 +341,8 @@ took. Entirely optional; the CLI works without it.
 ## Documentation
 
 Full README, architecture notes and roadmap:
-**https://github.com/Kishan-Jaiswar/flowlens**
+This page is the documentation. Questions and bug reports:
+**jaiswarkishan78@gmail.com**.
 
 ## Licence
 
