@@ -1,7 +1,7 @@
 {
   "name": "@flowslens/cli",
-  "version": "1.1.0",
-  "description": "Flowslens command line interface",
+  "version": "1.1.1",
+  "description": "Trace any user action from the UI to the database. Maps React/Next + NestJS/Express + Prisma/Mongoose features, shows what a change would break, and serves a local dashboard.",
   "type": "module",
   "bin": {
     "flowlens": "bin/flowlens.mjs"
@@ -19,7 +19,7 @@
     "prepack": "node ../../scripts/prepack.mjs"
   },
   "dependencies": {
-    "@flowslens/core": "1.1.0"
+    "@flowslens/core": "1.1.1"
   },
   "engines": {
     "node": ">=18.18"
@@ -37,11 +37,29 @@
   },
   "keywords": [
     "cli",
+    "devtools",
     "developer-tools",
+    "code-navigation",
+    "codebase-onboarding",
+    "static-analysis",
     "code-analysis",
-    "onboarding",
+    "impact-analysis",
+    "blast-radius",
     "data-lineage",
-    "impact-analysis"
+    "dependency-graph",
+    "call-graph",
+    "legacy-code",
+    "refactoring",
+    "api-mapping",
+    "dashboard",
+    "react",
+    "nextjs",
+    "nestjs",
+    "express",
+    "mongoose",
+    "mongodb",
+    "prisma",
+    "typescript"
   ],
   "publishConfig": {
     "access": "public"

@@ -7,6 +7,32 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-15
+
+### Changed
+
+- **Package metadata written for the people looking for this.** The three npm
+  descriptions described the packages to someone who already knew what they
+  were — `@flowslens/cli` said "Flowslens command line interface", which is
+  true and unsearchable. They now say what the tool does, in the words somebody
+  with this problem would type. Keywords went from 6–10 per package to 18–24,
+  covering the frameworks read (React, Next, NestJS, Express, Prisma, Mongoose,
+  MongoDB) and the jobs people search for — impact analysis, blast radius, data
+  lineage, dependency graph, codebase onboarding, legacy code, refactoring.
+  Metadata only reaches npm on a publish, which is the reason this release
+  exists.
+- The GitHub repository description now mentions Prisma, which 1.1.0 added and
+  the old text still omitted, and leads with the question the tool answers.
+  Topics went from 10 to 20, GitHub's maximum. The homepage points at the npm
+  package rather than back at the README it is written in.
+
+### Fixed
+
+- The README badge and the test-suite counts said 480 tests across 22 files.
+  The suite is 482 across 21; the file count had been wrong for several
+  documentation passes, and the two `.gitignore` tests added last were never
+  counted.
+
 ## [1.1.0] - 2026-09-15
 
 ### Added
@@ -896,7 +922,8 @@ Recorded because each one shaped the design, and the reasoning is in
 - Chained Mongoose modifiers (`.lean()`, `.sort()`) were counted as separate
   database operations.
 
-[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.1.0...HEAD
+[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v0.1.0...v1.0.0

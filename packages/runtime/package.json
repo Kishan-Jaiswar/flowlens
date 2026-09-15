@@ -1,7 +1,7 @@
 {
   "name": "@flowslens/runtime",
-  "version": "1.1.0",
-  "description": "Zero-dependency runtime tracer for Flowslens (HTTP + Mongoose + browser)",
+  "version": "1.1.1",
+  "description": "Zero-dependency runtime tracer for Flowslens: HTTP, Mongoose and browser spans that turn a statically analysed flow into a confirmed one.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -33,12 +33,23 @@
   },
   "keywords": [
     "tracing",
+    "request-tracing",
     "observability",
-    "mongoose",
-    "express",
-    "nestjs",
+    "instrumentation",
+    "spans",
     "developer-tools",
-    "instrumentation"
+    "devtools",
+    "middleware",
+    "performance",
+    "profiling",
+    "react",
+    "nextjs",
+    "nestjs",
+    "express",
+    "mongoose",
+    "mongodb",
+    "prisma",
+    "typescript"
   ],
   "publishConfig": {
     "access": "public"

@@ -22,7 +22,7 @@ codebase:
 
 ## Project status
 
-**v1.1.0, published on npm as `@flowslens/*`.** Honest summary of what is and
+**v1.1.1, published on npm as `@flowslens/*`.** Honest summary of what is and
 is not proven:
 
 |                        | State                                                                                                                                                                                                                         |
