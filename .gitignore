@@ -15,8 +15,3 @@ packages/*/LICENSE
 .idea/
 .vscode/
 *.log
-
-# flowlens:begin (managed by Flowslens)
-/graph.json
-/examples/crud/flowlens.config.json
-# flowlens:end
