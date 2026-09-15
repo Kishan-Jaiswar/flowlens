@@ -3,7 +3,8 @@
 **Trace any user action from the UI to the database.**
 
 [![CI](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml/badge.svg)](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/@flowslens/cli)](https://www.npmjs.com/package/@flowslens/cli)
+[![npm version](https://img.shields.io/npm/v/@flowslens/cli?label=npm)](https://www.npmjs.com/package/@flowslens/cli)
+[![npm downloads](https://img.shields.io/npm/dm/@flowslens/cli?label=downloads)](https://www.npmjs.com/package/@flowslens/cli)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-482%20passing-brightgreen)](tests)
@@ -106,6 +107,23 @@ Risk factors
   • AuditService.record is called from 5 places
   • touches 5 collections in one action
   • confirmed by runtime tracing
+```
+
+---
+
+## Packages
+
+Three packages on npm. Most people only need the first.
+
+| Package                                                                  | Version                                                                                                     | Downloads                                                                                                          | What it is                                                                    |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| [`@flowslens/cli`](https://www.npmjs.com/package/@flowslens/cli)         | [![npm](https://img.shields.io/npm/v/@flowslens/cli)](https://www.npmjs.com/package/@flowslens/cli)         | [![downloads](https://img.shields.io/npm/dm/@flowslens/cli)](https://www.npmjs.com/package/@flowslens/cli)         | The commands and the dashboard. Needs no code in your project.                |
+| [`@flowslens/core`](https://www.npmjs.com/package/@flowslens/core)       | [![npm](https://img.shields.io/npm/v/@flowslens/core)](https://www.npmjs.com/package/@flowslens/core)       | [![downloads](https://img.shields.io/npm/dm/@flowslens/core)](https://www.npmjs.com/package/@flowslens/core)       | The graph itself, for an editor extension, a CI check or your own script.     |
+| [`@flowslens/runtime`](https://www.npmjs.com/package/@flowslens/runtime) | [![npm](https://img.shields.io/npm/v/@flowslens/runtime)](https://www.npmjs.com/package/@flowslens/runtime) | [![downloads](https://img.shields.io/npm/dm/@flowslens/runtime)](https://www.npmjs.com/package/@flowslens/runtime) | Zero-dependency tracer. Opt in when you want `confirmed` instead of `static`. |
+
+```bash
+npx @flowslens/cli stack .    # what is this built with?
+npx @flowslens/cli serve .    # then open the dashboard
 ```
 
 ---

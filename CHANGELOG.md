@@ -21,6 +21,12 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lineage, dependency graph, codebase onboarding, legacy code, refactoring.
   Metadata only reaches npm on a publish, which is the reason this release
   exists.
+- **A packages table in the README**, with version and monthly-download badges
+  for all three. GitHub's own "Packages" sidebar only ever lists GitHub Packages
+  registry artifacts, so npm packages cannot appear there — and the scope would
+  have to match the repository owner to publish them there at all. The README is
+  the page people actually land on, so that is where the published state
+  belongs.
 - The GitHub repository description now mentions Prisma, which 1.1.0 added and
   the old text still omitted, and leads with the question the tool answers.
   Topics went from 10 to 20, GitHub's maximum. The homepage points at the npm
