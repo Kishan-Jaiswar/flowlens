@@ -10,7 +10,7 @@ git clone https://github.com/Kishan-Jaiswar/flowlens.git
 cd flowlens
 nvm use            # Node 22+ required; .nvmrc pins the version used here
 npm install        # also builds, via the prepare script
-npm test           # 480 tests, ~10s
+npm test           # 482 tests, ~10s
 ```
 
 **Development needs Node 22.12 or newer**, even though the published CLI
@@ -123,7 +123,7 @@ nodes and the rest follows.
 
 ## Tests
 
-Vitest, in `tests/` — 480 tests across 22 files. All of them matter, and they
+Vitest, in `tests/` — 482 tests across 21 files. All of them matter, and they
 are deliberately different kinds:
 
 | Suite                           | What it holds down                                                                                                   |
@@ -141,7 +141,7 @@ are deliberately different kinds:
 | `tracer.test.ts`                | `@flowslens/runtime` driven through fake requests and fake Mongoose hooks, so no server or database is needed        |
 | `live.test.ts`                  | The tracer for real: a live `node:http` server, real sockets, a real trace file, merged into a real scan             |
 | `server.test.ts`                | Spawns the real `flowlens serve` process and exercises the dashboard and its JSON API over HTTP                      |
-| `dashboard.test.ts`             | The dashboard's browser code and its four tabs, loaded in jsdom against the real `index.html`                        |
+| `dashboard.test.ts`             | The dashboard's browser code and its six tabs, loaded in jsdom against the real `index.html`                         |
 | `insight.test.ts`               | Per-flow timing, blast radius and test coverage — the data behind the Timing, Breaks and Tests tabs                  |
 | `tabs.test.ts`                  | Infrastructure-versus-accident sharing, contract drift, and the diff-scoped Changed view                             |
 | `stack.test.ts`                 | `flowlens stack`: roles, versions, workspace version conflicts, what is and is not traced                            |

@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/@flowslens/cli)](https://www.npmjs.com/package/@flowslens/cli)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-480%20passing-brightgreen)](tests)
+[![Tests](https://img.shields.io/badge/tests-482%20passing-brightgreen)](tests)
 
 > Flowslens helps developers understand and safely modify unfamiliar applications
 > by tracing a feature from the user's UI action through frontend state and
@@ -32,7 +32,7 @@ is not proven:
 | Operating systems      | Windows, macOS and Linux: unit suite, every CLI command, and a from-scratch launcher run, all three in CI                                                                                                                     |
 | Runtime tracing        | **Proven live for HTTP and method spans**: a real server, real sockets, a real trace file, merged into a real scan and asserted `confirmed`. The Mongoose plugin is still driven by fakes — a real database is the last piece |
 | Stacks read            | React/Next, NestJS/Express, Mongoose, the MongoDB driver and Prisma. Vue, Svelte, TypeORM, GraphQL and raw SQL are not read yet, and `flowlens stack` tells you so before you spend the afternoon                             |
-| Test suite             | 480 tests across 22 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                                                     |
+| Test suite             | 482 tests across 21 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                                                     |
 
 `docs/ROADMAP.md` leads with what is missing rather than what is planned.
 
@@ -980,7 +980,7 @@ node --version       # expect the version in .nvmrc
 ```bash
 npm install          # also builds, via the prepare script
 npm run build        # compile all three packages
-npm test             # build, then run the suite — 480 tests, ~10s
+npm test             # build, then run the suite — 482 tests, ~10s
 npm run test:watch
 npm run smoke        # run every CLI command for real, on this OS
 npm run test:package # pack, install into a throwaway project, drive over HTTP
