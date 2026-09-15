@@ -20,7 +20,7 @@ const BIN = join(REPO, 'packages', 'cli', 'bin', 'flowlens.mjs');
 /**
  * Keeping generated files out of `git status`.
  *
- * FlowLens writes the graph and the trace to the OS cache, so on a normal
+ * Flowslens writes the graph and the trace to the OS cache, so on a normal
  * project there is nothing to ignore — and these tests assert that just as
  * hard as they assert the opposite, because a tool that edits a repository it
  * was only asked to read has broken a promise the README makes.
@@ -48,7 +48,7 @@ function repository(name: string): string {
   git(root, ['init', '--quiet']);
   // A commit is not needed, but an identity is, in case a test commits.
   git(root, ['config', 'user.email', 'test@example.com']);
-  git(root, ['config', 'user.name', 'FlowLens Test']);
+  git(root, ['config', 'user.name', 'Flowslens Test']);
   return root;
 }
 
@@ -121,7 +121,7 @@ describe('the managed block', () => {
     const contents = gitignoreOf(root);
     expect(contents).toContain('node_modules\ndist\n');
     expect(contents).toContain(
-      '# flowlens:begin (managed by FlowLens)\n/graph.json\n# flowlens:end',
+      '# flowlens:begin (managed by Flowslens)\n/graph.json\n# flowlens:end',
     );
     expect(contents.endsWith('\n')).toBe(true);
   });
@@ -176,13 +176,38 @@ describe('flowlens scan', () => {
     expect(existsSync(join(root, '.gitignore'))).toBe(false);
   });
 
-  it('warns, and changes nothing, when -g puts the graph in the repository', () => {
-    const root = repository('warned');
+  /**
+   * The point of the default: a developer who integrated Flowslens as a dev
+   * tool should be able to commit their own work without first discarding
+   * somebody else's generated file.
+   */
+  it('ignores the graph by default when -g puts it inside the repository', () => {
+    const root = repository('auto-ignored');
     const { status, out } = cli(['scan', root, '-g', 'graph.json'], root);
+    expect(status).toBe(0);
+    expect(out).toContain('gitignore: added /graph.json');
+    expect(out).toContain('stays out of your commits');
+    expect(existingBlock(gitignoreOf(root))).toEqual(['/graph.json']);
+    // `git status` is clean of the artifact, which is the actual goal.
+    expect(git(root, ['status', '--porcelain', '--untracked-files=all'])).not.toContain(
+      'graph.json',
+    );
+  });
+
+  it('never ignores the config file, which is the project"s own to commit', () => {
+    const root = repository('config-committable');
+    cli(['init', root, '--gitignore', '-g', 'graph.json'], root);
+    const contents = gitignoreOf(root);
+    expect(contents).not.toContain('flowlens.config.json');
+    expect(git(root, ['check-ignore', 'flowlens.config.json'])).toBe('');
+  });
+
+  it('--no-gitignore keeps the old behaviour: say it, change nothing', () => {
+    const root = repository('warned');
+    const { status, out } = cli(['scan', root, '-g', 'graph.json', '--no-gitignore'], root);
     expect(status).toBe(0);
     expect(out).toContain('is inside a git repository and is not ignored');
     expect(out).toContain('flowlens init --gitignore -g graph.json');
-    // The warning is a warning: the repository is untouched.
     expect(existsSync(join(root, '.gitignore'))).toBe(false);
   });
 
@@ -276,5 +301,39 @@ describe('flowlens init --gitignore', () => {
     const { status } = cli(['init', root, '--gitignore', '-g', 'graph.json', '--print'], root);
     expect(status).toBe(0);
     expect(existsSync(join(root, '.gitignore'))).toBe(false);
+  });
+});
+
+describe('a .gitignore written by an older Flowslens', () => {
+  /**
+   * The rename from "FlowLens" to "Flowslens" changed the marker's
+   * parenthetical, and the marker is a line written into the user's repository.
+   * Matching the whole line would have left every already-configured project
+   * with two managed blocks and no way to notice.
+   */
+  it('upgrades the 1.0 marker in place instead of appending a second block', () => {
+    const root = repository('marker-upgrade');
+    writeFileSync(
+      join(root, '.gitignore'),
+      [
+        'node_modules/',
+        '# flowlens:begin (managed by FlowLens)',
+        '/graph.json',
+        '# flowlens:end',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const { status } = cli(['init', root, '--gitignore', '-g', 'graph.json'], root);
+    expect(status).toBe(0);
+
+    const contents = gitignoreOf(root);
+    const begins = contents.match(/# flowlens:begin/g) ?? [];
+    expect(begins).toHaveLength(1);
+    expect(contents).toContain('managed by Flowslens');
+    expect(contents).not.toContain('managed by FlowLens)');
+    // The developer's own line is still there, and still first.
+    expect(contents.indexOf('node_modules/')).toBeLessThan(contents.indexOf('# flowlens:begin'));
   });
 });

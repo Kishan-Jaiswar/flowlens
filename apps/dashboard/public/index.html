@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>FlowLens</title>
+    <title>Flowslens</title>
     <link rel="stylesheet" href="/styles.css" />
     <link
       rel="icon"
@@ -15,7 +15,7 @@
       <div class="brand">
         <span class="logo">◎</span>
         <div>
-          <h1>FlowLens</h1>
+          <h1>Flowslens</h1>
           <p id="subtitle">loading…</p>
         </div>
       </div>
@@ -45,7 +45,45 @@
 
       <section class="canvas">
         <div id="flow-header" class="flow-header"></div>
-        <div id="graph" class="graph"></div>
+
+        <!--
+          The tab labels are rendered by app.js rather than written here,
+          because each one carries its own headline number ("Breaks · 3",
+          "Tests · 12"). A developer should be able to see that a change is
+          risky without opening the tab that says so.
+        -->
+        <nav id="tabs" class="tabs" role="tablist" aria-label="Feature views"></nav>
+
+        <div id="graph" class="graph panel" role="tabpanel" aria-labelledby="tab-flow"></div>
+        <div
+          id="panel-timing"
+          class="panel"
+          role="tabpanel"
+          aria-labelledby="tab-timing"
+          hidden
+        ></div>
+        <div
+          id="panel-impact"
+          class="panel"
+          role="tabpanel"
+          aria-labelledby="tab-impact"
+          hidden
+        ></div>
+        <div
+          id="panel-tests"
+          class="panel"
+          role="tabpanel"
+          aria-labelledby="tab-tests"
+          hidden
+        ></div>
+        <div id="panel-apis" class="panel" role="tabpanel" aria-labelledby="tab-apis" hidden></div>
+        <div
+          id="panel-changed"
+          class="panel"
+          role="tabpanel"
+          aria-labelledby="tab-changed"
+          hidden
+        ></div>
       </section>
 
       <aside id="details" class="details">

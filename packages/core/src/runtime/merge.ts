@@ -104,7 +104,19 @@ function resolveSpan(
       const method = (attrs.httpMethod ?? 'GET').toUpperCase();
       const path = normalizePath(attrs.path ?? span.name, apiPrefixes);
       const route = bestRouteMatch({ method, path }, routes);
-      if (route) return { nodeId: route.id, discovered: false };
+      if (route) {
+        /**
+         * Keep the status codes the endpoint really answered with.
+         *
+         * The rest of the merge records that a step ran and how long it took;
+         * for a request, *what it answered* is the other half of the fact, and
+         * a 500 that only happens sometimes is exactly what someone reading a
+         * flow wants to know. Collected as a set, because one endpoint answers
+         * differently on different days.
+         */
+        recordStatus(graph, route.id, attrs.statusCode);
+        return { nodeId: route.id, discovered: false };
+      }
       const id = ids.route(method, path);
       graph.addNode({
         id,
@@ -113,6 +125,7 @@ function resolveSpan(
         evidence: 'runtime',
         meta: { httpMethod: method, path, discoveredAtRuntime: true },
       });
+      recordStatus(graph, id, attrs.statusCode);
       return { nodeId: id, discovered: true };
     }
 
@@ -337,3 +350,17 @@ export const SPAN_KINDS: readonly SpanKind[] = [
   'method',
   'db',
 ];
+
+/** Add one observed status code to a route node, keeping the set sorted. */
+function recordStatus(graph: FlowGraph, nodeId: string, status: unknown): void {
+  if (typeof status !== 'number' || !Number.isFinite(status)) return;
+  const node = graph.node(nodeId);
+  if (!node) return;
+  const seen = Array.isArray(node.meta?.['statusCodes'])
+    ? (node.meta['statusCodes'] as unknown[]).filter(
+        (entry): entry is number => typeof entry === 'number',
+      )
+    : [];
+  if (seen.includes(status)) return;
+  node.meta = { ...node.meta, statusCodes: [...seen, status].sort((a, b) => a - b) };
+}

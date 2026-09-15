@@ -19,17 +19,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # FlowLens is pointed at whatever a developer has on disk, on whatever
+        # Flowslens is pointed at whatever a developer has on disk, on whatever
         # machine they have — so every supported OS runs the suite. Path
         # handling, case sensitivity and symlink permissions all differ, and
         # none of those differences show up on Linux alone.
         #
-        # Vitest 4 cannot start on Node 18 — rolldown imports `styleText` from
-        # node:util, which arrived in 20.12. Node 18 compatibility is therefore
-        # proven by the `compat` job below, which exercises the product itself
-        # rather than the test runner.
+        # The test runner has a higher floor than the product. Vitest 5
+        # declares `^22.12 || ^24 || >=26` and jsdom 30 `^22.22 || ^24.15 ||
+        # >=26`, so Node 18 and 20 cannot run the suite at all — and Node 20
+        # went end-of-life in April 2026, so the matrix follows rather than
+        # pinning the toolchain back.
+        #
+        # This says nothing about what Flowslens supports. `engines` is still
+        # `>=18.18`, and that claim is proven by the `compat` job below, which
+        # builds and drives the CLI itself on 18.18 instead of the runner.
         os: [ubuntu-latest]
-        node: ['20', '22', '24', '26']
+        node: ['22', '24', '26']
         include:
           - os: windows-latest
             node: '24'

@@ -104,7 +104,7 @@ export function classifyFile(file: SourceFile, rel: string): Classification {
   const hasJsx = containsJsx(file);
 
   // 3. A file with JSX is a component, even if it also talks to a database
-  //    helper — the rendering is the part FlowLens cares about.
+  //    helper — the rendering is the part Flowslens cares about.
   if (hasJsx) {
     return { side: 'frontend', isFileRoute: false, reason: 'contains JSX' };
   }

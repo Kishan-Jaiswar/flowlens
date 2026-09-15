@@ -9,6 +9,7 @@ import { runDoctor, runImpact } from './commands/impact.js';
 import { runInit } from './commands/init.js';
 import { runScan } from './commands/scan.js';
 import { runServe } from './commands/serve.js';
+import { runStack } from './commands/stack.js';
 import { runTrace } from './commands/trace.js';
 import { runWhere } from './commands/where.js';
 import { color } from './ui.js';
@@ -34,13 +35,14 @@ const VERSION: string = (() => {
 })();
 
 const HELP = `
-${color.bold('FlowLens')} — trace any user action from the UI to the database.
+${color.bold('Flowslens')} — trace any user action from the UI to the database.
 
 ${color.bold('USAGE')}
   flowlens <command> [project] [options]
 
 ${color.bold('COMMANDS')}
   init [project]          Detect the layout and write flowlens.config.json
+  stack [project]         "What is this built with?" — frameworks and versions
   scan [project]          Read the source and build the flow graph
   flows [project]         List every user action that reaches the backend
   flow <id> [project]     Show one feature end to end (add --markdown for a doc)
@@ -78,16 +80,21 @@ ${color.bold('OPTIONS')}
       --no-open           Do not open a browser
       --force             Overwrite an existing config (init)
       --print             Print the config instead of writing it (init)
-      --gitignore         Add the graph/trace files to .gitignore, but only if
-                          you moved them into the repo with -g, --trace or
-                          $FLOWLENS_TRACE. Off by default: the cache is outside
-                          your project, so there is normally nothing to ignore.
-      --no-gitignore      Never touch .gitignore, whatever the config says
+      --gitignore         Keep Flowslens output out of git. On by default, and
+                          only ever applies to files Flowslens wrote inside the
+                          repo with -g, --trace or $FLOWLENS_TRACE — the cache
+                          lives outside your project, so there is usually
+                          nothing to ignore and the file is left untouched.
+                          Never ignores flowlens.config.json: that is yours to
+                          commit.
+      --no-gitignore      Do not touch .gitignore; just say what would show up
+                          in git status
   -q, --quiet             Print only the essentials
   -h, --help              Show this help
   -v, --version           Show the version
 
 ${color.bold('EXAMPLES')}
+  flowlens stack                           # first: what am I even looking at?
   flowlens init                            # in the project you want to read
   flowlens scan                            # then this, from anywhere in it
   flowlens scan my-app                     # or name it — any OS, any spelling
@@ -107,10 +114,15 @@ ${color.bold('ENVIRONMENT')}
   FLOWLENS_TRACE=<file>   Where the runtime tracer writes, and where trace reads
   FLOWLENS_TOKEN=<t>      Fixed dashboard token, instead of one per run
 
-${color.gray('FlowLens reads source files only. It never connects to a database and')}
-${color.gray('never executes the code it analyzes. Nothing is written into the')}
-${color.gray('project you scan — the graph and any trace live in your OS cache,')}
-${color.gray('and scan and serve both print the path they used.')}
+${color.gray('Flowslens reads source files only. It never connects to a database and')}
+${color.gray('never executes the code it analyzes. The graph and any trace live in')}
+${color.gray('your OS cache, not your project, and scan and serve both print the')}
+${color.gray('path they used.')}
+${color.gray('')}
+${color.gray('The one file it may write in your project is .gitignore, and only if')}
+${color.gray('you moved an artifact into the repo yourself with -g, --trace or')}
+${color.gray('$FLOWLENS_TRACE — so its output never shows up in your commits. It')}
+${color.gray('touches only its own marked block, and --no-gitignore turns that off.')}
 `;
 
 export function main(argv = process.argv.slice(2)): number {
@@ -210,12 +222,29 @@ export function main(argv = process.argv.slice(2)): number {
   }
 
   /**
-   * `--gitignore` beats `"gitignore": true` in the config, in both directions:
-   * a project can turn the managed block on for everyone, and one developer can
-   * still say `--no-gitignore` on a single run. Undefined means "not asked",
-   * which for `scan` and `serve` is the default of warning and changing nothing.
+   * Keeping Flowslens output out of `git status` is the default.
+   *
+   * A developer who added a read-only dev tool should not have to discard its
+   * artifacts before committing their own work. Nothing is added unless
+   * Flowslens actually wrote a file inside the work tree — in the default setup
+   * those live in the OS cache, so `.gitignore` is never touched.
+   *
+   * The flag still beats the config in both directions: a project can pin the
+   * behaviour for everyone, and one developer can still opt out for a single
+   * run with `--no-gitignore`.
    */
   const gitignore = values['no-gitignore'] ? false : (values.gitignore ?? fileConfig.gitignore);
+
+  /**
+   * The default applies to the commands that actually write during normal use.
+   *
+   * `init` keeps needing an explicit `--gitignore`, because for it the flag
+   * also selects a *mode*: on an already-configured project, asking for the
+   * ignore step is what turns "this config already exists, use --force" from an
+   * error into the one job left to do. Defaulting that on would quietly delete
+   * a guard rail that stops an edited config being replaced.
+   */
+  const gitignoreForWrites = gitignore ?? true;
 
   const common = {
     root: roots[0]!,
@@ -236,6 +265,9 @@ export function main(argv = process.argv.slice(2)): number {
           quiet: values.quiet,
           ...(gitignore !== undefined ? { gitignore } : {}),
         });
+
+      case 'stack':
+        return runStack({ ...common, quiet: values.quiet });
 
       case 'scan':
         return runScan({
@@ -263,7 +295,7 @@ export function main(argv = process.argv.slice(2)): number {
           ...(values['http-client'] ? { httpClients: values['http-client'] } : {}),
           ...(values['max-files'] ? { maxFiles: Number(values['max-files']) } : {}),
           ...(values['no-constants'] ? { resolveConstants: false } : {}),
-          ...(gitignore !== undefined ? { gitignore } : {}),
+          gitignore: gitignoreForWrites,
           ...(configPath ? { configPath } : {}),
         });
 
@@ -315,7 +347,7 @@ export function main(argv = process.argv.slice(2)): number {
       case 'serve':
         return runServe({
           ...common,
-          ...(gitignore !== undefined ? { gitignore } : {}),
+          gitignore: gitignoreForWrites,
           ...(values.port ? { port: Number(values.port) } : {}),
           ...(values.host ? { host: values.host } : {}),
           ...(values.token ? { token: values.token } : {}),

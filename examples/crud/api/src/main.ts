@@ -3,14 +3,14 @@ import mongoose from 'mongoose';
 import { AppModule } from './app.module';
 
 /**
- * How you wire FlowLens runtime tracing into a NestJS app.
+ * How you wire Flowslens runtime tracing into a NestJS app.
  *
  * Two lines, both guarded by NODE_ENV, and both entirely optional: the static
  * analyzer works with no instrumentation at all. Tracing only adds the second
  * half of the picture — proof that a path actually executed, and how long each
  * step took.
  *
- * Nothing here is FlowLens connecting to your database. `flowlensMongoose` is a
+ * Nothing here is Flowslens connecting to your database. `flowlensMongoose` is a
  * Mongoose plugin that times the queries *your* app already makes and appends
  * them to a machine-local file outside your repository. If you never register it,
  * the tracer records nothing.

@@ -5,17 +5,25 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { isIP } from 'node:net';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import {
+  analyzeChanged,
+  analyzeFlowImpact,
   analyzeImpact,
   findBrokenCalls,
   findDeadEndpoints,
   findSharedWrites,
   mergeRuntimeTrace,
   parseTraceFile,
+  flowApis,
+  flowTiming,
+  indexTests,
   renderFeatureDocument,
   resolveFlows,
   scan,
+  testsForFlow,
   type FlowGraph,
+  type TestIndex,
 } from '@flowslens/core';
+import { changedFiles } from '../changedfiles.js';
 import { artifactPaths, guardArtifacts } from '../gitignore.js';
 import { browserTracerFile, dashboardDir, graphPath, saveGraph, tracePath } from '../paths.js';
 import { color } from '../ui.js';
@@ -186,6 +194,13 @@ export function runServe(args: ServeArgs): number {
   const local = isLoopbackHost(host);
 
   let graph = buildGraph(root, args);
+  /**
+   * Built once per scan, not per request.
+   *
+   * Walking the test files is cheap but not free, and the answer only changes
+   * when the source does — which is exactly when a re-scan happens.
+   */
+  let tests: TestIndex = indexTests(testRoots(root, args));
   let lastScan = new Date();
 
   /**
@@ -211,7 +226,7 @@ export function runServe(args: ServeArgs): number {
 
     // Before anything else: is this request even addressed to us?
     if (!hostAllowed(request.headers.host, host)) {
-      deny(response, 403, 'FlowLens: unexpected Host header');
+      deny(response, 403, 'Flowslens: unexpected Host header');
       return;
     }
 
@@ -244,7 +259,7 @@ export function runServe(args: ServeArgs): number {
       const tracer = browserTracerFile();
       if (!tracer) {
         response.writeHead(404, { 'content-type': 'text/plain' });
-        response.end('Browser tracer not built. Run `npm run build` in FlowLens.');
+        response.end('Browser tracer not built. Run `npm run build` in Flowslens.');
         return;
       }
       response.writeHead(200, {
@@ -264,7 +279,7 @@ export function runServe(args: ServeArgs): number {
      * protected by checking who is asking, so it checks what they know. Without
      * this, any page in your browser could forge spans — and a forged span is
      * worse than a missing one, because merged into the graph it reads as
-     * `confirmed`: the one thing FlowLens says it has actually observed.
+     * `confirmed`: the one thing Flowslens says it has actually observed.
      */
     if (path === '/__flowlens/spans' && request.method === 'POST') {
       if (!tokenMatches(presentedToken(url, request), token)) {
@@ -272,7 +287,7 @@ export function runServe(args: ServeArgs): number {
           'content-type': 'text/plain; charset=utf-8',
           'access-control-allow-origin': '*',
         });
-        response.end('FlowLens: missing or wrong token\n');
+        response.end('Flowslens: missing or wrong token\n');
         return;
       }
       collectSpans(request, response, root, args);
@@ -287,11 +302,11 @@ export function runServe(args: ServeArgs): number {
      */
     if (path.startsWith('/api/')) {
       if (!originAllowed(origin, request.headers.host)) {
-        deny(response, 403, 'FlowLens: cross-origin requests are not allowed');
+        deny(response, 403, 'Flowslens: cross-origin requests are not allowed');
         return;
       }
       if (!local && !tokenMatches(presentedToken(url, request), token)) {
-        deny(response, 401, 'FlowLens: missing or wrong token');
+        deny(response, 401, 'Flowslens: missing or wrong token');
         return;
       }
     }
@@ -331,6 +346,54 @@ export function runServe(args: ServeArgs): number {
       return;
     }
 
+    /**
+     * Everything the dashboard's tabs need for one feature, in one request.
+     *
+     * Deliberately one endpoint rather than three: the tabs are read together
+     * — a developer checks the timing, then who else depends on the slow step,
+     * then whether a test would catch breaking it — and three round trips would
+     * make switching tabs feel like loading a new page.
+     */
+    if (path === '/api/insight') {
+      const flowId = url.searchParams.get('flow');
+      const flow = resolveFlows(graph, { includeLocalOnly: true }).find((f) => f.id === flowId);
+      if (!flow) {
+        sendJson(response, { error: 'unknown flow' }, 404);
+        return;
+      }
+      sendJson(response, {
+        flowId: flow.id,
+        timing: flowTiming(flow),
+        impact: analyzeFlowImpact(graph, flow),
+        tests: testsForFlow(tests, flow),
+        // The contract check rides along inside each call, where it belongs:
+        // agreeing about a payload is a fact about an endpoint.
+        apis: flowApis(graph, flow),
+      });
+      return;
+    }
+
+    /**
+     * The diff view, which is about the project rather than one feature.
+     *
+     * Separate from `/api/insight` because it does not depend on the selected
+     * flow and because it shells out to git: a developer switching between
+     * features should not pay for a `git status` they did not ask about.
+     */
+    if (path === '/api/changed') {
+      const base = url.searchParams.get('base') ?? undefined;
+      const found = changedFiles(root, base);
+      if (found.error !== undefined) {
+        sendJson(response, { against: found.against, error: found.error, files: [] });
+        return;
+      }
+      sendJson(response, {
+        against: found.against,
+        ...analyzeChanged(graph, found.files, { tests }),
+      });
+      return;
+    }
+
     if (path === '/api/document') {
       const flowId = url.searchParams.get('flow');
       const flow = resolveFlows(graph, { includeLocalOnly: true }).find((f) => f.id === flowId);
@@ -345,6 +408,7 @@ export function runServe(args: ServeArgs): number {
 
     if (path === '/api/rescan' && request.method === 'POST') {
       graph = buildGraph(root, args);
+      tests = indexTests(testRoots(root, args));
       lastScan = new Date();
       sendJson(response, { ok: true, nodes: graph.nodeCount, edges: graph.edgeCount });
       return;
@@ -368,7 +432,7 @@ export function runServe(args: ServeArgs): number {
     // them to add it: the secure spelling should be the one to hand.
     const dashboard = local ? url : `${url}/?token=${token}`;
     process.stdout.write(
-      `\n${color.bold('FlowLens')} dashboard on ${color.cyan(dashboard)}\n` +
+      `\n${color.bold('Flowslens')} dashboard on ${color.cyan(dashboard)}\n` +
         `${color.gray('project:')} ${root}\n` +
         `${color.gray('graph:')}   ${graph.nodeCount} nodes, ${graph.edgeCount} edges\n` +
         `${color.gray('spans:')}   POST ${url}/__flowlens/spans?token=${token}\n` +
@@ -478,6 +542,11 @@ export function openBrowser(
 }
 
 /** Scan, then fold in any trace file that already exists. */
+/** Every root the scan covers, which is where the tests live too. */
+function testRoots(root: string, args: ServeArgs): string[] {
+  return [root, ...(args.extraRoots ?? [])];
+}
+
 function buildGraph(root: string, args: ServeArgs): FlowGraph {
   const file = graphPath(root, args.graph);
   const result = scan({

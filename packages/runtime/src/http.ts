@@ -21,7 +21,7 @@ export interface TracedResponse {
 }
 
 export interface HttpTracerOptions extends SinkOptions {
-  /** Paths to skip: health checks, static assets, the FlowLens dashboard. */
+  /** Paths to skip: health checks, static assets, the Flowslens dashboard. */
   ignore?: (string | RegExp)[];
   sink?: TraceSink;
 }

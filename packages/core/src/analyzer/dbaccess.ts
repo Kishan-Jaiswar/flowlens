@@ -2,7 +2,9 @@ import { SyntaxKind, type Node, type SourceFile } from 'ts-morph';
 import type { FlowGraph } from '../graph/graph.js';
 import { ids } from '../graph/ids.js';
 import { callsIn, calleeMember, calleeReceiver, lineOf } from './ast.js';
+import { linkExternalEffects } from './effects.js';
 import { collectionNameOf, dbEffectOf } from './mongo.js';
+import { prismaEffectOf, prismaTableOf, type PrismaSchema } from './prisma.js';
 import type { LoadedProject } from './project.js';
 
 /**
@@ -79,19 +81,39 @@ export function linkDbOperations(
   graph: FlowGraph,
   ownerId: string,
   aliases?: CollectionAliases,
+  prisma?: PrismaSchema,
 ): number {
   let linked = 0;
 
+  /**
+   * Effects that leave the app, recorded from the same scope and owner.
+   *
+   * Here rather than at each of the four call sites because every caller wants
+   * the same thing — "everything this owner does" — and threading it separately
+   * through the Nest, Express, file-route and plain-module passes would mean
+   * four chances to forget one.
+   */
+  linked += linkExternalEffects(scope, rel, graph, ownerId, `${rel}:${ownerId}`);
+
   for (const call of callsIn(scope)) {
     const operation = calleeMember(call);
-    const effect = dbEffectOf(operation);
-    if (!effect) continue;
-    const access = effect === 'read' ? 'read' : 'write';
-
     const receiver = calleeReceiver(call);
     if (!receiver) continue;
 
-    const collection = collectionFor(receiver, file, aliases);
+    /**
+     * Prisma first: `prisma.order.create()` and Mongoose's `Order.create()`
+     * share operation names, and only the Prisma reading knows the receiver
+     * carries the model. Checking Mongoose first would file the same call
+     * against a guessed collection name instead of the declared table.
+     */
+    const table = prismaTableOf(receiver, prisma);
+    const prismaEffect = table ? prismaEffectOf(operation) : undefined;
+
+    const effect = prismaEffect ?? (table ? undefined : dbEffectOf(operation));
+    if (!effect) continue;
+    const access = effect === 'read' ? 'read' : 'write';
+
+    const collection = table ?? collectionFor(receiver, file, aliases);
     if (!collection) continue;
 
     const opId = ids.dbOp(collection, operation, `${rel}:${ownerId}`);
@@ -100,7 +122,13 @@ export function linkDbOperations(
       kind: 'db-op',
       label: `${collection}.${operation}`,
       source: { file: rel, line: lineOf(call) },
-      meta: { collection, operation, access, effect },
+      meta: {
+        collection,
+        operation,
+        access,
+        effect,
+        ...(table ? { database: 'prisma' } : {}),
+      },
     });
     graph.addEdge({ from: ownerId, to: opId, kind: 'queries' });
 
@@ -109,7 +137,7 @@ export function linkDbOperations(
       id: collectionId,
       kind: 'collection',
       label: collection,
-      meta: { database: 'mongodb' },
+      meta: { database: table ? 'prisma' : 'mongodb' },
     });
     graph.addEdge({
       from: opId,

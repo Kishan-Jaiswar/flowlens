@@ -1,8 +1,8 @@
 # @flowslens/runtime
 
 Optional, development-only tracer for
-[FlowLens](https://github.com/Kishan-Jaiswar/flowlens). Records what a request
-_actually did_, so a path FlowLens found in your source can be confirmed rather
+[Flowslens](https://github.com/Kishan-Jaiswar/flowlens). Records what a request
+_actually did_, so a path Flowslens found in your source can be confirmed rather
 than assumed.
 
 Static analysis proves a path **can** run. A trace proves it **did** — and tells
@@ -122,7 +122,7 @@ Register the Mongoose plugin **before** your models are compiled — in
 
 ### Next.js / React — link a click to the requests it caused
 
-This is what lets FlowLens say "this button caused these three queries" instead
+This is what lets Flowslens say "this button caused these three queries" instead
 of inferring it from source.
 
 ```tsx
@@ -193,7 +193,7 @@ When they differ — an API started from `./api` in a repo you scan from the roo
 # terminal 1: your app
 FLOWLENS_TRACE=/tmp/trace.jsonl npm start
 
-# terminal 2: FlowLens
+# terminal 2: Flowslens
 flowlens trace . --trace /tmp/trace.jsonl
 ```
 

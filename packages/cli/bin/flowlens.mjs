@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * FlowLens CLI entry point.
+ * Flowslens CLI entry point.
  *
  * Deliberately thin, and deliberately defensive about the two things that
- * actually go wrong before any FlowLens code runs: an old Node, and a checkout
+ * actually go wrong before any Flowslens code runs: an old Node, and a checkout
  * that has not been built yet. Both produce a raw stack trace by default, which
  * tells a first-time user nothing.
  *
@@ -17,7 +17,7 @@ const MINIMUM_NODE = [18, 18, 0];
 const current = process.versions.node.split('.').map(Number);
 if (isOlder(current, MINIMUM_NODE)) {
   process.stderr.write(
-    `FlowLens needs Node ${MINIMUM_NODE.join('.')} or newer — this is Node ${process.versions.node}.\n` +
+    `Flowslens needs Node ${MINIMUM_NODE.join('.')} or newer — this is Node ${process.versions.node}.\n` +
       `Install a current Node from https://nodejs.org and try again.\n`,
   );
   process.exit(1);
@@ -36,7 +36,7 @@ try {
       /* not important enough to fail over */
     }
     process.stderr.write(
-      `FlowLens${version} is not built yet.\n\n` +
+      `Flowslens${version} is not built yet.\n\n` +
         `From the repository root, run:\n` +
         `  npm install\n` +
         `  npm run build\n\n` +

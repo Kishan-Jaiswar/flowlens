@@ -18,6 +18,16 @@ export const ids = {
   service: (file: string, name: string) => `service:${file}#${name}`,
   method: (ownerId: string, name: string) => `method:${ownerId}.${name}`,
   dto: (name: string) => `dto:${name}`,
+  /** Keyed on the name alone: one `JwtAuthGuard` node, referenced by many routes. */
+  middleware: (name: string) => `middleware:${name}`,
+  /**
+   * Keyed on target *and* call site.
+   *
+   * Two services that both charge a card are two steps in two different flows,
+   * and collapsing them into one node would make every payment look like it
+   * happened in the same place.
+   */
+  externalEffect: (target: string, site: string) => `external-effect:${target}@${site}`,
   model: (name: string) => `model:${name}`,
   collection: (name: string) => `collection:${name}`,
   dbOp: (collection: string, operation: string, site: string) =>

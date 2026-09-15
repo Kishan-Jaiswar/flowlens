@@ -26,7 +26,7 @@ const here = dirname(fileURLToPath(import.meta.url));
  *   - URLs built as `` `${baseUrl}${endpoint}` ``
  *   - `onClick` on wrapper divs and icons instead of labelled buttons
  *
- * Every one of these was a reason FlowLens found 12 API calls in a 500-endpoint
+ * Every one of these was a reason Flowslens found 12 API calls in a 500-endpoint
  * app, so each has a test here.
  */
 const LEGACY_ROOT = resolve(here, 'fixtures', 'legacy-app');

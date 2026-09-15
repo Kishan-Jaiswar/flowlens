@@ -30,7 +30,7 @@ export interface AddEdgeInput {
 const EVIDENCE_RANK: Record<Evidence, number> = { static: 0, runtime: 1, confirmed: 2 };
 
 /**
- * An in-memory property graph with the few traversals FlowLens actually needs.
+ * An in-memory property graph with the few traversals Flowslens actually needs.
  *
  * Deliberately not a graph database: a scanned mid-size app produces thousands
  * (not millions) of nodes, and keeping it a plain object makes the whole graph

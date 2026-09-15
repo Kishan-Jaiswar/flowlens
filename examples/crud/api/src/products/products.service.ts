@@ -9,7 +9,7 @@ export class ProductsService {
     @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
   ) {}
 
-  /** Called by OrdersService — a shared dependency FlowLens surfaces. */
+  /** Called by OrdersService — a shared dependency Flowslens surfaces. */
   async assertAvailable(productIds: string[]) {
     const count = await this.productModel.countDocuments({
       _id: { $in: productIds },

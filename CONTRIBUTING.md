@@ -1,4 +1,4 @@
-# Contributing to FlowLens
+# Contributing to Flowslens
 
 Thanks for looking. This file is short on ceremony and long on the things that
 actually matter for this codebase.
@@ -8,23 +8,25 @@ actually matter for this codebase.
 ```bash
 git clone https://github.com/Kishan-Jaiswar/flowlens.git
 cd flowlens
-nvm use            # Node 20+ required; .nvmrc pins the version used here
+nvm use            # Node 22+ required; .nvmrc pins the version used here
 npm install        # also builds, via the prepare script
-npm test           # 305 tests, ~10s
+npm test           # 480 tests, ~10s
 ```
 
-**Development needs Node 20 or newer**, even though the published CLI supports
-18.18 and CI proves it. Vitest 4 cannot start on Node 18 at all: rolldown
-imports `styleText` from `node:util`, which arrived in 20.12, so `npm test`
-fails with a `SyntaxError` before a single test runs. If that is what you are
-looking at, you are on the wrong Node, not at a broken checkout. CI covers the
-18.18 floor with the `compat` job, which builds and runs the CLI against the
-example project rather than the test runner.
+**Development needs Node 22.12 or newer**, even though the published CLI
+supports 18.18 and CI proves it. The test runner has a higher floor than the
+product: Vitest 5 declares `^22.12 || ^24 || >=26` and jsdom 30
+`^22.22 || ^24.15 || >=26`, so on anything older `npm test` fails before a
+single test runs — on Node 18 with a bare `SyntaxError` from rolldown importing
+`styleText` from `node:util`. If that is what you are looking at, you are on the
+wrong Node, not at a broken checkout. CI covers the 18.18 floor with the
+`compat` job, which builds and runs the CLI against the example project rather
+than the test runner.
 
-On Windows, `nvm use` has no equivalent — install Node 20 or newer and the rest
+On Windows, `nvm use` has no equivalent — install Node 22.12 or newer and the rest
 is the same. Every script in `package.json` is plain Node with no shell built
 in, so they behave identically on all three operating systems. If you only want
-to run FlowLens rather than work on it, `./flowlens` (or `flowlens.cmd`) does
+to run Flowslens rather than work on it, `./flowlens` (or `flowlens.cmd`) does
 the install and build for you on first use — or just
 `npx @flowslens/cli scan .`.
 
@@ -50,11 +52,11 @@ against the working tree, where the dashboard and the browser tracer simply
 exist. `npm pack` cannot reach outside a package directory, and a published CLI
 once shipped neither while all of CI stayed green.
 
-CI runs the same thing on Node 20, 22, 24 and 26 on Linux and Node 24 on Windows
+CI runs the same thing on Node 22, 24 and 26 on Linux and Node 24 on Windows
 and macOS. It also runs the smoke test on all three operating systems, and the
 launcher on all three from a checkout with nothing installed.
 
-Because FlowLens is pointed at whatever a developer has on disk, on whatever
+Because Flowslens is pointed at whatever a developer has on disk, on whatever
 machine they have, anything touching paths, the file system or terminal output
 deserves a thought about the other two platforms:
 
@@ -71,7 +73,7 @@ deserves a thought about the other two platforms:
 
 **A wrong edge is worse than a missing edge.**
 
-FlowLens tells developers what will break if they change something. If it says
+Flowslens tells developers what will break if they change something. If it says
 "nothing else uses this" and something does, it has done real damage — worse than
 if it had said "I don't know". So throughout the analyzers you will find code
 that refuses to guess:
@@ -121,7 +123,7 @@ nodes and the rest follows.
 
 ## Tests
 
-Vitest, in `tests/` — 305 tests across 13 files. All of them matter, and they
+Vitest, in `tests/` — 480 tests across 22 files. All of them matter, and they
 are deliberately different kinds:
 
 | Suite                           | What it holds down                                                                                                   |
@@ -137,7 +139,15 @@ are deliberately different kinds:
 | `portability.test.ts`           | Argument shapes, path spellings and the launcher, across platforms                                                   |
 | `runtime.test.ts`               | Merging recorded spans into a scanned graph                                                                          |
 | `tracer.test.ts`                | `@flowslens/runtime` driven through fake requests and fake Mongoose hooks, so no server or database is needed        |
+| `live.test.ts`                  | The tracer for real: a live `node:http` server, real sockets, a real trace file, merged into a real scan             |
 | `server.test.ts`                | Spawns the real `flowlens serve` process and exercises the dashboard and its JSON API over HTTP                      |
+| `dashboard.test.ts`             | The dashboard's browser code and its four tabs, loaded in jsdom against the real `index.html`                        |
+| `insight.test.ts`               | Per-flow timing, blast radius and test coverage — the data behind the Timing, Breaks and Tests tabs                  |
+| `tabs.test.ts`                  | Infrastructure-versus-accident sharing, contract drift, and the diff-scoped Changed view                             |
+| `stack.test.ts`                 | `flowlens stack`: roles, versions, workspace version conflicts, what is and is not traced                            |
+| `effects.test.ts`               | Guards and middleware, Prisma tables and operations, effects that leave the app, configurable action props           |
+| `gitignore.test.ts`             | `flowlens init --gitignore` against real git repositories in a temp directory                                        |
+| `hardening.test.ts`             | The inputs a scan must survive rather than trust                                                                     |
 
 Two checks live outside Vitest, because they have to run the real thing:
 `npm run smoke` (every CLI command, on this OS) and `npm run test:package`

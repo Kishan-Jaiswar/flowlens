@@ -97,7 +97,7 @@ export function runScan(args: ScanArgs): number {
   const { stats } = result;
   const scanned = [args.root, ...(args.extraRoots ?? [])].join(' + ');
   process.stdout.write(
-    `\n${color.bold('FlowLens')} scanned ${color.cyan(scanned)} ` +
+    `\n${color.bold('Flowslens')} scanned ${color.cyan(scanned)} ` +
       `${color.gray(`(${stats.filesAnalyzed} files in ${result.durationMs}ms)`)}\n`,
   );
   if (stats.constantsResolved > 0) {

@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
 
-// Not inside the example project: FlowLens never writes into the project it
+// Not inside the example project: Flowslens never writes into the project it
 // reads, and this script has to honour the same rule. Pass a path to choose one.
 const outFile =
   process.argv[2] ?? process.env['FLOWLENS_TRACE'] ?? join(tmpdir(), 'flowlens-demo-trace.jsonl');

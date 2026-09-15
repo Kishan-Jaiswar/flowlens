@@ -27,7 +27,7 @@ function probeSymlinks(dir: string): boolean {
 }
 
 /**
- * FlowLens gets pointed at whatever a developer has on disk. These fixtures are
+ * Flowslens gets pointed at whatever a developer has on disk. These fixtures are
  * the layouts that broke earlier versions: a flat directory, both Next.js
  * routers, a monorepo, a Nuxt server dir, deep nesting, CommonJS, unparseable
  * files, and a *frontend* folder named `api/`.

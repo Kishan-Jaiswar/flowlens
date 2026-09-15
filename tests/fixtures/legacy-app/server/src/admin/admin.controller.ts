@@ -3,7 +3,7 @@ import { AdminService } from './admin.service';
 
 /**
  * The prefix is part of the controller path, exactly as in a Nest app with a
- * global prefix. The frontend calls `/api/admin/customers` too, so FlowLens
+ * global prefix. The frontend calls `/api/admin/customers` too, so Flowslens
  * must strip `/api` from both sides or nothing matches.
  */
 @Controller('api/admin')

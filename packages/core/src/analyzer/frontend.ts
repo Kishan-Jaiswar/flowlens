@@ -27,6 +27,8 @@ import {
   type Functionish,
 } from './ast.js';
 import { classifyFile, isFrontendCandidate } from './classify.js';
+import { aftermathOf } from './aftermath.js';
+import { callSequenceFacts } from './callsequence.js';
 import { composeTitle, eventVerb, humanizeName, screenOf } from './screens.js';
 import { DYNAMIC_MARKER, HTTP_METHODS, PARAM, normalizePath, type HttpMethod } from './http.js';
 import type { LoadedProject } from './project.js';
@@ -74,7 +76,30 @@ const INPUT_ACTION_PROPS = [
   'onScroll',
 ] as const;
 
-const ALL_ACTION_PROPS: readonly string[] = [...ACTION_PROPS, ...INPUT_ACTION_PROPS];
+export const DEFAULT_ACTION_PROPS: readonly string[] = ACTION_PROPS;
+export const DEFAULT_INPUT_ACTION_PROPS: readonly string[] = INPUT_ACTION_PROPS;
+
+/**
+ * The prop names one scan treats as actions, resolved once.
+ *
+ * Built per scan rather than looked up per attribute: a mid-size app has tens
+ * of thousands of JSX attributes, and a `Set` built once is the difference
+ * between two hash lookups and two array scans on every one of them.
+ */
+interface ActionProps {
+  /** Every prop that makes an element an action. */
+  all: ReadonlySet<string>;
+  /** The subset that counts as a deliberate gesture rather than input. */
+  gestures: ReadonlySet<string>;
+}
+
+function actionPropsOf(config: FrontendConfig): ActionProps {
+  const gestures = new Set<string>([...ACTION_PROPS, ...(config.actionProps ?? [])]);
+  return {
+    gestures,
+    all: new Set<string>([...gestures, ...INPUT_ACTION_PROPS, ...(config.inputActionProps ?? [])]),
+  };
+}
 
 /** Props we read to label an action when the element has no text child. */
 const LABEL_PROPS = ['aria-label', 'title', 'label', 'name', 'placeholder', 'data-testid'];
@@ -148,6 +173,24 @@ export interface FrontendConfig {
   suffixKeys: string[];
   /** Option keys read as the request body. */
   bodyKeys: string[];
+  /**
+   * Extra props treated as deliberate user gestures, added to the built-in
+   * click/submit list.
+   *
+   * Every other convention in this config is overridable — the HTTP client
+   * names, the request-wrapper pattern, the URL keys — and this one was not,
+   * which made it the odd one out in the worst way. A design system whose
+   * button says `onAction`, or a table whose row says `onRowClick`, produced
+   * zero actions for those components with no way to say otherwise short of
+   * patching the package.
+   */
+  actionProps?: string[];
+  /**
+   * Extra props treated as input-class actions: detected, but hidden by the
+   * local-only filter unless they reach an API. Same escape hatch, for the
+   * noisier half of the list.
+   */
+  inputActionProps?: string[];
   /** Resolve identifiers (endpoint constants) to their literal value. */
   resolveConstant?: (name: string) => string | undefined;
 }
@@ -162,7 +205,7 @@ export const DEFAULT_FRONTEND_CONFIG: FrontendConfig = {
   bodyKeys: ['body', 'data', 'payload'],
 };
 
-/** A call site FlowLens found but could not resolve until every file was read. */
+/** A call site Flowslens found but could not resolve until every file was read. */
 interface PendingCall {
   /** The caller (handler, hook, component or module function). */
   from: DeclaredSymbol;
@@ -220,12 +263,13 @@ export function analyzeFrontend(
   const globals = new Map<string, DeclaredSymbol[]>();
   const pending: PendingCall[] = [];
   const aliases: PendingAlias[] = [];
+  const actionProps = actionPropsOf(config);
 
   for (const file of loaded.sourceFiles) {
     const rel = loaded.rel(file);
     if (!isFrontendCandidate(classifyFile(file, rel))) continue;
     try {
-      analyzeFrontendFile(file, rel, graph, config, globals, pending, aliases);
+      analyzeFrontendFile(file, rel, graph, config, globals, pending, aliases, actionProps);
     } catch (error) {
       // One unusual file must never end a scan of ten thousand.
       loaded.warnings.push(`frontend analysis failed for ${rel}: ${message(error)}`);
@@ -248,6 +292,7 @@ function analyzeFrontendFile(
   globals: Map<string, DeclaredSymbol[]>,
   pending: PendingCall[],
   aliases: PendingAlias[],
+  actionProps: ActionProps,
 ): void {
   /** Names declared in this file -> node id. Local wins over global. */
   const locals = new Map<string, DeclaredSymbol>();
@@ -271,7 +316,16 @@ function analyzeFrontendFile(
         kind: 'hook',
         label: name,
         source: { file: rel, line: lineOf(fn) },
-        ...(fetchesOnMount(fn) ? { meta: { fetchesOnMount: true } } : {}),
+        /**
+         * Hooks carry after-effects too, and in practice more often than
+         * handlers do: `useMutation({ onSuccess: () => invalidateQueries(…) })`
+         * inside a custom hook is where a React Query app keeps its cache
+         * invalidation, and reading only handlers missed every one of them.
+         */
+        meta: {
+          ...(fetchesOnMount(fn) ? { fetchesOnMount: true } : {}),
+          ...aftermathMeta(fn),
+        },
       });
       declare(name, { id, kind: 'hook', file: rel, ensure: noop });
       continue;
@@ -286,7 +340,7 @@ function analyzeFrontendFile(
         source: { file: rel, line: lineOf(fn) },
       });
       declare(name, { id, kind: 'component', file: rel, ensure: noop });
-      analyzeComponentBody(fn, id, name, rel, graph, declare);
+      analyzeComponentBody(fn, id, name, rel, graph, declare, actionProps);
       continue;
     }
 
@@ -415,6 +469,7 @@ function analyzeComponentBody(
   rel: string,
   graph: FlowGraph,
   declare: (name: string, symbol: DeclaredSymbol) => void,
+  actionProps: ActionProps,
 ): void {
   // useState / useReducer
   for (const declaration of fn.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
@@ -479,6 +534,11 @@ function analyzeComponentBody(
         component: componentName,
         function: name,
         eventHandler: HANDLER_NAME.test(name),
+        /**
+         * The second half of the round trip: where the screen goes next, what
+         * it invalidates, and what the user sees when it fails.
+         */
+        ...aftermathMeta(initializer),
       },
     });
     graph.addEdge({ from: componentId, to: id, kind: 'defines' });
@@ -489,8 +549,8 @@ function analyzeComponentBody(
   // JSX elements the user can interact with
   for (const attribute of fn.getDescendantsOfKind(SyntaxKind.JsxAttribute)) {
     const propName = attribute.getNameNode().getText();
-    if (!ALL_ACTION_PROPS.includes(propName)) continue;
-    const eventClass = (ACTION_PROPS as readonly string[]).includes(propName) ? 'gesture' : 'input';
+    if (!actionProps.all.has(propName)) continue;
+    const eventClass = actionProps.gestures.has(propName) ? 'gesture' : 'input';
 
     // Resolve the handler first: its name is the best label for the very common
     // case of an icon or wrapper element with no text of its own.
@@ -1146,11 +1206,18 @@ function linkApiCall(
   }
 
   if (ownerId) {
+    /**
+     * Sequencing facts travel on the edge, not the node.
+     *
+     * One `api-call` node stands for an endpoint and may have many call sites;
+     * "which one runs first" is a fact about a site. The edge is per
+     * (caller, endpoint), which is the grain the question is asked at.
+     */
     graph.addEdge({
       from: ownerId,
       to: id,
       kind: 'requests',
-      meta: { file: rel, line: lineOf(call) },
+      meta: { file: rel, line: lineOf(call), ...callSequenceFacts(call) },
     });
   }
 }
@@ -1254,7 +1321,24 @@ function addMountActions(graph: FlowGraph): void {
       .filter((id) => !triggered.has(id))
       .filter((id) => reachesApiCall(graph, id));
 
-    if (onMount.length === 0) continue;
+    /**
+     * Requests made straight from the component body inside an effect.
+     *
+     * `useEffect(() => { api.get('/me').then(setUser) }, [])` is how a large
+     * share of React code loads data, and it produces no intermediate function
+     * for the walk above to find — the `requests` edge hangs off the component
+     * itself. Without this the component had no mount action at all, so the
+     * whole screen's data loading was missing from the flow list.
+     *
+     * Restricted to calls inside an effect: a request written directly in a
+     * render body is a bug rather than a feature, and should not be described
+     * as one.
+     */
+    const effectRequests = graph
+      .edgesFrom(component.id, ['requests'])
+      .filter((edge) => edge.meta?.['inEffect'] === true);
+
+    if (onMount.length === 0 && effectRequests.length === 0) continue;
 
     const label = 'loads';
     const place = screenOf(component.source?.file ?? '', component.label);
@@ -1284,7 +1368,39 @@ function addMountActions(graph: FlowGraph): void {
     for (const handler of onMount) {
       graph.addEdge({ from: actionId, to: handler, kind: 'triggers' });
     }
+    /**
+     * The sequencing facts are copied, not dropped.
+     *
+     * They describe a call *site*, and this edge stands for the same site as
+     * the component's own — so an edge without them would leave the sequence
+     * unanswerable depending on which edge a reader happened to follow.
+     */
+    for (const edge of effectRequests) {
+      graph.addEdge({
+        from: actionId,
+        to: edge.to,
+        kind: 'requests',
+        ...(edge.meta ? { meta: { ...edge.meta } } : {}),
+      });
+    }
   }
+}
+
+/**
+ * After-effects as node meta, omitting the keys with nothing in them.
+ *
+ * A handler that navigates nowhere should carry no `navigatesTo`, so that a
+ * consumer can tell "nothing happens next" from "not looked at".
+ */
+function aftermathMeta(fn: Node): Record<string, unknown> {
+  const after = aftermathOf(fn);
+  return {
+    ...(after.navigatesTo.length > 0 ? { navigatesTo: after.navigatesTo } : {}),
+    ...(after.invalidates.length > 0 ? { invalidates: after.invalidates } : {}),
+    ...(after.errorStates.length > 0 ? { errorStates: after.errorStates } : {}),
+    ...(after.notifies.length > 0 ? { notifies: after.notifies } : {}),
+    ...(after.handlesErrors ? { handlesErrors: true } : {}),
+  };
 }
 
 /** Does this node reach an api-call by calling or requesting? */
@@ -1337,7 +1453,7 @@ function resolvePendingCalls(
 /**
  * Drop module functions that lead nowhere.
  *
- * Declaring every top-level function lets FlowLens follow
+ * Declaring every top-level function lets Flowslens follow
  * `handler -> fetchCustomers -> axios.post`, but it also drags in ordinary
  * helpers that merely call each other. Anything that cannot reach an API call
  * is not part of a feature flow, so it is removed rather than left to clutter

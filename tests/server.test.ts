@@ -33,7 +33,7 @@ const TOKEN = 'server-test-token';
 /**
  * Artifacts go to a temp directory, explicitly.
  *
- * FlowLens defaults to a machine-local cache outside the project, so a test that
+ * Flowslens defaults to a machine-local cache outside the project, so a test that
  * looked in `examples/crud/.flowlens` would find nothing. Naming the paths here
  * keeps the test hermetic — it neither reads nor pollutes the real user cache.
  */
@@ -94,7 +94,7 @@ describe('static assets', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('text/html');
     const html = await response.text();
-    expect(html).toContain('FlowLens');
+    expect(html).toContain('Flowslens');
     expect(html).toContain('/app.js');
   });
 

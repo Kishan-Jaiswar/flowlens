@@ -25,8 +25,11 @@ import {
 } from './ast.js';
 import { classifyFile, isServerCandidate } from './classify.js';
 import { linkDbOperations, type CollectionAliases } from './dbaccess.js';
+import { linkExternalEffects } from './effects.js';
 import { HTTP_METHODS, joinRoutePath, normalizePath, type HttpMethod } from './http.js';
+import { linkExpressMiddleware, linkNestMiddleware } from './middleware.js';
 import { collectionNameOf, dbEffectOf, type DbEffect } from './mongo.js';
+import { prismaEffectOf, prismaTableOf, type PrismaSchema } from './prisma.js';
 import type { LoadedProject } from './project.js';
 
 /** Nest route decorators, mapped to their HTTP verb. */
@@ -98,6 +101,8 @@ export interface BackendConfig {
   resolveConstant?: (name: string) => string | undefined;
   /** Collection handles produced by a factory; see `collectionAliasesOf`. */
   collectionAliases?: CollectionAliases;
+  /** Prisma models read from `schema.prisma`, when the project has one. */
+  prisma?: PrismaSchema;
 }
 
 export const DEFAULT_BACKEND_CONFIG: BackendConfig = {
@@ -152,7 +157,7 @@ export function analyzeBackend(
   for (const info of index.classes.values()) {
     safely(info.file, () => {
       resolveRoutes(info, graph, config);
-      resolveMethodBodies(info, graph, index);
+      resolveMethodBodies(info, graph, index, config);
     });
   }
 
@@ -508,6 +513,12 @@ function resolveRoutes(info: ClassInfo, graph: FlowGraph, config: BackendConfig)
           },
         });
         graph.addEdge({ from: routeId, to: methodId, kind: 'calls' });
+        /**
+         * Guards, interceptors and pipes, per route rather than per method:
+         * `@All()` expands into one node per verb, and a guard applies to each
+         * of them.
+         */
+        linkNestMiddleware(info.declaration, method, routeId, info.file, graph);
       }
 
       linkRouteDto(method, graph, ids.route(methods[0]!, path));
@@ -533,14 +544,45 @@ function linkRouteDto(method: MethodDeclaration, graph: FlowGraph, routeId: stri
 }
 
 /** Service-to-service calls and database operations inside every method body. */
-function resolveMethodBodies(info: ClassInfo, graph: FlowGraph, index: BackendIndex): void {
+function resolveMethodBodies(
+  info: ClassInfo,
+  graph: FlowGraph,
+  index: BackendIndex,
+  config: BackendConfig,
+): void {
   for (const [methodName, method] of info.methods) {
     const methodId = ids.method(info.nodeId, methodName);
+
+    /**
+     * Third-party work done by this method. Recorded before the call walk so a
+     * method whose only effect is an outbound call still terminates visibly
+     * rather than looking like a dead end.
+     */
+    linkExternalEffects(method, info.file, graph, methodId, `${info.name}.${methodName}`);
 
     for (const call of callsIn(method)) {
       const receiver = calleeReceiver(call);
       const member = calleeMember(call);
       if (!receiver) continue;
+
+      // 0. Prisma: this.prisma.order.create(...)
+      const table = prismaTableOf(receiver, config.prisma);
+      if (table) {
+        const prismaEffect = prismaEffectOf(member);
+        if (!prismaEffect) continue;
+        recordDbOp(graph, index, {
+          methodId,
+          modelName: table,
+          operation: member,
+          file: info.file,
+          line: lineOf(call),
+          site: `${info.name}.${methodName}`,
+          effect: prismaEffect,
+          collection: table,
+          database: 'prisma',
+        });
+        continue;
+      }
 
       // 1. Database access: this.customerModel.find(...)
       const modelName = resolveModelReceiver(receiver, info);
@@ -641,9 +683,20 @@ function recordDbOp(
     line: number;
     site: string;
     effect: DbEffect;
+    /**
+     * The physical name, when the caller already knows it.
+     *
+     * Prisma declares its table in `schema.prisma`, so there is nothing to
+     * derive — and running it through {@link collectionNameOf} would apply
+     * Mongoose's pluralisation to a name Prisma took literally, naming a table
+     * that does not exist.
+     */
+    collection?: string;
+    database?: string;
   },
 ): void {
-  const collection = index.collections.get(input.modelName) ?? collectionNameOf(input.modelName);
+  const collection =
+    input.collection ?? index.collections.get(input.modelName) ?? collectionNameOf(input.modelName);
   const opId = ids.dbOp(collection, input.operation, input.site);
   graph.addNode({
     id: opId,
@@ -656,9 +709,26 @@ function recordDbOp(
       access: input.effect === 'read' ? 'read' : 'write',
       effect: input.effect,
       model: input.modelName,
+      ...(input.database ? { database: input.database } : {}),
     },
   });
   graph.addEdge({ from: input.methodId, to: opId, kind: 'queries' });
+  /**
+   * Declare the table only when the caller named it.
+   *
+   * Mongoose collections already arrive as nodes from the schema pass, and
+   * creating them here too would change what an existing scan counts. A Prisma
+   * table has no schema *class* to declare it, so without this its edge would
+   * point at a node that does not exist.
+   */
+  if (input.collection) {
+    graph.addNode({
+      id: ids.collection(collection),
+      kind: 'collection',
+      label: collection,
+      meta: { database: input.database ?? 'prisma' },
+    });
+  }
   graph.addEdge({
     from: opId,
     to: ids.collection(collection),
@@ -697,14 +767,24 @@ function declareExpressRoutes(
     });
 
     // The last function-ish argument is the handler; earlier ones are middleware.
-    const handler = [...args]
-      .reverse()
-      .find(
-        (argument) =>
-          Node.isArrowFunction(argument) ||
-          Node.isFunctionExpression(argument) ||
-          Node.isIdentifier(argument),
-      );
+    const handlerIndex = args.findLastIndex(
+      (argument) =>
+        Node.isArrowFunction(argument) ||
+        Node.isFunctionExpression(argument) ||
+        Node.isIdentifier(argument),
+    );
+    const handler = handlerIndex === -1 ? undefined : args[handlerIndex];
+
+    /**
+     * The arguments between the path and the handler, which this pass used to
+     * discard. `router.post('/orders', requireAuth, rateLimit, create)` is the
+     * standard way to protect a route, and dropping those two names hid the
+     * reason the route 401s from every flow that runs through it.
+     */
+    if (handlerIndex > 1) {
+      linkExpressMiddleware(args, handlerIndex, routeId, rel, graph);
+    }
+
     if (!handler) continue;
 
     const name = Node.isIdentifier(handler)
@@ -731,7 +811,9 @@ function declareExpressRoutes(
       ? (file.getVariableDeclaration(handler.getText())?.getInitializer() ??
         file.getFunction(handler.getText()))
       : handler;
-    if (body) linkDbOperations(body, file, rel, graph, handlerId, config.collectionAliases);
+    if (body) {
+      linkDbOperations(body, file, rel, graph, handlerId, config.collectionAliases, config.prisma);
+    }
   }
 }
 

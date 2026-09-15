@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import type { FlowLensConfig } from './scan.js';
+import type { FlowslensConfig } from './scan.js';
 
 /**
  * Optional per-project configuration.
@@ -15,11 +15,11 @@ export const CONFIG_FILENAMES = [
   '.flowlensrc.json',
 ] as const;
 
-export interface FileConfig extends FlowLensConfig {
+export interface FileConfig extends FlowslensConfig {
   /** Extra roots, resolved relative to the config file. */
   roots?: string[];
   /**
-   * Keep FlowLens's own artifacts in `.gitignore`.
+   * Keep Flowslens's own artifacts in `.gitignore`.
    *
    * Only relevant to a project that moved the graph or the trace into the
    * repository with `-g`, `--trace` or `$FLOWLENS_TRACE`; by default they live
@@ -47,7 +47,7 @@ export function loadConfig(fromDir: string, explicitPath?: string): LoadedConfig
   if (explicitPath) {
     const path = isAbsolute(explicitPath) ? explicitPath : resolve(fromDir, explicitPath);
     if (!existsSync(path)) {
-      throw new Error(`FlowLens: config file not found: ${path}`);
+      throw new Error(`Flowslens: config file not found: ${path}`);
     }
     return loaded(parse(path), path);
   }
@@ -109,7 +109,7 @@ function parse(path: string): FileConfig {
   try {
     raw = readFileSync(path, 'utf8');
   } catch (error) {
-    throw new Error(`FlowLens: cannot read ${path}: ${message(error)}`);
+    throw new Error(`Flowslens: cannot read ${path}: ${message(error)}`, { cause: error });
   }
 
   let parsed: unknown;
@@ -117,11 +117,11 @@ function parse(path: string): FileConfig {
     // Tolerate comments and trailing commas — these files get hand-edited.
     parsed = JSON.parse(stripJsonComments(raw));
   } catch (error) {
-    throw new Error(`FlowLens: ${path} is not valid JSON: ${message(error)}`);
+    throw new Error(`Flowslens: ${path} is not valid JSON: ${message(error)}`, { cause: error });
   }
 
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`FlowLens: ${path} must contain a JSON object`);
+    throw new Error(`Flowslens: ${path} must contain a JSON object`);
   }
 
   const config = parsed as FileConfig;

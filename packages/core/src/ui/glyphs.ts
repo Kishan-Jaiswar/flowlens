@@ -2,7 +2,7 @@
  * Box-drawing characters, and an ASCII fallback for terminals that cannot show
  * them.
  *
- * FlowLens draws trees. On Linux, macOS, Windows Terminal, VS Code and every
+ * Flowslens draws trees. On Linux, macOS, Windows Terminal, VS Code and every
  * modern emulator the Unicode set is correct and much easier to read. The one
  * place it fails is the legacy Windows console (`conhost.exe` with a raster
  * font), where `▼` and `⚠` come out as hollow boxes — so on that terminal, and

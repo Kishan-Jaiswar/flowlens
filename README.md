@@ -1,4 +1,4 @@
-# FlowLens
+# Flowslens
 
 **Trace any user action from the UI to the database.**
 
@@ -6,9 +6,9 @@
 [![npm](https://img.shields.io/npm/v/@flowslens/cli)](https://www.npmjs.com/package/@flowslens/cli)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-347%20passing-brightgreen)](tests)
+[![Tests](https://img.shields.io/badge/tests-480%20passing-brightgreen)](tests)
 
-> FlowLens helps developers understand and safely modify unfamiliar applications
+> Flowslens helps developers understand and safely modify unfamiliar applications
 > by tracing a feature from the user's UI action through frontend state and
 > handlers, API calls, backend controllers and services, and database
 > operations — while showing dependencies, data lineage, and execution time.
@@ -24,14 +24,14 @@ codebase:
 
 **v1.0.1, published on npm.** Honest summary of what is and is not proven:
 
-|                        | State                                                                                                                                                                                          |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Static analysis        | Verified against a real production codebase — ~1,500 files, 204 API calls, 197 matched to backend routes                                                                                       |
-| Structure independence | Every layout in the table below has a fixture, hostile inputs included                                                                                                                         |
-| Operating systems      | Windows, macOS and Linux: unit suite, every CLI command, and a from-scratch launcher run, all three in CI                                                                                      |
-| Runtime tracing        | **Implemented, not yet proven end to end.** The tracer has 26 unit tests, but every trace so far came from fakes or a span-fabricating script. Wiring it into a live app is the next milestone |
-| Stacks read            | React/Next, NestJS/Express, Mongoose. Vue, Prisma and SQL are not read yet, and the CLI tells you so                                                                                           |
-| Test suite             | 347 tests across 15 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                      |
+|                        | State                                                                                                                                                                                                                         |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Static analysis        | Verified against a real production codebase — ~1,500 files, 204 API calls, 197 matched to backend routes                                                                                                                      |
+| Structure independence | Every layout in the table below has a fixture, hostile inputs included                                                                                                                                                        |
+| Operating systems      | Windows, macOS and Linux: unit suite, every CLI command, and a from-scratch launcher run, all three in CI                                                                                                                     |
+| Runtime tracing        | **Proven live for HTTP and method spans**: a real server, real sockets, a real trace file, merged into a real scan and asserted `confirmed`. The Mongoose plugin is still driven by fakes — a real database is the last piece |
+| Stacks read            | React/Next, NestJS/Express, Mongoose, the MongoDB driver and Prisma. Vue, Svelte, TypeORM, GraphQL and raw SQL are not read yet, and `flowlens stack` tells you so before you spend the afternoon                             |
+| Test suite             | 480 tests across 22 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                                                     |
 
 `docs/ROADMAP.md` leads with what is missing rather than what is planned.
 
@@ -49,7 +49,7 @@ Ctrl+Click → search → Ctrl+Click → search → Postman → Compass → DevT
 Eight tools and an afternoon later you know which service writes which
 collection — and you still do not know what else calls it.
 
-FlowLens turns that into:
+Flowslens turns that into:
 
 ```text
 flowlens flow customerform-create-customer
@@ -112,7 +112,7 @@ Risk factors
 ## Install
 
 Requires **Node 18.18 or newer** to run — nothing else. No database, no global
-config, no per-project plugin. (Working _on_ FlowLens needs Node 20 or newer;
+config, no per-project plugin. (Working _on_ Flowslens needs Node 22.12 or newer;
 see [Development](#development).)
 
 Works on **Windows, macOS and Linux**. CI runs the suite on all three, and
@@ -140,7 +140,7 @@ flowlens scan ~/code/my-app
 
 ### From source
 
-If you want to modify FlowLens, or run it without touching npm:
+If you want to modify Flowslens, or run it without touching npm:
 
 ```bash
 git clone https://github.com/Kishan-Jaiswar/flowlens.git
@@ -243,7 +243,7 @@ flowlens trace examples/crud --trace /tmp/demo-trace.jsonl
 
 The trees are drawn with box-drawing characters, which every modern terminal
 renders — including Windows Terminal, PowerShell 7 and VS Code. On a legacy
-Windows console with a raster font, FlowLens detects it and falls back to
+Windows console with a raster font, Flowslens detects it and falls back to
 `|`, `` ` `` and `v` automatically. To force either behaviour:
 
 ```bash
@@ -259,7 +259,7 @@ document is never degraded by the terminal that produced it.
 
 ## Any project structure
 
-FlowLens decides what a file is by **reading it**, not by where it sits. Folder
+Flowslens decides what a file is by **reading it**, not by where it sits. Folder
 names are the least reliable thing about a real repository — `api/` is a Nest
 backend in one project, an axios client in the next, and Next.js route handlers
 in a third — so classification comes from decorators, imports and JSX.
@@ -295,13 +295,13 @@ Per-file failures are collected as warnings and reported at the end; one strange
 file never ends a scan of ten thousand. A read-only project falls back to
 writing the graph under the current directory. `node_modules`, build output and
 about thirty other generated directories are skipped, with a `--max-files` valve
-for the case where FlowLens is pointed somewhere enormous by mistake.
+for the case where Flowslens is pointed somewhere enormous by mistake.
 
 ### Structure-agnostic is not framework-agnostic
 
 An important distinction, because "works on any project" would be a lie:
 
-**Any _layout_ of a supported stack works.** FlowLens does not care where your
+**Any _layout_ of a supported stack works.** Flowslens does not care where your
 files live, what your folders are called, or how deeply they nest.
 
 **It only reads some _stacks_.** Point it at these and it degrades to a file
@@ -321,7 +321,7 @@ $ flowlens scan ./vue-project
 
 Notes
   • No JavaScript or TypeScript found, but this project contains 40 .vue
-    — those are not parsed yet. FlowLens currently reads React/Next
+    — those are not parsed yet. Flowslens currently reads React/Next
     frontends and NestJS/Express backends.
 ```
 
@@ -387,7 +387,7 @@ flowlens scan ./api ./web ./mobile      # several consumers of one API
 ```
 
 **A house-built request layer.** If your team wraps HTTP in named helpers,
-FlowLens reads the verb from the function name and the path from the options
+Flowslens reads the verb from the function name and the path from the options
 object:
 
 ```js
@@ -400,7 +400,7 @@ strict enough that `getState()` and `deleteRow()` are not mistaken for HTTP
 calls. Override it with `--request-fn '<regex>'` (capture group 1 is the verb).
 
 **Endpoint constants.** Paths usually live in a constants module, not at the
-call site. FlowLens resolves them automatically:
+call site. Flowslens resolves them automatically:
 
 ```js
 // src/config/endpoints.js
@@ -434,6 +434,7 @@ scanned in 10.7s      339 URL constants resolved
 
 | Command                         | What it answers                                     |
 | ------------------------------- | --------------------------------------------------- |
+| `flowlens stack [project]`      | What is this built with? Frameworks, with versions. |
 | `flowlens init [project]`       | Where does this project keep its two halves?        |
 | `flowlens scan [project]`       | Build the graph, into a cache outside the repo.     |
 | `flowlens flows [project]`      | Which user actions reach the backend?               |
@@ -611,7 +612,7 @@ touched** table.
 ## Static plus runtime
 
 Static analysis proves a path **can** exist. Runtime tracing proves it **did**.
-FlowLens keeps both and labels every node accordingly:
+Flowslens keeps both and labels every node accordingly:
 
 | Evidence    | Meaning                                                                                    |
 | ----------- | ------------------------------------------------------------------------------------------ |
@@ -622,7 +623,7 @@ FlowLens keeps both and labels every node accordingly:
 The gaps are the most valuable output. A `static`-only endpoint may be dead
 code; a `runtime`-only query is something your source reading would have missed.
 
-Tracing is **opt-in** and lives in your app, not in FlowLens:
+Tracing is **opt-in** and lives in your app, not in Flowslens:
 
 ```ts
 // NestJS / Express — development only
@@ -676,7 +677,175 @@ node packages/cli/bin/flowlens.mjs trace examples/crud --trace /tmp/demo-trace.j
 
 ---
 
-## What FlowLens does _not_ do
+## The dashboard's six tabs
+
+`flowlens serve` opens one feature at a time and asks six questions about it,
+in the order a developer actually asks them. Each tab carries its own headline
+number, so the worrying one is visible before you open it:
+
+```text
+Flow · 24   APIs · 1   Timing · no runs   Breaks · 2   Tests · none   Changed · 5
+```
+
+**Changed** is the one to reach for mid-edit. It ignores the selected feature and
+asks the project-wide question instead — what have I touched, and what runs
+through it:
+
+```text
+high risk   1 changed file is used by 5 features; 5 of them have no test.
+
+Features affected, most-touched first
+  Medicines · Delete   MedicinesView        no test
+    DELETE /medicines/:param             app/api/medicines/[id]/route.ts:1
+  Medicines · Delete   MedicineDetailPage   no test
+    DELETE /medicines/:param             app/api/medicines/[id]/route.ts:38
+```
+
+Unlike Timing it needs no instrumentation, and unlike Tests it says something
+useful on a project with none — so it works from the first minute. Every
+`file:line` in every tab opens your editor (`?editor=vscode`, `cursor`, `idea`,
+`zed`, …).
+
+**APIs** is the seam in full — one request, everything about it, which ends the
+clicking-around it used to take to answer "what does this endpoint actually do":
+
+```text
+POST /auth/verify-otp          matched   file-route   static
+
+Request         Sent with     apiClient
+                Called from   features/auth/api.ts:37
+Body            keys, where each value comes from, and whether the route declares it
+Before handler  guards, pipes and middleware that can stop the request
+Code it runs    verifyOtp          lib/auth/user-store.ts:125
+                findOrCreateUser   lib/auth/user-store.ts:161
+Data it touches otps    findOne     read     verifyOtp          …user-store.ts:127
+                otps    updateOne   update   verifyOtp          …user-store.ts:135
+                users   insertOne   create   findOrCreateUser   …user-store.ts:175
+Leaves the app  cache (get), cache (set)     lib/db/clinics.ts:49
+Who else uses it   the other features calling the same endpoint
+```
+
+**An action that makes several requests is shown as a sequence**, because "several
+calls" covers three shapes that used to be indistinguishable — every call came
+out at the same depth, in whatever order the scan happened to read them:
+
+```text
+1 GET /carts/current  →  2 POST /orders  →  3 POST /payments
+
+1  GET /carts/current    sent first
+2  POST /orders          needs the response from GET /carts/current
+3  POST /payments        needs the response from GET /carts/current and POST /orders
+```
+
+| In the code                                                                 | What the tab says                             |
+| --------------------------------------------------------------------------- | --------------------------------------------- |
+| `const a = await get(); post({ id: a.id })`                                 | needs the response from `GET …`               |
+| `post(…).then(() => put(…))`                                                | only after `POST …` resolves                  |
+| `Promise.all([get(a), get(b)])`                                             | sent at the same time as `GET …`              |
+| `useEffect(() => get(…), [user])`, where another call does `.then(setUser)` | re-runs when the state set by `GET …` arrives |
+| `useEffect(() => get(…), [])`                                               | sent once, when the screen loads              |
+
+The React-state case is the one source order cannot see: the effect that waits is
+idiomatically written _above_ the fetch it depends on. Flowslens pairs the
+`useEffect` dependency array with the state a call's result flows into
+(`.then(setUser)`, `setUser(result)`, or a query hook's `data:` binding) and
+reorders so the producer comes first — `GET /me` is reported first even when it
+is written second. It is phrased as "re-runs when…" because that is a weaker
+promise than reading a response: the effect fires on a later render, and again
+whenever that state changes.
+
+A component that loads its data through `useEffect` also now gets a mount action
+at all. It previously had none — the mount pass looked for functions the
+component calls, and an effect produces no such function — so that shape of
+screen was missing from the feature list entirely.
+
+The dependency is read from the data, not from line order: an earlier call bound
+its result to a variable and this call's arguments mention it. A `.then` chain is
+reported separately because it is a _control_ dependency — the second call cannot
+run at all unless the first resolved, whether or not it uses the response. And
+when calls are fired without awaiting, the tab says so rather than implying an
+order the code does not guarantee.
+
+Conditional requests are not described as a sequence. Two calls in opposite arms
+of one `if` share a step number and are joined with `or`, a `catch` request is
+marked as an error path, and a condition beats every ordering phrase — "sent
+second" is false for a call that may not be sent at all.
+
+And the round trip finishes. Each request reports **what comes back** — the
+status codes the endpoint has really answered with, and the state the response
+lands in — followed by one block for the action as a whole:
+
+```text
+AFTER THE RESPONSE                                    failures handled
+
+Goes to        /medicines
+Refetches      queryKeys.medicines.all  → GET /medicines, GET /medicines/:param
+               queryKeys.dashboard      → GET /dashboard
+The user sees  toast: Saved
+               toast: Could not save
+```
+
+Cache invalidation is the continuation no amount of reading the handler reveals:
+`invalidateQueries` fires fresh requests from components you are not looking at.
+Keys are paired to endpoints by name on a path segment, and the panel says so —
+the alternative is reading key factories, which are ordinary functions and can
+be anything. A feature where nothing catches a rejection is called out, because
+an unhandled rejection is a different outcome from an error message.
+
+Plus a copyable `curl`, with `:param` placeholders left as-is rather than filled
+with an invented id. The payload-versus-DTO check lives here, per request,
+because agreeing about a body is a fact about an endpoint. It needs a declared
+shape — NestJS DTO classes today — so a Next.js route that validates with Zod
+reports "no DTO to check" rather than guessing, and a body built from a variable
+rather than an object literal is reported as unreadable rather than as absent.
+
+| Tab         | The question                                                | Where the answer comes from                                                     |
+| ----------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| **Flow**    | What happens when a user does this?                         | The static graph: click → handler → request → route → service → collection      |
+| **APIs**    | What exactly does it request, and what happens server-side? | The seam in full: body, guards, DTO, handlers, collections, other callers       |
+| **Timing**  | Where does the time go?                                     | Runtime spans only. No spans, no numbers — it tells you how to get them instead |
+| **Breaks**  | What else would a change here break?                        | The graph walked backwards from every step of this flow                         |
+| **Tests**   | What would catch it if you broke it?                        | Which test files import the files this flow runs through                        |
+| **Changed** | What do my uncommitted edits put at risk?                   | `git status` crossed with the graph — project-wide, not per feature             |
+
+**Breaks** is the one that changes how you work. A flow read on its own is
+quietly misleading: it shows a chain as though it belonged to this feature, when
+most of the chain is shared. Editing `CustomersService.findOne` because one
+screen needs an extra field is a five-minute change that breaks four other
+screens — and the flow view gives you no hint, because every step looks equally
+yours. The Breaks tab splits the same steps into two lists:
+
+```text
+medium risk   8 steps of this feature are shared with 3 other features,
+              and 1 collection is written by more than one place.
+
+Features that could break
+  Customers · Search    — shares 6 steps with this one
+  Submit Order          — shares 2 steps with this one
+  Create Customer       — shares 2 steps with this one
+
+Shared steps, most-shared first
+  AuditService.record        method     2 other features
+  api/src/common/audit.service.ts:16
+  → Submit Order · Create Customer
+
+Collections more than one place writes
+  customers  written by  CustomersService.create · CustomersService.archive
+                         CustomersService.remove · ImportsService.importCustomers
+
+▸ 8 steps only this feature uses — safe to change
+```
+
+That last line is the point: "safe to change" and "shared, be careful" are
+different lists, visible _before_ the edit rather than after the bug report.
+Clicking any feature name jumps to it, staying on the same tab.
+
+The same three answers are available without the browser —
+`analyzeFlowImpact`, `flowTiming`, `indexTests` and `testsForFlow` are exported
+from `@flowslens/core`, and `GET /api/insight?flow=<id>` returns all three in
+one response.
+
+## What Flowslens does _not_ do
 
 Worth being explicit, because a tool that reads your codebase should be boring
 about its own boundaries:
@@ -696,40 +865,48 @@ about its own boundaries:
   has to accept cross-origin writes, so it requires the per-run token that
   `serve` prints. Bind somewhere reachable with `--host` and the token guards
   the whole API, with a warning at startup saying so.
-- **It never writes to your project.** The graph and any trace live in your OS
-  cache directory (`~/.cache/flowlens` on Linux, honouring `XDG_CACHE_HOME`;
-  `~/Library/Caches/flowlens` on macOS; `%LOCALAPPDATA%\flowlens\Cache` on
-  Windows), keyed by project path, so `git status` after a scan is empty.
-  `flowlens init` is the one exception, and only because writing a config is
-  what you asked it to do — `--print` avoids even that. Pass `-g` / `--trace`
-  to choose your own paths, or set `FLOWLENS_CACHE` (absolute paths only) to
-  move the whole cache.
-- **If you do move an artifact into the repo, FlowLens says so** rather than
-  letting you discover it in `git status` the next time you push. A
-  `-g graph.json`, a `--trace`, or a `$FLOWLENS_TRACE` pointing inside a work
-  tree earns one line:
+- **It keeps out of your project, and out of your commits.** The graph and any
+  trace live in your OS cache directory (`~/.cache/flowlens` on Linux, honouring
+  `XDG_CACHE_HOME`; `~/Library/Caches/flowlens` on macOS;
+  `%LOCALAPPDATA%\flowlens\Cache` on Windows), keyed by project path, so
+  `git status` after a scan is empty. `flowlens init` writes a config because
+  that is what you asked it to do — `--print` avoids even that. Pass `-g` /
+  `--trace` to choose your own paths, or set `FLOWLENS_CACHE` (absolute paths
+  only) to move the whole cache.
+- **If you do move an artifact into the repo, Flowslens ignores it for you.**
+  This is the default, because the alternative puts the cost on the wrong
+  person: a developer who added a read-only dev tool should never have to
+  discard its output before committing their own work, on every branch, forever.
+  A `-g graph.json`, a `--trace`, or a `$FLOWLENS_TRACE` pointing inside a work
+  tree earns one line and a managed block:
 
   ```text
-  ⚠ graph.json is inside a git repository and is not ignored
-    add it: flowlens init --gitignore -g graph.json
+  gitignore: added /graph.json to .gitignore — Flowslens output stays out of your commits
   ```
 
-  That command adds exactly the paths FlowLens writes — not a block of
-  speculative patterns — to a managed section of `.gitignore`:
-
   ```gitignore
-  # flowlens:begin (managed by FlowLens)
+  # flowlens:begin (managed by Flowslens)
   /graph.json
   # flowlens:end
   ```
 
-  It is idempotent, it never rewrites a line you wrote, the patterns are
-  anchored so `/graph.json` cannot hide a `src/graph.json` of your own, and it
-  tells you when the file is already committed — in which case
-  `git rm --cached` is the real fix. A team that keeps the graph in the
-  repository on purpose can set `"gitignore": true` in `flowlens.config.json`
-  and have every scan keep the block current; `--no-gitignore` opts out for a
-  single run.
+  The scope is what makes editing the file defensible. Only paths Flowslens
+  itself writes are added — never a block of speculative patterns — and only
+  when they are inside a work tree, which in the default setup they are not, so
+  `.gitignore` is usually never opened at all. Only the marked block is
+  rewritten; every line you wrote survives byte for byte, and re-running
+  changes nothing. Patterns are anchored, so `/graph.json` cannot also hide a
+  `src/graph.json` of your own. Every addition is printed, because a tool that
+  writes silently is a tool you stop trusting the moment you notice. And if the
+  artifact is already committed it says so, because `git rm --cached` is the
+  real fix.
+
+  **`flowlens.config.json` is never ignored.** It is your project's
+  configuration, meant to be committed so the whole team gets the same graph.
+
+  `--no-gitignore`, or `"gitignore": false` in the config, restores the old
+  report-only behaviour: it tells you what would show up in `git status` and
+  changes nothing.
 
 ---
 
@@ -777,11 +954,12 @@ flowlens/
 
 ## Development
 
-**Use Node 20 or newer to work on FlowLens.** The published CLI still supports
-18.18, and CI proves it, but Vitest 4 cannot start on Node 18 at all — rolldown
-imports `styleText` from `node:util`, which arrived in 20.12, so `npm test` dies
-with a `SyntaxError` rather than a useful message. `.nvmrc` pins the version
-this project is developed on:
+**Use Node 22.12 or newer to work on Flowslens.** The published CLI still
+supports 18.18, and CI proves it, but the test runner has a higher floor than
+the product: Vitest 5 declares `^22.12 || ^24 || >=26` and jsdom 30
+`^22.22 || ^24.15 || >=26`. On Node 18 `npm test` dies with a `SyntaxError`
+rather than a useful message. `.nvmrc` pins the version this project is
+developed on:
 
 ```bash
 nvm use              # or `nvm install` the first time
@@ -791,7 +969,7 @@ node --version       # expect the version in .nvmrc
 ```bash
 npm install          # also builds, via the prepare script
 npm run build        # compile all three packages
-npm test             # build, then run the suite — 347 tests, ~10s
+npm test             # build, then run the suite — 480 tests, ~10s
 npm run test:watch
 npm run smoke        # run every CLI command for real, on this OS
 npm run test:package # pack, install into a throwaway project, drive over HTTP
@@ -809,7 +987,7 @@ The three packages are published under the `@flowslens` scope while the command
 stays `flowlens`; `scripts/package-test.mjs` reads the scope out of
 `packages/cli/package.json` rather than hardcoding it.
 
-CI runs the unit suite on Node 20/22/24/26 on Linux plus Node 24 on Windows and
+CI runs the unit suite on Node 22/24/26 on Linux plus Node 24 on Windows and
 macOS, the smoke test on all three operating systems, and — separately — the
 launcher on all three from a checkout with nothing installed, which is the
 first thing a new user does.

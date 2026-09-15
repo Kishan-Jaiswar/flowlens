@@ -7,7 +7,7 @@ files: which handler runs, which endpoint it calls, which service answers, which
 collection it writes. Eight tools and an afternoon later you still do not know
 what _else_ writes that collection.
 
-FlowLens reads your source and answers in one command.
+Flowslens reads your source and answers in one command.
 
 ```bash
 npx @flowslens/cli scan .
@@ -20,7 +20,7 @@ never writes anything into your project.
 
 ## First: will this work on my project?
 
-FlowLens reads a specific set of stacks. Check here before installing — if your
+Flowslens reads a specific set of stacks. Check here before installing — if your
 stack is on the right, you will get a file count and little else.
 
 | It reads today                                                              | Not yet                             |
@@ -32,7 +32,7 @@ stack is on the right, you will get a file count and little else.
 | TypeScript **or** plain JavaScript with JSX (`.js`, `.jsx`, `.mjs`, `.cjs`) | Queues, cron jobs, websockets       |
 
 So the sweet spot is **React/Next + NestJS or Express + Mongoose**. Any _folder
-layout_ of those works — FlowLens decides what a file is by reading it, not by
+layout_ of those works — Flowslens decides what a file is by reading it, not by
 which directory it sits in, and a frontend and backend in separate repositories
 is a first-class case.
 
@@ -169,7 +169,7 @@ and every user-visible feature that would be affected.
 `PATH`, or you skipped it. Use `npx @flowslens/cli <command>` instead, which
 always works.
 
-**"No flows found" or an almost-empty report.** FlowLens prints the reason under
+**"No flows found" or an almost-empty report.** Flowslens prints the reason under
 `Notes`. The three common ones:
 
 | Note says                             | Fix                                                          |
@@ -178,7 +178,7 @@ always works.
 | No API calls detected                 | Your requests go through a house-built wrapper — see below   |
 | Contains 40 `.vue` files, not parsed  | Unsupported stack; see the table at the top                  |
 
-**Your team wraps HTTP in its own helpers.** FlowLens already reads the common
+**Your team wraps HTTP in its own helpers.** Flowslens already reads the common
 shape — verb in the function name, path in an options object:
 
 ```js
@@ -207,6 +207,7 @@ prefix. `/api` is stripped from both sides by default; change it with
 
 | Command                         | What it answers                                     |
 | ------------------------------- | --------------------------------------------------- |
+| `flowlens stack [project]`      | What is this built with? Frameworks, with versions. |
 | `flowlens scan [project]`       | Build the graph, and list what it found.            |
 | `flowlens flows [project]`      | Which user actions reach the backend?               |
 | `flowlens flow <id>`            | Everything one click does, end to end.              |
@@ -225,7 +226,7 @@ subdirectory of it. Add `--json` to any command for machine-readable output.
 
 ## Two repositories, one graph
 
-A frontend and backend in sibling folders is the case FlowLens is built for —
+A frontend and backend in sibling folders is the case Flowslens is built for —
 the seam between them is the whole point:
 
 ```bash

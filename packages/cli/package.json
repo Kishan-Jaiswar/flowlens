@@ -1,7 +1,7 @@
 {
   "name": "@flowslens/cli",
   "version": "1.0.1",
-  "description": "FlowLens command line interface",
+  "description": "Flowslens command line interface",
   "type": "module",
   "bin": {
     "flowlens": "bin/flowlens.mjs"

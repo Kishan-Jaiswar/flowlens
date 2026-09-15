@@ -1,7 +1,7 @@
 {
   "name": "@flowslens/core",
   "version": "1.0.1",
-  "description": "FlowLens graph engine, static analyzers, flow resolver and impact analysis",
+  "description": "Flowslens graph engine, static analyzers, flow resolver and impact analysis",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -10,13 +10,14 @@ import { collectConstants, type ConstantTable } from './analyzer/constants.js';
 import { analyzeFileRoutes } from './analyzer/fileroutes.js';
 import { analyzeServerModules } from './analyzer/servermodules.js';
 import { collectionAliasesOf } from './analyzer/dbaccess.js';
+import { isEmptyPrismaSchema, loadPrismaSchema } from './analyzer/prisma.js';
 import { detectProjects, loadProject, type ScanOptions } from './analyzer/project.js';
 import { linkDataLineage, linkFrontendToBackend, type SeamResult } from './analyzer/seam.js';
 
 /** Cap on `requestFunctionPattern`: see the check in {@link scan}. */
 const MAX_PATTERN_LENGTH = 500;
 
-export interface FlowLensConfig
+export interface FlowslensConfig
   extends
     Partial<Omit<FrontendConfig, 'resolveConstant'>>,
     Partial<Omit<BackendConfig, 'resolveConstant'>> {
@@ -32,6 +33,17 @@ export interface FlowLensConfig
    */
   resolveConstants?: boolean;
 }
+
+/**
+ * The name this type had before the project settled on "Flowslens".
+ *
+ * Kept as an alias rather than removed: it is exported from the package, so
+ * dropping it would break anyone who imported it at 1.0 — for a rename that
+ * costs them nothing to ignore.
+ *
+ * @deprecated Use {@link FlowslensConfig}.
+ */
+export type FlowLensConfig = FlowslensConfig;
 
 export interface ScanResult {
   graph: FlowGraph;
@@ -61,6 +73,12 @@ export interface ScanStats {
   constantsResolved: number;
   /** Routes that came from file-system routing rather than decorators. */
   fileRoutes: number;
+  /** Guards, interceptors, pipes and Express middleware attached to routes. */
+  middleware: number;
+  /** Terminal steps that leave the app: queues, cache, mail, third-party HTTP. */
+  externalEffects: number;
+  /** Prisma schema files read, if any. */
+  prismaSchemas: number;
 }
 
 /**
@@ -70,7 +88,7 @@ export interface ScanStats {
  * the seam pass joins them, and only then can lineage follow a field all the
  * way from a form input to a collection.
  */
-export function scan(options: ScanOptions & FlowLensConfig): ScanResult {
+export function scan(options: ScanOptions & FlowslensConfig): ScanResult {
   const startedAt = Date.now();
   const loaded = loadProject({
     root: options.root,
@@ -110,7 +128,7 @@ export function scan(options: ScanOptions & FlowLensConfig): ScanResult {
    */
   if (requestFunctionPattern.length > MAX_PATTERN_LENGTH) {
     throw new Error(
-      `FlowLens: requestFunctionPattern is ${requestFunctionPattern.length} characters; ` +
+      `Flowslens: requestFunctionPattern is ${requestFunctionPattern.length} characters; ` +
         `the limit is ${MAX_PATTERN_LENGTH}. It matches function names, which are short.`,
     );
   }
@@ -118,8 +136,9 @@ export function scan(options: ScanOptions & FlowLensConfig): ScanResult {
     new RegExp(requestFunctionPattern);
   } catch (error) {
     throw new Error(
-      `FlowLens: requestFunctionPattern is not a valid regular expression: ` +
+      `Flowslens: requestFunctionPattern is not a valid regular expression: ` +
         `${requestFunctionPattern}\n  ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
 
@@ -130,6 +149,8 @@ export function scan(options: ScanOptions & FlowLensConfig): ScanResult {
     urlKeys: options.urlKeys ?? DEFAULT_FRONTEND_CONFIG.urlKeys,
     suffixKeys: options.suffixKeys ?? DEFAULT_FRONTEND_CONFIG.suffixKeys,
     bodyKeys: options.bodyKeys ?? DEFAULT_FRONTEND_CONFIG.bodyKeys,
+    ...(options.actionProps ? { actionProps: options.actionProps } : {}),
+    ...(options.inputActionProps ? { inputActionProps: options.inputActionProps } : {}),
     ...(resolveConstant ? { resolveConstant } : {}),
   };
 
@@ -155,17 +176,25 @@ export function scan(options: ScanOptions & FlowLensConfig): ScanResult {
    */
   const collectionAliases = collectionAliasesOf(loaded);
 
+  /**
+   * Prisma's schema is not JavaScript, so it never reaches `loaded.sourceFiles`
+   * — it has to be read from disk separately, and before the backend pass,
+   * because it is what tells a `prisma.order.create()` call which table it
+   * touches.
+   */
+  const prisma = loadPrismaSchema(loaded.roots);
+
   analyzeFrontend(loaded, graph, frontendConfig);
-  analyzeBackend(loaded, graph, { ...backendConfig, collectionAliases });
+  analyzeBackend(loaded, graph, { ...backendConfig, collectionAliases, prisma });
   // File-system routes (Next.js `pages/api`, App Router, Nuxt) are a backend
   // with no controllers to find, so they need their own pass.
-  const fileRoutes = analyzeFileRoutes(loaded, graph, { apiPrefixes, collectionAliases });
+  const fileRoutes = analyzeFileRoutes(loaded, graph, { apiPrefixes, collectionAliases, prisma });
   /**
    * Plain modules holding the queries (`lib/db/store.ts`), which neither the
    * Nest pass nor the route pass reaches. Must run after `analyzeFileRoutes`,
    * because it joins the route handlers those declared to the module functions.
    */
-  analyzeServerModules(loaded, graph, collectionAliases);
+  analyzeServerModules(loaded, graph, collectionAliases, prisma);
   const seam = linkFrontendToBackend(graph);
   const lineageLinks = linkDataLineage(graph);
 
@@ -182,6 +211,9 @@ export function scan(options: ScanOptions & FlowLensConfig): ScanResult {
     dbOperations: graph.nodesOfKind('db-op').length,
     constantsResolved: constants.values.size,
     fileRoutes,
+    middleware: graph.nodesOfKind('middleware').length,
+    externalEffects: graph.nodesOfKind('external-effect').length,
+    prismaSchemas: prisma.files.length,
   };
 
   return {
@@ -192,7 +224,7 @@ export function scan(options: ScanOptions & FlowLensConfig): ScanResult {
     durationMs: Date.now() - startedAt,
     constants,
     warnings: loaded.warnings,
-    diagnostics: diagnose(stats, seam, loaded.unparsedFileTypes),
+    diagnostics: diagnose(stats, seam, loaded.unparsedFileTypes, isEmptyPrismaSchema(prisma)),
   };
 }
 
@@ -201,13 +233,14 @@ export function scan(options: ScanOptions & FlowLensConfig): ScanResult {
  *
  * An empty graph is the one outcome a user cannot debug on their own — the tool
  * looks broken when it is usually pointed at the wrong directory, or at a stack
- * with a convention FlowLens has not been told about. Each message names the
+ * with a convention Flowslens has not been told about. Each message names the
  * next thing to try.
  */
 function diagnose(
   stats: ScanStats,
   seam: SeamResult,
   unparsed: Record<string, number> = {},
+  noPrismaSchema = true,
 ): string[] {
   const notes: string[] = [];
 
@@ -219,10 +252,10 @@ function diagnose(
   if (stats.filesAnalyzed === 0) {
     if (unparsedSummary) {
       // "No source files" is misleading when the project is simply written in
-      // something FlowLens does not read yet.
+      // something Flowslens does not read yet.
       notes.push(
         `No JavaScript or TypeScript found, but this project contains ${unparsedSummary} ` +
-          `— those are not parsed yet. FlowLens currently reads React/Next frontends and ` +
+          `— those are not parsed yet. Flowslens currently reads React/Next frontends and ` +
           `NestJS/Express backends.`,
       );
     } else {
@@ -239,7 +272,7 @@ function diagnose(
 
   if (stats.components === 0 && stats.routes === 0) {
     notes.push(
-      'No components and no routes. If this is a stack FlowLens does not read yet ' +
+      'No components and no routes. If this is a stack Flowslens does not read yet ' +
         '(Vue, Svelte, Django, Rails, Go), only the file walk will have worked.',
     );
   }
@@ -273,8 +306,27 @@ function diagnose(
 
   if (stats.collections === 0 && stats.routes > 0) {
     notes.push(
-      'No collections found. FlowLens reads Mongoose schemas; other data layers are not modelled yet.',
+      'No collections found. Flowslens reads Mongoose schemas, the MongoDB driver and Prisma; ' +
+        'TypeORM, Sequelize and raw SQL are not modelled yet.',
     );
+  }
+
+  /**
+   * A schema was found but nothing used it.
+   *
+   * Almost always one cause: the client is reached through a name this analyzer
+   * does not recognise as Prisma, so every query was skipped. Saying so beats
+   * an empty data layer that looks like the project has no database.
+   */
+  if (!noPrismaSchema && stats.prismaSchemas > 0) {
+    const prismaOps = stats.dbOperations;
+    if (prismaOps === 0) {
+      notes.push(
+        `Read ${stats.prismaSchemas} Prisma schema file(s) but matched no queries. Flowslens ` +
+          'recognises the client as `prisma`, `db`, `database`, `client` or `prismaClient` ' +
+          '(optionally behind `this.`); a differently named client is not read yet.',
+      );
+    }
   }
 
   return notes;

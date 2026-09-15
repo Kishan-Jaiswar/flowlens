@@ -1,7 +1,7 @@
 /**
- * FlowLens core.
+ * Flowslens core.
  *
- * FlowLens answers one question about an unfamiliar codebase:
+ * Flowslens answers one question about an unfamiliar codebase:
  * "I clicked this button — show me everything that happened."
  *
  * Nothing in this package connects to a database or a running service. It
@@ -24,7 +24,53 @@ export {
   type TimingStats,
 } from './graph/types.js';
 
-export { scan, type FlowLensConfig, type ScanResult, type ScanStats } from './scan.js';
+export {
+  scan,
+  type FlowslensConfig,
+  // Re-exported on purpose, for callers who imported it at 1.0.
+  type FlowLensConfig,
+  type ScanResult,
+  type ScanStats,
+} from './scan.js';
+export {
+  analyzeFlowImpact,
+  flowTiming,
+  type FlowImpact,
+  type FlowTiming,
+  type SharedBy,
+  type SharedStep,
+  type StepTiming,
+} from './flow/insight.js';
+export {
+  analyzeChanged,
+  type AffectedFeature,
+  type ChangeStatus,
+  type ChangedInput,
+  type ChangedReport,
+} from './impact/changed.js';
+export {
+  flowApis,
+  type ApiCallDetail,
+  type ApiDataAccess,
+  type ApiField,
+  type ApiRoute,
+  type FlowApis,
+} from './flow/api.js';
+export {
+  checkFlowContract,
+  type ContractCheck,
+  type ContractField,
+  type FlowContract,
+} from './flow/contract.js';
+export {
+  indexTests,
+  testFileName,
+  testsForFlow,
+  type FlowTests,
+  type TestCase,
+  type TestFile,
+  type TestIndex,
+} from './analyzer/testcoverage.js';
 export {
   CONFIG_FILENAMES,
   loadConfig,
@@ -52,7 +98,35 @@ export {
   type ScanOptions,
 } from './analyzer/project.js';
 export {
+  STACK_ROLE_LABEL,
+  STACK_ROLE_ORDER,
+  detectStack,
+  stackSummary,
+  type StackEntry,
+  type StackManifest,
+  type StackReport,
+  type StackRole,
+} from './analyzer/stack.js';
+export {
+  MIDDLEWARE_LABEL,
+  linkExpressMiddleware,
+  linkNestMiddleware,
+  type MiddlewareRole,
+} from './analyzer/middleware.js';
+export { EFFECT_LABEL, linkExternalEffects, type EffectKind } from './analyzer/effects.js';
+export {
+  PRISMA_OPERATIONS,
+  clientProperty,
+  isEmptyPrismaSchema,
+  loadPrismaSchema,
+  prismaEffectOf,
+  prismaTableOf,
+  type PrismaSchema,
+} from './analyzer/prisma.js';
+export {
+  DEFAULT_ACTION_PROPS,
   DEFAULT_FRONTEND_CONFIG,
+  DEFAULT_INPUT_ACTION_PROPS,
   analyzeFrontend,
   humanizeHandler,
   isConcreteEndpoint,

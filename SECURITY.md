@@ -8,7 +8,7 @@ rather than opening a public issue.
 
 I will acknowledge within a few days and keep you updated until it is resolved.
 
-## What FlowLens does with your code
+## What Flowslens does with your code
 
 Worth stating plainly, because this is a tool you point at a private codebase:
 
@@ -38,7 +38,7 @@ Worth stating plainly, because this is a tool you point at a private codebase:
 - **`graph.json` describes your architecture** — file paths, route names,
   collection names. It sits in the cache rather than your repository, so it will
   not be committed by accident, but do not publish it casually. `flowlens serve`
-  prints the exact path. If you move it into the repository with `-g`, FlowLens
+  prints the exact path. If you move it into the repository with `-g`, Flowslens
   says so and `flowlens init --gitignore` will ignore it for you.
 - **A `flowlens.config.json` is discovered, not requested.** The CLI walks up
   from the path you name, so on a repository you have just cloned, that

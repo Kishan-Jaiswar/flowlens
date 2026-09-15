@@ -30,7 +30,7 @@ const COMMANDS_WITH_ARGUMENT = new Set(['flow', 'impact']);
 /** Commands whose first positional is their own argument even though it is a path. */
 const COMMANDS_WITH_LOCATION = new Set(['where']);
 
-/** Extensions FlowLens will accept as a single-file root. */
+/** Extensions Flowslens will accept as a single-file root. */
 const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mts', '.cts', '.mjs', '.cjs'];
 
 export interface SplitPositionals {

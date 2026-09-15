@@ -26,7 +26,7 @@ if (process.env['FLOWLENS_SKIP_PREPARE']) {
 const typescript = join(root, 'node_modules', 'typescript', 'package.json');
 if (!existsSync(typescript)) {
   process.stderr.write(
-    'FlowLens: skipping the build — TypeScript is not installed ' +
+    'Flowslens: skipping the build — TypeScript is not installed ' +
       '(a production-only install?).\nRun `npm install && npm run build` to build it.\n',
   );
   process.exit(0);
@@ -45,7 +45,7 @@ const result = spawnSync(
 );
 
 if (result.error) {
-  process.stderr.write(`FlowLens: could not build — ${result.error.message}\n`);
+  process.stderr.write(`Flowslens: could not build — ${result.error.message}\n`);
   process.exit(0);
 }
 

@@ -4,6 +4,7 @@ import { ids } from '../graph/ids.js';
 import { callsIn, calleeMember, lineOf, readString } from './ast.js';
 import { HTTP_METHODS, type HttpMethod } from './http.js';
 import { linkDbOperations, type CollectionAliases } from './dbaccess.js';
+import type { PrismaSchema } from './prisma.js';
 import type { LoadedProject } from './project.js';
 import { isFileSystemRoute } from './classify.js';
 
@@ -27,6 +28,8 @@ export interface FileRouteConfig {
   apiPrefixes: string[];
   /** Collection handles produced by a factory; see `collectionAliasesOf`. */
   collectionAliases?: CollectionAliases;
+  /** Prisma models read from `schema.prisma`, when the project has one. */
+  prisma?: PrismaSchema;
 }
 
 export function analyzeFileRoutes(
@@ -76,7 +79,15 @@ export function analyzeFileRoutes(
     if (perVerb.size > 0) {
       for (const [method, scope] of perVerb) {
         const handlerId = declareVerbHandler(rel, graph, path, method, lineOf(scope));
-        linkDbOperations(scope, file, rel, graph, handlerId, config.collectionAliases);
+        linkDbOperations(
+          scope,
+          file,
+          rel,
+          graph,
+          handlerId,
+          config.collectionAliases,
+          config.prisma,
+        );
       }
     } else {
       /**
@@ -84,7 +95,7 @@ export function analyzeFileRoutes(
        * there is nothing finer to scope to: the whole file is the handler.
        */
       const handlerId = declareHandler(file, rel, graph, path);
-      linkDbOperations(file, file, rel, graph, handlerId, config.collectionAliases);
+      linkDbOperations(file, file, rel, graph, handlerId, config.collectionAliases, config.prisma);
     }
   }
 

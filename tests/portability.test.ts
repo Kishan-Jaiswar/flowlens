@@ -31,7 +31,7 @@ const BIN = join(REPO, 'packages', 'cli', 'bin', 'flowlens.mjs');
 const EXAMPLES = join(REPO, 'examples');
 
 /**
- * FlowLens has to work on whatever machine the developer is sitting at. These
+ * Flowslens has to work on whatever machine the developer is sitting at. These
  * tests cover the differences that actually bite: how a path is spelled, what a
  * terminal can draw, and whether the first command someone types succeeds.
  */

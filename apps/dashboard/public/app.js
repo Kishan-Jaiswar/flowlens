@@ -1,5 +1,5 @@
 /**
- * FlowLens dashboard.
+ * Flowslens dashboard.
  *
  * Plain ES modules against the CLI's JSON API — no bundler, no framework, no
  * network dependency. It renders one feature at a time as five stacked layers
@@ -13,6 +13,7 @@ const LAYERS = [
   ['network', 'Network'],
   ['backend', 'Backend'],
   ['data', 'Database'],
+  ['external', 'Leaves the app'],
 ];
 
 /**
@@ -51,7 +52,41 @@ const state = {
   selectedNode: null,
   filter: '',
   includeLocal: false,
+  /** Which tab is showing: flow | timing | impact | tests. */
+  tab: 'flow',
+  /** Timing, blast radius, tests and contract for the selected flow. */
+  insight: null,
+  /** The diff-scoped report, which is project-wide rather than per feature. */
+  changed: null,
+  changedLoading: false,
+  /** True while /api/insight is in flight, so tabs can say "loading" once. */
+  insightLoading: false,
 };
+
+/**
+ * The four questions the tabs answer, in the order a developer asks them.
+ *
+ * "What does this do" comes first because nothing else makes sense without it.
+ * "What would I break" comes before "is it tested" because the first decides
+ * whether to make the change at all, and the second only decides how nervous
+ * to be while making it.
+ */
+const TABS = [
+  ['flow', 'Flow', 'What happens when a user does this'],
+  ['apis', 'APIs', 'Every request this action makes, in full'],
+  ['timing', 'Timing', 'Where the time goes, from real runs'],
+  ['impact', 'Breaks', 'What else a change here would break'],
+  ['tests', 'Tests', 'What would catch it if you broke it'],
+  /**
+   * The odd one out, and last on purpose: this one is about the whole project
+   * rather than the selected feature. It answers "what did I already change",
+   * which is the question you have mid-edit rather than mid-exploration.
+   */
+  ['changed', 'Changed', 'What your uncommitted changes put at risk'],
+];
+
+/** Tabs that ignore the selected feature. */
+const PROJECT_TABS = new Set(['changed']);
 
 const el = {
   subtitle: document.getElementById('subtitle'),
@@ -64,6 +99,15 @@ const el = {
   showAll: document.getElementById('show-all'),
   rescan: document.getElementById('rescan'),
   docLink: document.getElementById('doc-link'),
+  tabs: document.getElementById('tabs'),
+  panels: {
+    flow: document.getElementById('graph'),
+    timing: document.getElementById('panel-timing'),
+    impact: document.getElementById('panel-impact'),
+    tests: document.getElementById('panel-tests'),
+    apis: document.getElementById('panel-apis'),
+    changed: document.getElementById('panel-changed'),
+  },
 };
 
 /**
@@ -107,6 +151,7 @@ async function load() {
 
     renderFlowList();
     renderFindings(doctor);
+    void loadChanged();
 
     const first = filteredFlows()[0];
     if (first) selectFlow(first.id);
@@ -189,10 +234,160 @@ function selectFlow(id) {
   state.selectedFlow = flow;
   state.selectedNode = null;
   el.docLink.href = apiUrl(`/api/document?flow=${encodeURIComponent(flow.id)}`);
+  state.insight = null;
   renderFlowList();
   renderFlowHeader(flow);
   renderGraph(flow);
   renderDetails(null);
+  renderTabs();
+  showTab(state.tab);
+  void loadInsight(flow.id);
+}
+
+/**
+ * Fetch the timing, blast radius and tests for one feature.
+ *
+ * One request for all three: the tabs are read together, and three round trips
+ * would make switching tabs feel like loading a new page.
+ */
+async function loadInsight(flowId) {
+  state.insightLoading = true;
+  renderTabs();
+  try {
+    const insight = await getJson(`/api/insight?flow=${encodeURIComponent(flowId)}`);
+    // The user may have clicked another feature while this was in flight.
+    if (state.selectedFlow?.id !== flowId) return;
+    state.insight = insight;
+  } catch (error) {
+    if (state.selectedFlow?.id !== flowId) return;
+    state.insight = { error: String(error.message ?? error) };
+  } finally {
+    state.insightLoading = false;
+    renderTabs();
+    showTab(state.tab);
+  }
+}
+
+/** The tab bar, with each label carrying its own headline number. */
+function renderTabs() {
+  if (!el.tabs) return;
+  el.tabs.innerHTML = TABS.map(([id, label, hint]) => {
+    const active = state.tab === id;
+    const badge = tabBadge(id);
+    return (
+      `<button id="tab-${id}" class="tab${active ? ' active' : ''}" role="tab" ` +
+      `aria-selected="${active}" data-tab="${id}" title="${escapeHtml(hint)}">` +
+      `<span class="tab-label">${escapeHtml(label)}</span>` +
+      (badge ? `<span class="tab-badge ${badge.tone}">${escapeHtml(badge.text)}</span>` : '') +
+      `</button>`
+    );
+  }).join('');
+
+  for (const button of el.tabs.querySelectorAll('[data-tab]')) {
+    button.addEventListener('click', () => showTab(button.dataset.tab));
+  }
+}
+
+/**
+ * The number on a tab.
+ *
+ * Deliberately the *worrying* number rather than a total: "Breaks · 3" means
+ * three other features, which is the fact that should make someone open the
+ * tab. A tab that always reads "12" teaches people to ignore it.
+ */
+function tabBadge(id) {
+  // Project-wide, so it has a badge before any feature is selected.
+  if (id === 'changed') {
+    if (state.changedLoading && !state.changed) return { text: '…', tone: 'neutral' };
+    const changed = state.changed;
+    if (!changed || changed.error) return undefined;
+    if (changed.features.length === 0) {
+      return { text: changed.files.length === 0 ? 'clean' : 'no features', tone: 'muted' };
+    }
+    return {
+      text: String(changed.features.length),
+      tone: changed.level === 'high' ? 'danger' : changed.level === 'medium' ? 'warn' : 'neutral',
+    };
+  }
+
+  const flow = state.selectedFlow;
+  if (!flow) return undefined;
+  if (id === 'flow') return { text: String(flow.steps.length), tone: 'neutral' };
+
+  if (state.insightLoading && !state.insight) return { text: '…', tone: 'neutral' };
+  const insight = state.insight;
+  if (!insight || insight.error) return undefined;
+
+  if (id === 'timing') {
+    return insight.timing?.observed
+      ? { text: `${insight.timing.totalMs}ms`, tone: 'neutral' }
+      : { text: 'no runs', tone: 'muted' };
+  }
+  if (id === 'impact') {
+    const count = insight.impact?.featuresAtRisk?.length ?? 0;
+    if (count === 0) return { text: 'contained', tone: 'ok' };
+    return { text: String(count), tone: insight.impact.level === 'high' ? 'danger' : 'warn' };
+  }
+  if (id === 'apis') {
+    const calls = insight.apis?.calls ?? [];
+    if (calls.length === 0) return { text: 'none', tone: 'muted' };
+    // The badge reports the problem when there is one, the count otherwise.
+    const unmatched = calls.filter((call) => !call.matched).length;
+    if (unmatched > 0) return { text: `${unmatched} unmatched`, tone: 'danger' };
+    const drift = calls.reduce((sum, call) => sum + (call.contract?.unexpected.length ?? 0), 0);
+    if (drift > 0) return { text: `${drift} unread key${drift > 1 ? 's' : ''}`, tone: 'warn' };
+    return { text: String(calls.length), tone: 'neutral' };
+  }
+  if (id === 'tests') {
+    const tests = insight.tests;
+    if (!tests) return undefined;
+    if (tests.totalCases === 0) return { text: 'none', tone: 'danger' };
+    return {
+      text: `${tests.coveragePct}%`,
+      tone: tests.coveragePct >= 80 ? 'ok' : tests.coveragePct >= 40 ? 'warn' : 'danger',
+    };
+  }
+  return undefined;
+}
+
+function showTab(id) {
+  state.tab = TABS.some(([candidate]) => candidate === id) ? id : 'flow';
+  for (const [tabId] of TABS) {
+    const panel = el.panels[tabId];
+    if (panel) panel.hidden = tabId !== state.tab;
+  }
+  for (const button of el.tabs?.querySelectorAll('[data-tab]') ?? []) {
+    const active = button.dataset.tab === state.tab;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  }
+
+  if (state.tab === 'timing') renderTiming();
+  if (state.tab === 'impact') renderImpact();
+  if (state.tab === 'tests') renderTests();
+  if (state.tab === 'apis') renderApis();
+  if (state.tab === 'changed') renderChanged();
+}
+
+/**
+ * Fetch the diff report.
+ *
+ * Its own request, not part of `/api/insight`: it shells out to git, and
+ * clicking through features should not pay for a `git status` nobody asked
+ * about.
+ */
+async function loadChanged() {
+  state.changedLoading = true;
+  renderTabs();
+  try {
+    state.changed = await getJson('/api/changed');
+  } catch (error) {
+    state.changed = { error: String(error.message ?? error) };
+  } finally {
+    state.changedLoading = false;
+    renderTabs();
+    if (state.tab === 'changed') renderChanged();
+  }
 }
 
 function renderFlowHeader(flow) {
@@ -663,6 +858,10 @@ function tileKind(step) {
     const effect = effectOf({ effect: step.meta?.effect, access: step.meta?.access });
     return EFFECT_TILE[effect];
   }
+  // "middleware" is the node kind; "guard" is what the developer called it.
+  if (step.kind === 'middleware' && step.meta?.role) return String(step.meta.role);
+  // Say plainly that the chain stops here rather than implying it completed.
+  if (step.kind === 'external-effect') return `${step.meta?.effectKind ?? 'external'} · not read`;
   return step.kind.replace('-', ' ');
 }
 
@@ -675,3 +874,1146 @@ function escapeHtml(value) {
 }
 
 load();
+
+// ---------------------------------------------------------------------------
+// Tab panels
+//
+// Each one opens with a plain sentence saying what question it answers. The
+// data is the point, but a panel of numbers with no stated question is how a
+// tool gets read wrong — and every one of these panels can be read wrong in a
+// way that costs someone an afternoon.
+// ---------------------------------------------------------------------------
+
+/** A short note explaining the panel, in the user's terms rather than ours. */
+function panelIntro(text) {
+  return `<p class="panel-intro">${escapeHtml(text)}</p>`;
+}
+
+function panelError(panel, insight) {
+  panel.innerHTML = `<p class="error">Could not load this view: ${escapeHtml(
+    String(insight.error),
+  )}</p>`;
+}
+
+function panelLoading(panel, what) {
+  panel.innerHTML = `<p class="muted">Working out ${escapeHtml(what)}…</p>`;
+}
+
+/** Tab 2 — where the time goes. */
+function renderTiming() {
+  const panel = el.panels.timing;
+  if (!panel) return;
+  if (!state.insight) return panelLoading(panel, 'the timings');
+  if (state.insight.error) return panelError(panel, state.insight);
+
+  const timing = state.insight.timing;
+
+  if (!timing.observed) {
+    panel.innerHTML =
+      panelIntro('How long each step of this feature takes, measured from real runs.') +
+      `<div class="empty-state">
+         <h3>Nothing has been measured yet</h3>
+         <p>Flowslens does not guess timings. These numbers come from your app
+            actually running, so there is nothing to show until it has.</p>
+         <ol class="steps-todo">
+           <li>Add <code>@flowslens/runtime</code> to the app you are studying.</li>
+           <li><code>app.use(flowlensHttp())</code>, and <code>traceMethod</code>
+               around the service methods you care about.</li>
+           <li>Use the feature once in a browser, then press <strong>Rescan</strong>.</li>
+         </ol>
+       </div>`;
+    return;
+  }
+
+  const slowest = timing.slowest;
+  const rows = timing.steps
+    .map((step) => {
+      const share = step.sharePct ?? 0;
+      const self = step.avgSelfMs ?? 0;
+      return `<tr>
+          <td class="t-step">
+            <span class="layer-dot layer-${step.layer}"></span>
+            ${escapeHtml(step.label)}
+            <span class="t-kind">${escapeHtml(tileKind(step))}</span>
+          </td>
+          <td class="t-bar">
+            <span class="bar" style="width:${Math.max(share, 1)}%"></span>
+            <span class="bar-value">${self}ms</span>
+          </td>
+          <td class="t-share">${share}%</td>
+          <td class="t-total">${step.avgMs ?? '—'}${step.avgMs != null ? 'ms' : ''}</td>
+          <td class="t-runs">${step.observations ?? '—'}</td>
+        </tr>`;
+    })
+    .join('');
+
+  panel.innerHTML =
+    panelIntro(
+      'How long each step takes, measured from real runs. "Own time" is the step ' +
+        'itself; "total" includes everything it called.',
+    ) +
+    `<div class="stat-row">
+       <div class="stat"><span class="stat-value">${timing.totalMs}ms</span>
+         <span class="stat-label">whole feature</span></div>
+       <div class="stat"><span class="stat-value">${timing.accountedMs}ms</span>
+         <span class="stat-label">accounted for by the steps below</span></div>
+       ${
+         slowest
+           ? `<div class="stat"><span class="stat-value">${escapeHtml(slowest.label)}</span>
+                <span class="stat-label">slowest step (${slowest.avgSelfMs}ms of its own)</span></div>`
+           : ''
+       }
+     </div>
+     <table class="timing-table">
+       <thead><tr>
+         <th>Step</th><th>Own time</th><th>Share</th><th>Total</th><th>Runs</th>
+       </tr></thead>
+       <tbody>${rows}</tbody>
+     </table>` +
+    notesList(timing.notes) +
+    (timing.unobserved.length
+      ? `<details class="more"><summary>${timing.unobserved.length} steps with no measurement</summary>
+           <ul class="plain">${timing.unobserved
+             .map((step) => `<li>${escapeHtml(step.label)}</li>`)
+             .join('')}</ul></details>`
+      : '');
+}
+
+/** Tab 3 — what a change here would break. */
+function renderImpact() {
+  const panel = el.panels.impact;
+  if (!panel) return;
+  if (!state.insight) return panelLoading(panel, 'what depends on this');
+  if (state.insight.error) return panelError(panel, state.insight);
+
+  const impact = state.insight.impact;
+
+  const intro = panelIntro(
+    'Before you change this feature: these are the parts of it that other ' +
+      'features also run through. Change a shared step and you change them too.',
+  );
+
+  const infraCount = impact.infrastructure?.length ?? 0;
+
+  if (impact.shared.length === 0 && impact.contestedCollections.length === 0) {
+    panel.innerHTML =
+      intro +
+      `<div class="empty-state ok">
+         <h3>This change is contained</h3>
+         <p>${escapeHtml(impact.summary)}</p>
+         <p class="muted">No other feature depends on this one's business logic.${
+           infraCount
+             ? ` It shares ${infraCount} infrastructure step${
+                 infraCount > 1 ? 's' : ''
+               } — a hook, a cache, a log — which is what infrastructure is for.`
+             : ''
+         }</p>
+       </div>` +
+      renderInfrastructure(impact);
+    bindFlowJumps(panel);
+    return;
+  }
+
+  const features = impact.featuresAtRisk
+    .map(
+      (feature) =>
+        `<li>
+           <button class="link" data-goto-flow="${escapeHtml(feature.id)}">${escapeHtml(
+             feature.title,
+           )}</button>
+           ${
+             feature.subtitle
+               ? `<span class="muted small">${escapeHtml(feature.subtitle)}</span>`
+               : ''
+           }
+           <span class="muted">— shares ${feature.viaSteps} step${
+             feature.viaSteps > 1 ? 's' : ''
+           } with this one</span>
+         </li>`,
+    )
+    .join('');
+
+  const sharedRows = impact.shared
+    .map(
+      (step) => `<div class="shared-step level-${step.level}" data-step-id="${escapeHtml(
+        step.nodeId,
+      )}">
+        <div class="shared-head">
+          <span class="layer-dot layer-${step.layer}"></span>
+          <strong>${escapeHtml(step.label)}</strong>
+          <span class="chip small">${escapeHtml(step.kind.replace('-', ' '))}</span>
+          <span class="chip small ${step.level === 'high' ? 'danger' : 'warn'}">
+            ${step.otherFlows.length} other feature${step.otherFlows.length > 1 ? 's' : ''}
+          </span>
+        </div>
+        ${step.file ? `<div class="shared-file">${fileLink(step.file, step.line)}</div>` : ''}
+        <div class="shared-flows">${step.otherFlows
+          .map(
+            (other) =>
+              `<button class="pill" data-goto-flow="${escapeHtml(other.id)}">${escapeHtml(
+                other.title,
+              )}</button>`,
+          )
+          .join('')}</div>
+        ${
+          step.warnings.length
+            ? `<ul class="warn-list">${step.warnings
+                .map((warning) => `<li>${escapeHtml(warning)}</li>`)
+                .join('')}</ul>`
+            : ''
+        }
+      </div>`,
+    )
+    .join('');
+
+  const contested = impact.contestedCollections.length
+    ? `<h3>Collections more than one place writes</h3>
+       <p class="panel-intro">These are written from several methods. Changing the
+          shape of what this feature writes can break the others' assumptions,
+          and nobody gets a compile error.</p>
+       ${impact.contestedCollections
+         .map(
+           (entry) => `<div class="contested">
+              <strong>${escapeHtml(entry.collection)}</strong>
+              <span class="muted">written by</span>
+              ${entry.writers
+                .map((writer) => `<span class="pill flat">${escapeHtml(writer)}</span>`)
+                .join('')}
+            </div>`,
+         )
+         .join('')}`
+    : '';
+
+  const infrastructure = renderInfrastructure(impact);
+
+  panel.innerHTML =
+    intro +
+    `<div class="verdict level-${impact.level}">
+       <span class="verdict-level">${escapeHtml(impact.level)} risk</span>
+       <span>${escapeHtml(impact.summary)}</span>
+     </div>
+     <details class="more why"><summary>Why this level</summary>
+       <ul class="plain small">${(impact.factors ?? [])
+         .map((factor) => `<li>${escapeHtml(factor)}</li>`)
+         .join('')}</ul>
+     </details>
+     ${features ? `<h3>Features that could break</h3><ul class="plain">${features}</ul>` : ''}
+     <h3>Shared steps, most-shared first</h3>
+     ${sharedRows}
+     ${infrastructure}
+     ${contested}
+     ${
+       impact.exclusive.length
+         ? `<details class="more"><summary>${impact.exclusive.length} steps only this feature uses — safe to change</summary>
+              <ul class="plain">${impact.exclusive
+                .map(
+                  (step) =>
+                    `<li>${escapeHtml(step.label)} ${
+                      step.file ? `<code>${escapeHtml(step.file)}</code>` : ''
+                    }</li>`,
+                )
+                .join('')}</ul></details>`
+         : ''
+     }`;
+
+  bindFlowJumps(panel);
+  bindStepSelection(panel);
+}
+
+/**
+ * The steps that are shared on purpose, kept out of the way.
+ *
+ * Collapsed rather than hidden: the classification is a heuristic, so the
+ * reader has to be able to check it — and every row says why it was demoted.
+ */
+function renderInfrastructure(impact) {
+  const infra = impact.infrastructure ?? [];
+  if (infra.length === 0) return '';
+  return `<details class="more">
+    <summary>${infra.length} shared step${
+      infra.length > 1 ? 's' : ''
+    } that look like infrastructure — shared on purpose</summary>
+    <p class="panel-intro">A toast hook, a cache, a logger or an audit trail is
+       shared by design. They are listed apart so they stop competing with the
+       findings above, not because a change to them is safe.</p>
+    ${infra
+      .map(
+        (step) => `<div class="shared-step infra" data-step-id="${escapeHtml(step.nodeId)}">
+          <div class="shared-head">
+            <span class="layer-dot layer-${step.layer}"></span>
+            <strong>${escapeHtml(step.label)}</strong>
+            <span class="chip small">${escapeHtml(step.kind.replace('-', ' '))}</span>
+            <span class="muted small">${step.usedByFlows} features · ${escapeHtml(step.why)}</span>
+          </div>
+          ${step.file ? `<div class="shared-file">${fileLink(step.file, step.line)}</div>` : ''}
+        </div>`,
+      )
+      .join('')}
+  </details>`;
+}
+
+/** Tab 4 — what would catch it if you broke it. */
+function renderTests() {
+  const panel = el.panels.tests;
+  if (!panel) return;
+  if (!state.insight) return panelLoading(panel, 'which tests cover this');
+  if (state.insight.error) return panelError(panel, state.insight);
+
+  const tests = state.insight.tests;
+  const intro = panelIntro(
+    'Which tests import the files this feature runs through — that is, what would ' +
+      'fail if you broke it.',
+  );
+
+  if (tests.files.length === 0) {
+    panel.innerHTML =
+      intro +
+      `<div class="empty-state danger">
+         <h3>Nothing covers this feature</h3>
+         <p>No test file imports any file this flow runs through. A change here
+            would fail silently — which makes the <strong>Breaks</strong> tab the
+            one to read before editing.</p>
+       </div>` +
+      notesList(tests.notes);
+    return;
+  }
+
+  const meterTone = tests.coveragePct >= 80 ? 'ok' : tests.coveragePct >= 40 ? 'warn' : 'danger';
+
+  const files = tests.files
+    .map(
+      (file) => `<div class="test-file">
+        <div class="test-head">
+          <strong>${escapeHtml(file.file)}</strong>
+          <span class="chip small">${file.cases.length} case${
+            file.cases.length === 1 ? '' : 's'
+          }</span>
+          ${file.integration ? '<span class="chip small">integration</span>' : ''}
+        </div>
+        <div class="muted small">covers ${file.coversFromFlow
+          .map((covered) => `<code>${escapeHtml(covered)}</code>`)
+          .join(' ')}</div>
+        <ul class="case-list">${file.cases
+          .slice(0, 12)
+          .map(
+            (testCase) =>
+              `<li>${
+                testCase.suite ? `<span class="muted">${escapeHtml(testCase.suite)} › </span>` : ''
+              }${escapeHtml(testCase.title)}</li>`,
+          )
+          .join('')}</ul>
+        ${
+          file.cases.length > 12
+            ? `<p class="muted small">…and ${file.cases.length - 12} more</p>`
+            : ''
+        }
+      </div>`,
+    )
+    .join('');
+
+  panel.innerHTML =
+    intro +
+    `<div class="stat-row">
+       <div class="stat">
+         <span class="stat-value">${tests.coveragePct}%</span>
+         <span class="stat-label">of this flow's files have a test importing them</span>
+         <span class="meter"><span class="meter-fill ${meterTone}" style="width:${tests.coveragePct}%"></span></span>
+       </div>
+       <div class="stat"><span class="stat-value">${tests.totalCases}</span>
+         <span class="stat-label">test cases touch this feature</span></div>
+     </div>
+     ${
+       tests.uncoveredFiles.length
+         ? `<h3>Unguarded parts of this feature</h3>
+            <p class="panel-intro">No test imports these files, so breaking the steps
+               listed under each one would not fail the suite.</p>
+            ${tests.uncoveredFiles
+              .map(
+                (entry) => `<div class="uncovered">
+                   <code>${escapeHtml(entry.file)}</code>
+                   <span class="muted">— ${entry.steps
+                     .map((step) => escapeHtml(step))
+                     .join(', ')}</span>
+                 </div>`,
+              )
+              .join('')}`
+         : ''
+     }
+     <h3>Tests that cover it</h3>
+     ${files}
+     ${runCommand(tests)}` +
+    notesList(tests.notes);
+
+  bindCopy(panel);
+}
+
+/**
+ * The command that runs just these tests.
+ *
+ * Shown rather than run: Flowslens does not execute anything in the project it
+ * reads, and a dashboard that shells out to a test runner would be a different
+ * and much more invasive tool. Copying a command is one click and keeps the
+ * developer in charge of their own terminal.
+ */
+function runCommand(tests) {
+  const files = tests.files.map((file) => file.file);
+  if (files.length === 0) return '';
+  const command = `npx vitest run ${files.join(' ')}`;
+  return `<h3>Run just these</h3>
+    <div class="command">
+      <code>${escapeHtml(command)}</code>
+      <button class="button ghost small" data-copy="${escapeHtml(command)}">Copy</button>
+    </div>`;
+}
+
+function notesList(notes) {
+  if (!notes?.length) return '';
+  return `<ul class="notes">${notes.map((note) => `<li>${escapeHtml(note)}</li>`).join('')}</ul>`;
+}
+
+/** Make every "other feature" reference jump to that feature. */
+function bindFlowJumps(panel) {
+  for (const button of panel.querySelectorAll('[data-goto-flow]')) {
+    button.addEventListener('click', () => {
+      const id = button.dataset.gotoFlow;
+      if (!state.flows.some((flow) => flow.id === id)) return;
+      state.tab = 'impact';
+      selectFlow(id);
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Opening the file you are reading about
+//
+// The one thing a developer wants to do after reading any of these panels is
+// open the code. In a terminal `file:line` is already clickable; in a browser
+// it was plain text, which made the dashboard worse than the CLI at the very
+// next step.
+// ---------------------------------------------------------------------------
+
+/** The editor scheme to build links for. Overridable with ?editor=. */
+const EDITOR = new URLSearchParams(window.location.search).get('editor') ?? 'vscode';
+
+const EDITOR_SCHEMES = {
+  vscode: (abs, line) => `vscode://file/${abs}:${line}`,
+  'vscode-insiders': (abs, line) => `vscode-insiders://file/${abs}:${line}`,
+  cursor: (abs, line) => `cursor://file/${abs}:${line}`,
+  windsurf: (abs, line) => `windsurf://file/${abs}:${line}`,
+  idea: (abs, line) => `idea://open?file=${abs}&line=${line}`,
+  webstorm: (abs, line) => `webstorm://open?file=${abs}&line=${line}`,
+  zed: (abs, line) => `zed://file/${abs}:${line}`,
+};
+
+/**
+ * A clickable `file:line`, or plain text when there is nothing to link to.
+ *
+ * Paths in the graph are relative so a scan stays portable between machines;
+ * an editor needs the absolute one, so it is rebuilt from the root the scan
+ * recorded.
+ */
+function fileLink(file, line, extraClass = '') {
+  if (!file) return '';
+  const shown = line ? `${file}:${line}` : file;
+  const root = state.graph?.meta?.root;
+  const scheme = EDITOR_SCHEMES[EDITOR];
+  if (!root || !scheme) return `<code class="${extraClass}">${escapeHtml(shown)}</code>`;
+  const absolute = `${root.replace(/[/\\]$/, '')}/${file}`;
+  return (
+    `<a class="file-link ${extraClass}" href="${escapeHtml(scheme(absolute, line ?? 1))}" ` +
+    `title="Open in your editor">${escapeHtml(shown)}</a>`
+  );
+}
+
+/**
+ * Wire any element carrying `data-step-id` to the details sidebar.
+ *
+ * Reuses the panel the Flow tab already fills, so a step read about in Breaks
+ * or Changed opens the same detail it would there.
+ */
+/**
+ * `lib/auth/user-store.ts:127` shown as `user-store.ts:127`.
+ *
+ * The full path was breaking across five lines in a narrow column, which is
+ * unreadable and also the least useful half of the string — the basename and
+ * the line number are what identify the place. The whole path stays in the
+ * tooltip and in the link itself.
+ */
+function fileRef(file, line, extraClass = '') {
+  if (!file) return '';
+  const base = file.split('/').pop();
+  const root = state.graph?.meta?.root;
+  const scheme = EDITOR_SCHEMES[EDITOR];
+  const shown = line ? `${base}:${line}` : base;
+  const full = line ? `${file}:${line}` : file;
+  if (!root || !scheme) {
+    return `<code class="file-ref ${extraClass}" title="${escapeHtml(full)}">${escapeHtml(
+      shown,
+    )}</code>`;
+  }
+  const absolute = `${root.replace(/[/\\]$/, '')}/${file}`;
+  return (
+    `<a class="file-link ${extraClass}" href="${escapeHtml(scheme(absolute, line ?? 1))}" ` +
+    `title="${escapeHtml(full)} — open in your editor">${escapeHtml(shown)}</a>`
+  );
+}
+
+function bindStepSelection(panel) {
+  for (const element of panel.querySelectorAll('[data-step-id]')) {
+    element.addEventListener('click', (event) => {
+      if (event.target.closest('a')) return; // Let an editor link win.
+      const step = state.selectedFlow?.steps.find(
+        (candidate) => candidate.nodeId === element.dataset.stepId,
+      );
+      if (!step) return;
+      state.selectedNode = step;
+      renderDetails(step);
+    });
+  }
+}
+
+/** Tab 2 — every request this action makes, in full. */
+function renderApis() {
+  const panel = el.panels.apis;
+  if (!panel) return;
+  if (!state.insight) return panelLoading(panel, 'the requests this action makes');
+  if (state.insight.error) return panelError(panel, state.insight);
+
+  const calls = state.insight.apis?.calls ?? [];
+  const intro = panelIntro(
+    'Every request this action sends, and everything the endpoint does on the other ' +
+      'side: what is in the body, what runs before the handler, which collections it ' +
+      'touches, and who else calls it.',
+  );
+
+  if (calls.length === 0) {
+    panel.innerHTML =
+      intro +
+      `<div class="empty-state">
+         <h3>This action makes no request</h3>
+         <p>It changes local state only — nothing leaves the browser, so there is no
+            endpoint to describe. The <strong>Flow</strong> tab shows what it does
+            instead.</p>
+       </div>`;
+    return;
+  }
+
+  /**
+   * A one-line map before the detail.
+   *
+   * With three requests the shape of the sequence is the first thing to
+   * understand, and reading it off three expanded cards is harder than reading
+   * it off one line.
+   */
+  const sequence =
+    calls.length > 1
+      ? `<div class="sequence">${calls
+          .map((call, index) => {
+            const previous = calls[index - 1];
+            /**
+             * The join says what the relationship is: `or` between two arms of
+             * one conditional, `+` for concurrent, `→` for a real sequence. An
+             * arrow between alternatives would claim both requests happen.
+             */
+            const join =
+              index === 0
+                ? ''
+                : previous.order === call.order
+                  ? 'or'
+                  : call.parallelWith.length && previous.parallelWith.length
+                    ? '+'
+                    : '→';
+            return (
+              (join ? `<span class="seq-join">${join}</span>` : '') +
+              `<span class="seq-item${call.onFailure ? ' on-failure' : ''}">` +
+              `<span class="seq-n">${call.order}</span>` +
+              `<code>${escapeHtml(call.endpoint)}</code></span>`
+            );
+          })
+          .join('')}</div>`
+      : '';
+
+  panel.innerHTML =
+    intro +
+    sequence +
+    calls.map(renderApiCall).join('') +
+    renderAftermath(state.insight.apis.aftermath) +
+    notesList(state.insight.apis.notes);
+  bindFlowJumps(panel);
+  bindCopy(panel);
+}
+
+function renderApiCall(call) {
+  const rows = [];
+
+  // --- the request ---------------------------------------------------------
+  rows.push(
+    section(
+      'Request',
+      `<dl class="kv">
+        ${kv('Endpoint', `<code>${escapeHtml(call.endpoint)}</code>`)}
+        ${call.rawPath ? kv('URL in the frontend', `<code>${escapeHtml(call.rawPath)}</code>`) : ''}
+        ${call.client ? kv('Sent with', `<code>${escapeHtml(call.client)}</code>`) : ''}
+        ${kv(
+          'Called from',
+          call.callSites.length
+            ? call.callSites
+                .map((site) => {
+                  const [file, line] = splitSite(site);
+                  return fileRef(file, line);
+                })
+                .join(' ')
+            : '<span class="muted">unknown</span>',
+        )}
+        ${
+          call.queryKeys.length
+            ? kv('Query', call.queryKeys.map((key) => `<code>${escapeHtml(key)}</code>`).join(' '))
+            : ''
+        }
+      </dl>`,
+    ),
+  );
+
+  // --- body, with the contract folded in -----------------------------------
+  const contract = call.contract;
+  const unexpected = new Set((contract?.unexpected ?? []).map((field) => field.name));
+  const carriesBody = ['POST', 'PUT', 'PATCH'].includes(call.method);
+  if (call.payload.length === 0 && carriesBody) {
+    /**
+     * A body we could not read is not the same as no body.
+     *
+     * `api.post(url, payload)` with a variable rather than an object literal
+     * leaves nothing to enumerate at the call site. Skipping the section
+     * silently would read as "this request sends nothing", which is wrong in
+     * the one place someone is checking what it sends.
+     */
+    rows.push(
+      section(
+        'Body',
+        `<p class="muted small">This request sends a body, but the keys are not
+           readable at the call site — the payload is a variable rather than an
+           object literal. The <strong>Flow</strong> tab shows the state it is built
+           from.</p>`,
+      ),
+    );
+  } else if (call.payload.length > 0 || contract?.missing.length) {
+    rows.push(
+      section(
+        'Body',
+        `${
+          call.payload.length
+            ? `<table class="kv-table">
+                 <thead><tr><th>Key</th><th>From</th><th>Accepted?</th></tr></thead>
+                 <tbody>${call.payload
+                   .map(
+                     (field) => `<tr>
+                        <td><code>${escapeHtml(field.name)}</code></td>
+                        <td class="muted">${
+                          field.from ? `<code>${escapeHtml(field.from)}</code>` : '—'
+                        }</td>
+                        <td>${
+                          !contract || !call.dto
+                            ? '<span class="muted">no DTO to check</span>'
+                            : unexpected.has(field.name)
+                              ? '<span class="chip small danger">not declared</span>'
+                              : '<span class="chip small ok">yes</span>'
+                        }</td>
+                      </tr>`,
+                   )
+                   .join('')}</tbody>
+               </table>`
+            : '<p class="muted small">No body.</p>'
+        }
+        ${
+          contract?.missing.length
+            ? `<p class="small">Declared but never sent: ${contract.missing
+                .map((field) => `<code>${escapeHtml(field.name)}</code>`)
+                .join(' ')}</p>`
+            : ''
+        }
+        ${
+          unexpected.size > 0
+            ? `<p class="small warn-text">A key the route does not declare is usually
+                 dropped by the validation layer — the request succeeds and the value
+                 disappears.</p>`
+            : ''
+        }`,
+        true,
+      ),
+    );
+  }
+
+  // --- the server side -----------------------------------------------------
+  if (!call.matched) {
+    rows.push(
+      section(
+        'Handled by',
+        `<p class="small warn-text">Nothing in this project answers this call.</p>`,
+      ),
+    );
+  } else {
+    rows.push(
+      section(
+        'Handled by',
+        `<dl class="kv">
+          ${kv(
+            'Route',
+            `<code>${escapeHtml(call.route.method)} ${escapeHtml(call.route.path)}</code>` +
+              (call.route.framework
+                ? ` <span class="chip small">${escapeHtml(call.route.framework)}</span>`
+                : ''),
+          )}
+          ${
+            call.route.controller
+              ? kv('Controller', `<code>${escapeHtml(call.route.controller)}</code>`)
+              : ''
+          }
+          ${call.route.handler ? kv('Handler', `<code>${escapeHtml(call.route.handler)}</code>`) : ''}
+          ${call.route.file ? kv('Declared in', fileRef(call.route.file, call.route.line)) : ''}
+        </dl>`,
+      ),
+    );
+
+    rows.push(
+      section(
+        'Before the handler',
+        call.middleware.length
+          ? `<ul class="plain small">${call.middleware
+              .map(
+                (entry) =>
+                  `<li><strong>${escapeHtml(entry.name)}</strong>
+                     <span class="muted">${escapeHtml(entry.role)}</span>
+                     ${entry.file ? fileRef(entry.file, entry.line) : ''}</li>`,
+              )
+              .join('')}</ul>`
+          : '<p class="muted small">No guard, pipe or middleware — the handler runs directly.</p>',
+      ),
+    );
+
+    if (call.dto) {
+      rows.push(
+        section(
+          'Validated by',
+          `<p class="small"><code>${escapeHtml(call.dto.name)}</code> declares
+             ${call.dto.fields.map((f) => `<code>${escapeHtml(f.name)}</code>`).join(' ')}</p>`,
+        ),
+      );
+    }
+
+    if (call.handlers.length) {
+      rows.push(
+        section(
+          'Code it runs',
+          `<ul class="ref-list">${call.handlers
+            .map(
+              (entry) =>
+                `<li><span class="ref-name">${escapeHtml(entry.label)}</span>${
+                  entry.file ? fileRef(entry.file, entry.line) : ''
+                }</li>`,
+            )
+            .join('')}</ul>`,
+          true,
+        ),
+      );
+    }
+
+    if (call.data.length) {
+      rows.push(
+        section(
+          'Data it touches',
+          `<table class="data-table">
+             <thead><tr>
+               <th>Effect</th><th>Collection</th><th>Operation</th><th>Issued by</th><th>Where</th>
+             </tr></thead>
+             <tbody>${call.data
+               .map(
+                 (entry) => `<tr>
+                    <td><span class="chip small effect-${escapeHtml(
+                      entry.effect,
+                    )}">${escapeHtml(entry.effect)}</span></td>
+                    <td><code>${escapeHtml(entry.collection)}</code></td>
+                    <td class="mono muted">${escapeHtml(entry.operation)}</td>
+                    <td class="muted">${escapeHtml(entry.by ?? '—')}</td>
+                    <td>${entry.file ? fileRef(entry.file, entry.line) : ''}</td>
+                  </tr>`,
+               )
+               .join('')}</tbody>
+           </table>`,
+          true,
+        ),
+      );
+    }
+
+    if (call.effects.length) {
+      rows.push(
+        section(
+          'Leaves the app',
+          `<ul class="ref-list">${call.effects
+            .map(
+              (entry) =>
+                `<li><span class="ref-name">${escapeHtml(entry.label)}</span>
+                   <span class="muted">${escapeHtml(entry.kind)}</span>
+                   ${entry.file ? fileRef(entry.file, entry.line) : ''}</li>`,
+            )
+            .join('')}</ul>`,
+          true,
+        ),
+      );
+    }
+
+    rows.push(
+      section(
+        'What comes back',
+        `<dl class="kv">
+          ${kv(
+            'Status seen',
+            call.response.statusCodes.length
+              ? call.response.statusCodes
+                  .map(
+                    (code) =>
+                      `<span class="chip small ${
+                        code >= 500 ? 'danger' : code >= 400 ? 'warn' : 'ok'
+                      }">${code}</span>`,
+                  )
+                  .join(' ')
+              : '<span class="muted">never observed running</span>',
+          )}
+          ${kv(
+            'Lands in',
+            call.response.landsInState.length
+              ? call.response.landsInState
+                  .map((name) => `<code>${escapeHtml(name)}</code>`)
+                  .join(' ')
+              : '<span class="muted">no state Flowslens can see</span>',
+          )}
+        </dl>`,
+      ),
+    );
+
+    rows.push(
+      section(
+        'Who else uses it',
+        call.alsoUsedBy.length || call.otherCallSites.length
+          ? `${
+              call.alsoUsedBy.length
+                ? `<ul class="plain small">${call.alsoUsedBy
+                    .map(
+                      (feature) =>
+                        `<li><button class="link" data-goto-flow="${escapeHtml(
+                          feature.id,
+                        )}">${escapeHtml(feature.title)}</button>${
+                          feature.subtitle
+                            ? ` <span class="muted">${escapeHtml(feature.subtitle)}</span>`
+                            : ''
+                        }</li>`,
+                    )
+                    .join('')}</ul>`
+                : ''
+            }
+             ${
+               call.otherCallSites.length
+                 ? `<p class="small muted">Also called from ${call.otherCallSites
+                     .map((site) => {
+                       const [file, line] = splitSite(site);
+                       return fileRef(file, line);
+                     })
+                     .join(' ')}</p>`
+                 : ''
+             }`
+          : '<p class="muted small">Only this feature calls it.</p>',
+      ),
+    );
+  }
+
+  const curl = curlFor(call);
+
+  return `<div class="api-call">
+    <div class="api-head">
+      <span class="seq-n big" title="${escapeHtml(call.when)}">${call.order}</span>
+      <span class="method method-${escapeHtml(call.method.toLowerCase())}">${escapeHtml(
+        call.method,
+      )}</span>
+      <code class="api-path">${escapeHtml(call.path)}</code>
+      ${
+        call.matched
+          ? '<span class="chip small ok">matched</span>'
+          : '<span class="chip small danger">no route</span>'
+      }
+      <span class="chip small">${escapeHtml(call.evidence)}</span>
+      ${
+        call.observations
+          ? `<span class="muted small">${call.observations} run${
+              call.observations === 1 ? '' : 's'
+            }${call.avgMs ? ` · ${call.avgMs}ms` : ''}</span>`
+          : ''
+      }
+    </div>
+    <div class="api-when">
+      ${escapeHtml(call.when)}${call.awaited ? ' · awaited' : ''}
+    </div>
+    ${
+      call.warnings.length
+        ? `<ul class="warn-list">${call.warnings
+            .map((warning) => `<li>${escapeHtml(warning)}</li>`)
+            .join('')}</ul>`
+        : ''
+    }
+    <div class="api-sections">${rows.join('')}</div>
+    <div class="command">
+      <code>${escapeHtml(curl)}</code>
+      <button class="button ghost small" data-copy="${escapeHtml(curl)}">Copy</button>
+    </div>
+  </div>`;
+}
+
+/**
+ * A request you can paste into a terminal.
+ *
+ * The path keeps its `:param` placeholders rather than inventing an id — a
+ * copyable command with a made-up value looks runnable and is not.
+ */
+function curlFor(call) {
+  const body = call.payload.length
+    ? ` \\\n  -d '${JSON.stringify(Object.fromEntries(call.payload.map((f) => [f.name, '…'])))}'`
+    : '';
+  const headers = call.payload.length ? " \\\n  -H 'content-type: application/json'" : '';
+  return `curl -X ${call.method} "$BASE_URL${call.rawPath ?? call.path}"${headers}${body}`;
+}
+
+/**
+ * A labelled block. `wide` spans the whole card.
+ *
+ * Tables and lists of file paths need the full width; four key/value pairs do
+ * not. Mixing them in one auto-fit grid is what produced a four-column layout
+ * with `updat/e` wrapping mid-word.
+ */
+function section(title, html, wide = false) {
+  return `<section class="api-section${wide ? ' wide' : ''}"><h4>${escapeHtml(
+    title,
+  )}</h4>${html}</section>`;
+}
+
+function kv(key, value) {
+  return `<dt>${escapeHtml(key)}</dt><dd>${value}</dd>`;
+}
+
+/** `web/src/Form.tsx:16` -> `['web/src/Form.tsx', 16]` */
+function splitSite(site) {
+  const match = /^(.*):(\d+)$/.exec(site);
+  return match ? [match[1], Number(match[2])] : [site, undefined];
+}
+
+/** Tab 6 — what your uncommitted changes put at risk. */
+function renderChanged() {
+  const panel = el.panels.changed;
+  if (!panel) return;
+  if (!state.changed) return panelLoading(panel, 'what you have changed');
+
+  const changed = state.changed;
+  const intro = panelIntro(
+    'This tab is about the whole project, not the selected feature: the files you ' +
+      'have changed since the last commit, and the features that run through them.',
+  );
+
+  if (changed.error) {
+    panel.innerHTML =
+      intro +
+      `<div class="empty-state">
+         <h3>Could not read your changes</h3>
+         <p>${escapeHtml(changed.error)}</p>
+         <p class="muted">This view needs the project to be a git repository.</p>
+       </div>`;
+    return;
+  }
+
+  const refresh = `<button class="button ghost small" id="changed-refresh">Re-read changes</button>`;
+
+  if (changed.features.length === 0) {
+    panel.innerHTML =
+      intro +
+      `<div class="empty-state ${changed.files.length === 0 ? 'ok' : ''}">
+         <h3>${
+           changed.files.length === 0
+             ? 'Nothing has changed'
+             : 'No traced feature runs through your changes'
+         }</h3>
+         <p>${escapeHtml(changed.summary)}</p>
+         ${
+           changed.files.length > 0
+             ? `<ul class="plain">${changed.files
+                 .map((entry) => `<li>${fileLink(entry.file)}</li>`)
+                 .join('')}</ul>`
+             : ''
+         }
+         <p>${refresh}</p>
+       </div>` +
+      notesList(changed.notes);
+    bindChangedRefresh(panel);
+    return;
+  }
+
+  panel.innerHTML =
+    intro +
+    `<div class="verdict level-${changed.level}">
+       <span class="verdict-level">${escapeHtml(changed.level)} risk</span>
+       <span>${escapeHtml(changed.summary)}</span>
+     </div>
+     <div class="stat-row">
+       <div class="stat"><span class="stat-value">${changed.features.length}</span>
+         <span class="stat-label">features run through your changed files</span></div>
+       <div class="stat"><span class="stat-value">${changed.untested.length}</span>
+         <span class="stat-label">of them have no test at all</span></div>
+       ${
+         changed.collections.length
+           ? `<div class="stat"><span class="stat-value">${changed.collections.length}</span>
+                <span class="stat-label">collections the changed code touches:
+                ${escapeHtml(changed.collections.join(', '))}</span></div>`
+           : ''
+       }
+     </div>
+
+     <h3>Features affected, most-touched first</h3>
+     ${changed.features
+       .map(
+         (feature) => `<div class="affected ${feature.testCases === 0 ? 'untested' : ''}">
+            <div class="affected-head">
+              <button class="link" data-goto-flow="${escapeHtml(feature.id)}">${escapeHtml(
+                feature.title,
+              )}</button>
+              ${
+                feature.subtitle
+                  ? `<span class="muted small">${escapeHtml(feature.subtitle)}</span>`
+                  : ''
+              }
+              <span class="chip small ${feature.testCases === 0 ? 'danger' : 'ok'}">
+                ${
+                  feature.testCases === 0
+                    ? 'no test'
+                    : `${feature.testCases} test${feature.testCases === 1 ? '' : 's'}`
+                }
+              </span>
+            </div>
+            <ul class="plain small">${feature.touchedSteps
+              .map(
+                (step) =>
+                  `<li>${escapeHtml(step.label)} ${fileLink(step.file, step.line, 'tiny')}</li>`,
+              )
+              .join('')}</ul>
+          </div>`,
+       )
+       .join('')}
+
+     <h3>Changed files</h3>
+     <ul class="plain small">${changed.files
+       .map(
+         (entry) =>
+           `<li>${fileLink(entry.file)} <span class="muted">${escapeHtml(
+             entry.status ?? 'modified',
+           )}${entry.steps === 0 ? ' · not in the graph' : ` · ${entry.steps} steps`}</span></li>`,
+       )
+       .join('')}</ul>
+     <p>${refresh}</p>` +
+    notesList(changed.notes);
+
+  bindFlowJumps(panel);
+  bindChangedRefresh(panel);
+}
+
+/** Copy-to-clipboard for any element carrying `data-copy`. */
+function bindCopy(panel) {
+  for (const button of panel.querySelectorAll('[data-copy]')) {
+    button.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy);
+        const original = button.textContent;
+        button.textContent = 'Copied';
+        setTimeout(() => {
+          button.textContent = original;
+        }, 1200);
+      } catch {
+        // A clipboard the browser will not give us is not worth an error
+        // dialog: the command is on screen and selectable either way.
+      }
+    });
+  }
+}
+
+function bindChangedRefresh(panel) {
+  panel.querySelector('#changed-refresh')?.addEventListener('click', () => {
+    void loadChanged();
+  });
+}
+
+/**
+ * What happens once the requests come back.
+ *
+ * Rendered as its own block below the calls rather than inside one, because
+ * these are consequences of the action as a whole: a navigation happens once,
+ * not once per request.
+ */
+function renderAftermath(after) {
+  if (!after) return '';
+  const hasContent =
+    after.navigatesTo.length ||
+    after.invalidates.length ||
+    after.errorStates.length ||
+    after.notifies.length ||
+    after.notes.length;
+  if (!hasContent) return '';
+
+  const block = (title, html) =>
+    html ? `<section class="api-section wide"><h4>${escapeHtml(title)}</h4>${html}</section>` : '';
+
+  return `<div class="api-call aftermath">
+    <div class="api-head">
+      <span class="api-path">After the response</span>
+      ${
+        after.handlesErrors
+          ? '<span class="chip small ok">failures handled</span>'
+          : '<span class="chip small warn">no error handling</span>'
+      }
+    </div>
+    <div class="api-sections">
+      ${block(
+        'Goes to',
+        after.navigatesTo.length
+          ? `<ul class="ref-list">${after.navigatesTo
+              .map((target) => `<li><span class="ref-name">${escapeHtml(target)}</span></li>`)
+              .join('')}</ul>`
+          : '',
+      )}
+      ${block(
+        'Refetches',
+        after.invalidates.length
+          ? `<ul class="ref-list">${after.invalidates
+              .map(
+                (entry) =>
+                  `<li><span class="ref-name">${escapeHtml(entry.key)}</span>` +
+                  `<span class="muted">${
+                    entry.refetches.length
+                      ? `→ ${entry.refetches.map((e) => escapeHtml(e)).join(', ')}`
+                      : '→ no GET endpoint matched this key'
+                  }</span></li>`,
+              )
+              .join('')}</ul>`
+          : '',
+      )}
+      ${block(
+        'The user sees',
+        after.notifies.length || after.errorStates.length
+          ? `<ul class="ref-list">${[
+              ...after.notifies.map(
+                (entry) => `<li><span class="ref-name">${escapeHtml(entry)}</span></li>`,
+              ),
+              ...after.errorStates.map(
+                (entry) =>
+                  `<li><span class="ref-name">${escapeHtml(entry)}</span>` +
+                  `<span class="muted">error state</span></li>`,
+              ),
+            ].join('')}</ul>`
+          : '',
+      )}
+    </div>
+    ${notesList(after.notes)}
+  </div>`;
+}

@@ -1,5 +1,5 @@
 /*
- * FlowLens dashboard.
+ * Flowslens dashboard.
  *
  * One stylesheet, no build step, no framework: the dashboard has to open
  * instantly from `flowlens serve` on any machine, including one with no network
@@ -21,6 +21,9 @@
   --network: #0891b2;
   --backend: #059669;
   --data: #d97706;
+  /* Deliberately the muted one: the flow ends here because Flowslens cannot
+     follow it, not because the step is more important than the rest. */
+  --external: #64748b;
 
   --danger: #dc2626;
   --warning: #d97706;
@@ -439,6 +442,9 @@ body {
 .node.layer-data {
   border-left-color: var(--data);
 }
+.node.layer-external {
+  border-left-color: var(--external);
+}
 
 .node.warn {
   border-color: var(--warning);
@@ -673,4 +679,959 @@ code {
 }
 .summary-row.effect-update .summary-key {
   color: var(--warning);
+}
+
+/* ---------------------------------------------------------------------------
+ * Tabs and their panels.
+ *
+ * The tab bar carries numbers, so it has to stay readable at a glance: one
+ * row, no wrapping labels, and the badge is the only thing that changes colour.
+ * A panel that shouts in three colours at once is a panel nobody reads.
+ * --------------------------------------------------------------------------- */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin: 0 0 16px;
+  overflow-x: auto;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.tab.active {
+  color: var(--text);
+  border-bottom-color: var(--frontend);
+  font-weight: 600;
+}
+
+.tab-badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.tab-badge.ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+}
+.tab-badge.warn {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+}
+.tab-badge.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+
+.panel[hidden] {
+  display: none;
+}
+
+/* The sentence that says what the panel answers. Always first, always plain. */
+.panel-intro {
+  margin: 0 0 14px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+  max-width: 68ch;
+}
+
+.panel h3 {
+  margin: 22px 0 8px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+/* Headline figures. */
+.stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.stat {
+  flex: 1 1 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.stat-value {
+  font-size: 20px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.meter {
+  display: block;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.meter-fill {
+  display: block;
+  height: 100%;
+  background: var(--frontend);
+}
+.meter-fill.ok {
+  background: var(--ok);
+}
+.meter-fill.warn {
+  background: var(--warning);
+}
+.meter-fill.danger {
+  background: var(--danger);
+}
+
+/* Timing table: the bar is the reading, the number is the confirmation. */
+.timing-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.timing-table th {
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.timing-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.timing-table .t-share,
+.timing-table .t-total,
+.timing-table .t-runs {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.t-kind {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.t-bar {
+  width: 42%;
+  min-width: 140px;
+}
+
+.t-bar .bar {
+  display: inline-block;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--frontend);
+  vertical-align: middle;
+}
+
+.bar-value {
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+
+.layer-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--border);
+  vertical-align: middle;
+}
+.layer-dot.layer-ui {
+  background: var(--ui);
+}
+.layer-dot.layer-frontend {
+  background: var(--frontend);
+}
+.layer-dot.layer-network {
+  background: var(--network);
+}
+.layer-dot.layer-backend {
+  background: var(--backend);
+}
+.layer-dot.layer-data {
+  background: var(--data);
+}
+.layer-dot.layer-external {
+  background: var(--external);
+}
+
+/* The verdict line: one sentence, colour-coded once. */
+.verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-bottom: 4px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.verdict-level {
+  font-weight: 650;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.verdict.level-low {
+  border-left-color: var(--ok);
+}
+.verdict.level-low .verdict-level {
+  color: var(--ok);
+}
+.verdict.level-medium {
+  border-left-color: var(--warning);
+}
+.verdict.level-medium .verdict-level {
+  color: var(--warning);
+}
+.verdict.level-high {
+  border-left-color: var(--danger);
+}
+.verdict.level-high .verdict-level {
+  color: var(--danger);
+}
+
+.shared-step {
+  padding: 11px 13px;
+  margin-bottom: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius);
+}
+
+.shared-step.level-high {
+  border-left-color: var(--danger);
+}
+.shared-step.level-low {
+  border-left-color: var(--border);
+}
+
+.shared-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.shared-file,
+.uncovered code,
+.test-head + .muted code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.shared-file {
+  margin: 5px 0;
+}
+
+.shared-flows {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.pill {
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pill:hover {
+  border-color: var(--frontend);
+}
+
+.pill.flat {
+  cursor: default;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.chip.small {
+  font-size: 11px;
+  padding: 1px 7px;
+}
+
+.chip.small.warn {
+  color: var(--warning);
+}
+.chip.small.danger {
+  color: var(--danger);
+}
+
+.contested {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 13px;
+  margin-bottom: 7px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.test-file {
+  padding: 11px 13px;
+  margin-bottom: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.test-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-family: var(--mono);
+}
+
+.case-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+.uncovered {
+  padding: 8px 13px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 12.5px;
+}
+
+/* "Nothing to show" is a result, not a failure — so it gets a real layout. */
+.empty-state {
+  padding: 20px 22px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  max-width: 70ch;
+}
+
+.empty-state h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+}
+
+.empty-state p {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.empty-state.ok {
+  border-color: color-mix(in srgb, var(--ok) 40%, var(--border));
+}
+.empty-state.danger {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+
+.steps-todo {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text-muted);
+}
+
+.notes {
+  margin: 18px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  max-width: 70ch;
+}
+
+.warn-list {
+  margin: 7px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--warning);
+}
+
+.plain {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.more {
+  margin-top: 16px;
+  font-size: 13px;
+}
+
+.more summary {
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.more summary:hover {
+  color: var(--text);
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--frontend);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.small {
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Contract, Changed, and the actionable bits.
+ * --------------------------------------------------------------------------- */
+
+/* A file you can open. Underlined on hover only — a panel of permanently
+   underlined paths reads as a wall of links. */
+.file-link {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--border);
+}
+
+.file-link:hover {
+  color: var(--frontend);
+  border-bottom-color: var(--frontend);
+}
+
+.file-link.tiny {
+  font-size: 10.5px;
+}
+
+.contract-check {
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.contract-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.contract-group {
+  margin-top: 10px;
+  padding-left: 11px;
+  border-left: 3px solid var(--border);
+}
+
+.contract-group.danger {
+  border-left-color: var(--danger);
+}
+.contract-group.warn {
+  border-left-color: var(--warning);
+}
+
+.contract-group h4 {
+  margin: 0 0 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* An affected feature in the diff view. The untested ones are the point. */
+.affected {
+  padding: 10px 13px;
+  margin-bottom: 7px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.affected.untested {
+  border-left-color: var(--danger);
+}
+
+.affected-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.chip.small.ok {
+  color: var(--ok);
+}
+
+.shared-step.infra {
+  border-left-color: var(--border);
+  background: var(--surface-2);
+}
+
+.shared-step[data-step-id] {
+  cursor: pointer;
+}
+
+.shared-step[data-step-id]:hover {
+  border-color: var(--frontend);
+}
+
+/* A command to copy, not to run. */
+.command {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+
+.command code {
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.button.small {
+  padding: 3px 9px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.more.why summary {
+  font-size: 12px;
+}
+
+ul.plain.small {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ---------------------------------------------------------------------------
+ * The APIs tab: one endpoint, everything about it.
+ *
+ * Laid out as labelled sections rather than one long table, because the
+ * questions are different in kind — "what is in the body" and "who else calls
+ * this" do not belong in the same columns.
+ * --------------------------------------------------------------------------- */
+
+.api-call {
+  margin-bottom: 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.api-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 14px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.method {
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: #fff;
+  background: var(--text-muted);
+}
+
+.method-get {
+  background: var(--network);
+}
+.method-post {
+  background: var(--ok);
+}
+.method-put,
+.method-patch {
+  background: var(--warning);
+}
+.method-delete {
+  background: var(--danger);
+}
+
+.api-path {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.api-sections {
+  display: grid;
+  /*
+   * Two columns at most. The previous auto-fit at 270px produced four cramped
+   * columns on a wide screen, which is where `updat/e` and a file path broken
+   * across five lines came from — more columns is not more information.
+   */
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 0;
+}
+
+/* Tables and path lists need the whole card. */
+.api-section.wide {
+  grid-column: 1 / -1;
+}
+
+.api-section {
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  min-width: 0;
+}
+
+.api-section h4 {
+  margin: 0 0 7px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.api-section p {
+  margin: 0 0 6px;
+}
+
+/* Key/value pairs that wrap sanely on a narrow column. */
+.kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 10px;
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.kv dt {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.kv dd {
+  margin: 0;
+  min-width: 0;
+  /* Break between words, never inside one: `updat` + `e` is not a word. */
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.kv-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.kv-table th {
+  text-align: left;
+  padding: 3px 8px 3px 0;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.kv-table td {
+  padding: 4px 10px 4px 0;
+  vertical-align: top;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.warn-text {
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chip.small.effect-read {
+  color: var(--network);
+}
+.chip.small.effect-create {
+  color: var(--ok);
+}
+.chip.small.effect-update,
+.chip.small.effect-write {
+  color: var(--warning);
+}
+.chip.small.effect-delete {
+  color: var(--danger);
+}
+
+.api-call .command {
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+}
+
+/* The request sequence: the shape of "what runs when", in one line. */
+.sequence {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12.5px;
+}
+
+.seq-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.seq-join {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.seq-n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--frontend);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.seq-n.big {
+  min-width: 21px;
+  height: 21px;
+  font-size: 12px;
+}
+
+/* Why this request happens when it does — the sentence, not the number. */
+.api-when {
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Readability inside an API card.
+ *
+ * Everything here exists to stop a narrow column from breaking words and paths
+ * across lines: a full-width table, a compact file reference, and columns that
+ * refuse to wrap where wrapping destroys the meaning.
+ * --------------------------------------------------------------------------- */
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.data-table th {
+  text-align: left;
+  padding: 4px 12px 5px 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.data-table td {
+  padding: 5px 12px 5px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* The one column allowed to be long: give it the slack and truncate it. */
+.data-table td:last-child,
+.data-table th:last-child {
+  padding-right: 0;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.data-table td.mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+/* `name  file.ts:12` rows that line the paths up instead of interleaving. */
+.ref-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+}
+
+.ref-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+
+.ref-list li:last-child {
+  border-bottom: 0;
+}
+
+.ref-name {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.file-ref {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* A chip is a label, not a paragraph. */
+.chip,
+.chip.small {
+  white-space: nowrap;
+}
+
+.kv dt {
+  padding-top: 1px;
+}
+
+/* The curl line scrolls rather than reflowing into a paragraph. */
+.command code {
+  white-space: pre;
+}
+
+/* The after-the-response block: same card shape, quieter header. */
+.api-call.aftermath .api-head {
+  background: transparent;
+}
+
+.api-call.aftermath .api-path {
+  font-family: var(--sans);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.api-call.aftermath .notes {
+  margin: 0;
+  padding: 10px 14px 12px 32px;
+}
+
+/* An error-path request is not part of the happy sequence. */
+.seq-item.on-failure .seq-n {
+  background: var(--danger);
+}
+
+.seq-join {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * End-to-end smoke test, run the way a user runs FlowLens.
+ * End-to-end smoke test, run the way a user runs Flowslens.
  *
  * The CLI is the product, so every command is executed as a real process
  * against the bundled example project. Unit tests can pass while the thing
@@ -8,7 +8,7 @@
  * dashboard's static assets and the exit codes all live outside them.
  *
  * Plain Node with no shell: the previous version of this was a bash block in
- * the CI workflow, which meant it could only ever prove FlowLens worked on
+ * the CI workflow, which meant it could only ever prove Flowslens worked on
  * Linux. This runs identically on Windows, macOS and Linux.
  */
 import { spawn, spawnSync } from 'node:child_process';
@@ -29,11 +29,11 @@ const TRACE = join(temp, 'trace.jsonl');
 let failures = 0;
 
 process.stdout.write(
-  `FlowLens smoke test — ${process.platform}, Node ${process.versions.node}\n\n`,
+  `Flowslens smoke test — ${process.platform}, Node ${process.versions.node}\n\n`,
 );
 
 // A trace left behind by an earlier run would change what `trace` reports.
-// FlowLens keeps artifacts in a machine-local cache, never in the project, so
+// Flowslens keeps artifacts in a machine-local cache, never in the project, so
 // there is nothing to clean up inside examples/crud. Assert that instead.
 assertNoArtifactsIn(PROJECT);
 
@@ -197,7 +197,7 @@ function indent(text) {
 /**
  * The read-only guarantee, checked end to end.
  *
- * FlowLens must leave the project it reads byte-for-byte unchanged, so no run of
+ * Flowslens must leave the project it reads byte-for-byte unchanged, so no run of
  * any command may leave an artifact behind. This is asserted before and after the
  * whole suite rather than unit-tested, because it is the property a developer
  * actually cares about.
@@ -206,7 +206,7 @@ function assertNoArtifactsIn(project) {
   const strays = ['.flowlens', 'graph.json', 'trace.jsonl', 'flowlens.config.json'].filter((name) =>
     existsSync(join(project, name)),
   );
-  const name = `no FlowLens artifacts inside ${basename(project)}`;
+  const name = `no Flowslens artifacts inside ${basename(project)}`;
   if (strays.length === 0) pass(name);
   else fail(name, `left behind: ${strays.join(', ')}`);
 }

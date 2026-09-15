@@ -21,7 +21,7 @@ function safeHome(): string | undefined {
 /**
  * Root of the machine-local artifact cache.
  *
- * FlowLens never writes into the project it reads. A scan has to leave the
+ * Flowslens never writes into the project it reads. A scan has to leave the
  * developer's repository byte-for-byte unchanged, so that pointing the tool at a
  * colleague's checkout, a mounted volume or a read-only container image is always
  * safe, and so that `git status` after a scan is empty. Artifacts therefore live
@@ -73,7 +73,7 @@ export function projectKey(root: string): string {
   return `${slug}-${hash}`;
 }
 
-/** Where FlowLens keeps its artifacts for a scanned project — never inside it. */
+/** Where Flowslens keeps its artifacts for a scanned project — never inside it. */
 export function outputDir(root: string): string {
   return join(cacheRoot(), projectKey(root));
 }

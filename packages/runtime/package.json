@@ -1,7 +1,7 @@
 {
   "name": "@flowslens/runtime",
   "version": "1.0.1",
-  "description": "Zero-dependency runtime tracer for FlowLens (HTTP + Mongoose + browser)",
+  "description": "Zero-dependency runtime tracer for Flowslens (HTTP + Mongoose + browser)",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -5,7 +5,7 @@ suite and as the demo target for the CLI.
 
 **These files are source only.** They are never executed, never installed, and
 nothing here opens a database connection. `@nestjs/*` and `mongoose` are
-imported for realism — FlowLens reads the syntax tree, so the imports never need
+imported for realism — Flowslens reads the syntax tree, so the imports never need
 to resolve.
 
 ## Layout

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Install FlowLens the way a stranger will, and check that it works.
+ * Install Flowslens the way a stranger will, and check that it works.
  *
  * Every other check in this repository runs against the working tree, where
  * `apps/dashboard/public` and `packages/runtime/dist` are simply *there*. That
@@ -47,7 +47,7 @@ const tarball = (name) => join(tarballs, `${scope}-${name}-${version}.tgz`);
 let failures = 0;
 
 process.stdout.write(
-  `FlowLens package test — ${process.platform}, Node ${process.versions.node}\n\n`,
+  `Flowslens package test — ${process.platform}, Node ${process.versions.node}\n\n`,
 );
 
 function ok(name) {

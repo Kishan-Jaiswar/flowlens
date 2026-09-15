@@ -1,6 +1,6 @@
 # @flowslens/core
 
-The graph engine behind [FlowLens](https://github.com/Kishan-Jaiswar/flowlens):
+The graph engine behind [Flowslens](https://github.com/Kishan-Jaiswar/flowlens):
 static analyzers, the flow resolver, field-level data lineage and impact
 analysis.
 
@@ -207,9 +207,17 @@ if (broken.length > 0) {
 ## What the graph contains
 
 Typed nodes — `ui-action`, `component`, `handler`, `state`, `hook`, `api-call`,
-`route`, `controller`, `service`, `method`, `dto`, `model`, `db-op`,
-`collection`, `field` — joined by typed edges (`triggers`, `requests`,
-`handled-by`, `queries`, `writes`, `flows-to`, …).
+`route`, `middleware`, `controller`, `service`, `method`, `dto`, `model`,
+`db-op`, `collection`, `external-effect`, `field` — joined by typed edges
+(`triggers`, `requests`, `handled-by`, `guarded-by`, `queries`, `writes`,
+`emits`, `flows-to`, …).
+
+`middleware` is a guard, interceptor, pipe or Express middleware: something that
+runs before the handler and can stop the request. `external-effect` is work that
+leaves the application — a queue, a cache, mail, object storage, a third-party
+API — and carries `unread: true`, because Flowslens cannot follow what happens
+on the other side and a chain that stops without saying so teaches a wrong
+mental model.
 
 `FlowGraph` has the traversal helpers: `graph.node(id)`, `graph.reachable(id,
 { direction, kinds })`, and JSON round-tripping.
@@ -230,19 +238,27 @@ scanned graph, which is what turns `static` into `confirmed`.
 
 ## Main exports
 
-| Export                                                     | Purpose                                   |
-| ---------------------------------------------------------- | ----------------------------------------- |
-| `scan(options)`                                            | Read a project and build the graph.       |
-| `FlowGraph`                                                | The graph, with traversal helpers.        |
-| `resolveFlows` / `resolveFlow`                             | One user action, end to end.              |
-| `whereIs`                                                  | Features running through a `file:line`.   |
-| `findNodes`                                                | Look a symbol up as graph nodes.          |
-| `analyzeImpact`                                            | "If I change this, what breaks?"          |
-| `findBrokenCalls`, `findSharedWrites`, `findDeadEndpoints` | Findings.                                 |
-| `linkDataLineage`                                          | `state → payload → DTO → collection`.     |
-| `renderFlowTree`, `renderFeatureDocument`                  | Text and markdown output.                 |
-| `mergeRuntimeTrace`                                        | Fold recorded spans into a scanned graph. |
-| `loadConfig`                                               | Read a `flowlens.config.json`.            |
+| Export                                                     | Purpose                                                               |
+| ---------------------------------------------------------- | --------------------------------------------------------------------- |
+| `scan(options)`                                            | Read a project and build the graph.                                   |
+| `FlowGraph`                                                | The graph, with traversal helpers.                                    |
+| `resolveFlows` / `resolveFlow`                             | One user action, end to end.                                          |
+| `whereIs`                                                  | Features running through a `file:line`.                               |
+| `findNodes`                                                | Look a symbol up as graph nodes.                                      |
+| `analyzeImpact`                                            | "If I change this, what breaks?"                                      |
+| `analyzeFlowImpact`                                        | The same question asked of a whole feature.                           |
+| `analyzeChanged`                                           | Which features a set of changed files reaches.                        |
+| `flowApis`                                                 | Every request one action makes, in sequence, with what happens after. |
+| `flowTiming`                                               | Where the time went, per step, from spans.                            |
+| `checkFlowContract`                                        | Payload keys against the DTO the route declares.                      |
+| `indexTests` / `testsForFlow`                              | Which tests cover a feature, and which files nothing covers.          |
+| `detectStack` / `stackSummary`                             | Frameworks and versions, from the manifests.                          |
+| `loadPrismaSchema`                                         | Prisma models and their table names.                                  |
+| `findBrokenCalls`, `findSharedWrites`, `findDeadEndpoints` | Findings.                                                             |
+| `linkDataLineage`                                          | `state → payload → DTO → collection`.                                 |
+| `renderFlowTree`, `renderFeatureDocument`                  | Text and markdown output.                                             |
+| `mergeRuntimeTrace`                                        | Fold recorded spans into a scanned graph.                             |
+| `loadConfig`                                               | Read a `flowlens.config.json`.                                        |
 
 Ships its own TypeScript types — no `@types` package needed.
 

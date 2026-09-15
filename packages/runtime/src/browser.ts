@@ -14,7 +14,7 @@ const TRACE_VERSION = 1;
 
 export interface BrowserTracerOptions {
   /**
-   * Where to POST spans. The FlowLens dev server exposes this endpoint;
+   * Where to POST spans. The Flowslens dev server exposes this endpoint;
    * defaults to the dashboard's collector.
    */
   endpoint?: string;

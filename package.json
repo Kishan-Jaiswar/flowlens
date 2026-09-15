@@ -2,7 +2,7 @@
   "name": "flowslens-monorepo",
   "version": "1.0.1",
   "private": true,
-  "description": "FlowLens - trace any user action from the UI to the database",
+  "description": "Flowslens - trace any user action from the UI to the database",
   "workspaces": [
     "packages/*"
   ],
@@ -27,14 +27,15 @@
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.5",
-    "@types/node": "^24.3.0",
-    "eslint": "^10.8.1",
-    "globals": "^17.11.0",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.5.1",
+    "eslint": "^10.10.0",
+    "globals": "^17.12.0",
+    "jsdom": "^30.0.1",
     "prettier": "^3.9.6",
-    "typescript": "^5.6.3",
-    "typescript-eslint": "^8.67.0",
-    "vitest": "^4.1.11"
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^5.0.0"
   },
   "engines": {
     "node": ">=18.18"

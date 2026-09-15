@@ -5,6 +5,7 @@ import { calleeName, callsIn, functionName, lineOf } from './ast.js';
 import { classifyFile, isFileSystemRoute, isServerCandidate } from './classify.js';
 import { HTTP_METHODS } from './http.js';
 import { linkDbOperations, type CollectionAliases } from './dbaccess.js';
+import type { PrismaSchema } from './prisma.js';
 import type { LoadedProject } from './project.js';
 
 /**
@@ -34,6 +35,7 @@ export function analyzeServerModules(
   loaded: LoadedProject,
   graph: FlowGraph,
   aliases?: CollectionAliases,
+  prisma?: PrismaSchema,
 ): number {
   /** Exported function name -> the nodes declaring it. */
   const declared = new Map<string, Array<{ id: string; file: string }>>();
@@ -70,7 +72,7 @@ export function analyzeServerModules(
 
   // ---- 2. Each module function's own queries -----------------------------
   for (const entry of bodies) {
-    linkDbOperations(entry.scope, entry.file, entry.rel, graph, entry.id, aliases);
+    linkDbOperations(entry.scope, entry.file, entry.rel, graph, entry.id, aliases, prisma);
   }
 
   // ---- 3. Join callers to those functions --------------------------------

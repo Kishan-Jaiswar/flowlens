@@ -13,7 +13,7 @@ request, a route, a controller, a service, a query, a collection.
 ## The engines
 
 ```text
-                    FlowLens
+                    Flowslens
                        │
        ┌───────────────┼────────────────┐
        ▼               ▼                ▼
@@ -30,15 +30,21 @@ request, a route, a controller, a service, a query, a collection.
 Five boxes above; the table splits two of them into the modules that do the
 work:
 
-| Engine             | Package                    | Job                                    |
-| ------------------ | -------------------------- | -------------------------------------- |
-| Static analyzer    | `core/analyzer`            | Read source, find the pieces           |
-| File classifier    | `core/analyzer/classify`   | Frontend vs server, decided by content |
-| File-system routes | `core/analyzer/fileroutes` | Next.js / Nuxt routing conventions     |
-| Runtime tracer     | `runtime`                  | Record what actually ran               |
-| Dependency engine  | `core/impact`              | Walk the graph backwards               |
-| Graph engine       | `core/graph`               | Hold it, traverse it, serialise it     |
-| Visualization      | `apps/dashboard`           | Make it legible                        |
+| Engine             | Package                            | Job                                      |
+| ------------------ | ---------------------------------- | ---------------------------------------- |
+| Static analyzer    | `core/analyzer`                    | Read source, find the pieces             |
+| File classifier    | `core/analyzer/classify`           | Frontend vs server, decided by content   |
+| File-system routes | `core/analyzer/fileroutes`         | Next.js / Nuxt routing conventions       |
+| Stack detector     | `core/analyzer/stack`              | Manifests only: what is this built with  |
+| Request sequencing | `core/analyzer/callsequence`       | Order, awaits, branches, effect deps     |
+| After-effects      | `core/analyzer/aftermath`          | Navigation, cache invalidation, error UI |
+| Test coverage      | `core/analyzer/testcoverage`       | Which tests import which files           |
+| Per-feature views  | `core/flow/{api,insight,contract}` | The dashboard's tabs                     |
+| Diff-scoped risk   | `core/impact/changed`              | What the working tree puts at risk       |
+| Runtime tracer     | `runtime`                          | Record what actually ran                 |
+| Dependency engine  | `core/impact`                      | Walk the graph backwards                 |
+| Graph engine       | `core/graph`                       | Hold it, traverse it, serialise it       |
+| Visualization      | `apps/dashboard`                   | Make it legible                          |
 
 ## Scan pipeline
 
@@ -48,15 +54,31 @@ design:
 1. **Frontend pass** (`analyzer/frontend.ts`) — components, user actions,
    handlers, state, hooks, outbound HTTP calls.
 2. **Backend pass** (`analyzer/backend.ts`) — controllers, routes, DTOs,
-   services, dependency injection, Mongoose models, database operations.
+   services, dependency injection, Mongoose and Prisma models, database
+   operations, the guards and middleware that run before a handler
+   (`analyzer/middleware.ts`), and the effects that leave the app entirely
+   (`analyzer/effects.ts`).
 3. **Seam pass** (`analyzer/seam.ts`) — join the two. Until this runs there are
    two disconnected islands.
-4. **Lineage pass** (`analyzer/seam.ts`) — follow individual fields:
+4. **Mount pass** (`analyzer/frontend.ts`) — a screen that loads its own data
+   gets a synthetic `loads` action, built from query hooks _and_ from requests
+   made inside a `useEffect`. Without the second half, a component that fetches
+   with a bare effect produced no action at all, so its whole data load was
+   missing from the flow list.
+5. **Lineage pass** (`analyzer/seam.ts`) — follow individual fields:
    `state.note → payload.note → CreateOrderDto.note →
 orders.note`.
 
-Passes 1 and 2 build islands; pass 3 is where the product exists. Pass 4 can
+Passes 1 and 2 build islands; pass 3 is where the product exists. Pass 5 can
 only run after 3, because a field's destination is on the far side of the seam.
+
+Two things are deliberately _not_ passes. Test coverage
+(`analyzer/testcoverage.ts`) is read with fs and regular expressions rather than
+through the analyzer, because test files are excluded from the graph by design —
+they would otherwise appear as components and routes in their own right — and
+the only facts needed are the titles and the imports. The stack report
+(`analyzer/stack.ts`) never parses anything either, so `flowlens stack` answers
+on a repository that has not been scanned, which is exactly when it is asked.
 
 ## Why AST, not regex
 
@@ -68,7 +90,7 @@ enclosure is the whole product.
 Deliberate choices in `analyzer/project.ts`:
 
 - **No tsconfig required.** Real repos have three tsconfigs, a JS-only frontend
-  and a broken build. FlowLens walks the file system itself.
+  and a broken build. Flowslens walks the file system itself.
 - **No type checking** (`noLib: true`). We need shapes, not types. This is the
   difference between a scan that takes half a second and one that takes a
   minute.
@@ -231,7 +253,7 @@ graph with utilities.
 
 ## Robustness
 
-FlowLens is pointed at whatever a developer has on disk, so the file walk assumes
+Flowslens is pointed at whatever a developer has on disk, so the file walk assumes
 nothing:
 
 - **Symlinks** are resolved with `realpath` and visited once. A `self -> .` or
@@ -321,14 +343,32 @@ reasons. A score nobody can audit is a score nobody trusts.
 Framework knowledge is isolated:
 
 ```text
-analyzer/frontend.ts   React/Next + HTTP clients
-analyzer/backend.ts    NestJS decorators, Express routers, DI
-analyzer/mongo.ts      Mongoose operations, collection naming
+analyzer/frontend.ts     React/Next + HTTP clients
+analyzer/backend.ts      NestJS decorators, Express routers, DI
+analyzer/mongo.ts        Mongoose operations, collection naming
+analyzer/prisma.ts       Prisma schema, client operations, table naming
+analyzer/middleware.ts   Nest guards/interceptors/pipes, Express middleware
+analyzer/effects.ts      Queues, cache, mail, storage, third-party HTTP
+analyzer/callsequence.ts await, .then, Promise.all, if/else, useEffect deps
+analyzer/aftermath.ts    router.push, invalidateQueries, toasts, error state
+analyzer/testcoverage.ts Test files -> the source files they import
+analyzer/stack.ts        Manifests -> frameworks, versions, what is traced
 ```
 
-Adding Prisma means a new `analyzer/prisma.ts` emitting the same `db-op` and
-`collection` nodes. Nothing downstream — flows, impact, lineage, dashboard —
-changes.
+Two of those are worth separating in your head, because they are read at
+different grains. `callsequence.ts` records facts about a _call site_ and they
+are stored on the `requests` edge — one `api-call` node stands for an endpoint
+and may have many sites, while "which request runs first" is a fact about a
+site. `aftermath.ts` reads a _handler or hook body_, because that is where the
+consequences of a response are written.
+
+Prisma is the worked example: `analyzer/prisma.ts` emits the same `db-op` and
+`collection` nodes as Mongoose, so nothing downstream — flows, impact, lineage,
+dashboard — needed to change. The one thing it does differently is refuse to
+derive the physical name: Mongoose pluralises a model, Prisma takes `@@map`
+literally, and applying the wrong rule names a table that does not exist.
+
+Adding TypeORM or Sequelize is the same shape of work.
 
 ## Known limits
 

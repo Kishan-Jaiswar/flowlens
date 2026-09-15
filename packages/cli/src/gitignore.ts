@@ -1,5 +1,5 @@
 /**
- * Keeping FlowLens artifacts out of `git status`.
+ * Keeping Flowslens artifacts out of `git status`.
  *
  * By default there is nothing to do: the graph and the trace live in the OS
  * cache, never in the project (see paths.ts). But `-g graph.json`,
@@ -7,9 +7,24 @@
  * file inside someone's repository, and then it shows up as an untracked change
  * on every branch until they remember to delete it.
  *
- * FlowLens will not edit a repository it was only asked to read, so the default
- * is a one-line note pointing at `flowlens init --gitignore`. Projects that want
- * it done for them opt in once, in their config, with `"gitignore": true`.
+ * Flowslens keeps those out of `git status` by default, because the alternative
+ * puts the cost on the wrong person: a developer who integrated a *read-only*
+ * dev tool should never have to discard its output before committing their own
+ * work, on every branch, forever.
+ *
+ * The scope is deliberately narrow, and that is what makes editing the file
+ * defensible:
+ *
+ *   - Only files Flowslens itself writes are ever added, and only when they
+ *     land inside a work tree. In the default setup they live in the OS cache,
+ *     so there is nothing to add and `.gitignore` is never touched at all.
+ *   - Only Flowslens's own marked block is rewritten; every line the developer
+ *     wrote is preserved byte for byte.
+ *   - `flowlens.config.json` is *not* ignored. It is the project's own
+ *     configuration, meant to be committed so the whole team gets the same
+ *     graph — ignoring it would hide a file someone chose to add.
+ *   - `--no-gitignore` (or `"gitignore": false`) restores the old behaviour:
+ *     say what would show up in `git status`, change nothing.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -17,12 +32,30 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { color, glyph } from './ui.js';
 
-const BEGIN = '# flowlens:begin (managed by FlowLens)';
+const BEGIN = '# flowlens:begin (managed by Flowslens)';
 const END = '# flowlens:end';
+
+/**
+ * Find the managed block by its stable token, not by the whole marker line.
+ *
+ * The parenthetical says "managed by Flowslens" today and said "managed by
+ * FlowLens" in 1.0. An exact-string match would stop recognising the older
+ * spelling, so a project that had already opted in would get a *second* block
+ * appended and keep the orphaned first one forever. The `# flowlens:begin`
+ * token is the part that was never meant to change, so that is what is matched.
+ */
+function findMarker(lines: readonly string[], marker: string, from = 0): number {
+  for (let index = from; index < lines.length; index += 1) {
+    if (lines[index]?.trim().startsWith(marker)) return index;
+  }
+  return -1;
+}
+
+const BEGIN_TOKEN = '# flowlens:begin';
 
 /** A generated file that lives inside a git work tree. */
 export interface Artifact {
-  /** Absolute path of the file FlowLens writes. */
+  /** Absolute path of the file Flowslens writes. */
   file: string;
   /** Absolute path of the work tree containing it. */
   gitRoot: string;
@@ -87,7 +120,7 @@ export function isTracked(gitRoot: string, file: string): Answer {
 }
 
 /**
- * Describe a path FlowLens writes, if it is somewhere git would notice it.
+ * Describe a path Flowslens writes, if it is somewhere git would notice it.
  *
  * Returns nothing for the common case — a path in the OS cache, outside any
  * repository — so callers can treat "no artifact" as "nothing to say".
@@ -125,7 +158,7 @@ export function unignored(files: string[]): Artifact[] {
 /**
  * Add entries to the managed block of a work tree's `.gitignore`.
  *
- * Only FlowLens's own block is ever rewritten: everything the developer wrote
+ * Only Flowslens's own block is ever rewritten: everything the developer wrote
  * is preserved byte for byte, and running this twice changes nothing. Pass
  * `dryRun` to compute the result without writing.
  */
@@ -157,7 +190,18 @@ export function addToGitignore(
     added.push(entry);
   }
 
-  if (added.length > 0 && options.dryRun !== true) {
+  /**
+   * Also rewrite when only the marker is out of date.
+   *
+   * A project configured by 1.0 carries `managed by FlowLens`. Without this it
+   * would keep that spelling forever, because there is nothing left to add —
+   * and the next person to read the file would reasonably wonder which tool
+   * owns the block. Asking with `--gitignore` is asking, so bringing the marker
+   * forward is in scope; nothing else in the file is touched.
+   */
+  const markerOutdated = original !== '' && block.length > 0 && !original.includes(BEGIN);
+
+  if ((added.length > 0 || markerOutdated) && options.dryRun !== true) {
     writeFileSync(path, render(original, [...block, ...added]), 'utf8');
   }
   return { path, added, skipped, tracked };
@@ -166,9 +210,9 @@ export function addToGitignore(
 /** Entries currently inside the managed block, in order. */
 export function existingBlock(contents: string): string[] {
   const lines = contents.split('\n');
-  const start = lines.indexOf(BEGIN);
+  const start = findMarker(lines, BEGIN_TOKEN);
   if (start === -1) return [];
-  const end = lines.indexOf(END, start + 1);
+  const end = findMarker(lines, END, start + 1);
   if (end === -1) return [];
   return lines
     .slice(start + 1, end)
@@ -180,8 +224,8 @@ export function existingBlock(contents: string): string[] {
 function render(original: string, entries: string[]): string {
   const block = [BEGIN, ...entries, END];
   const lines = original === '' ? [] : original.split('\n');
-  const start = lines.indexOf(BEGIN);
-  const end = start === -1 ? -1 : lines.indexOf(END, start + 1);
+  const start = findMarker(lines, BEGIN_TOKEN);
+  const end = start === -1 ? -1 : findMarker(lines, END, start + 1);
 
   if (start !== -1 && end !== -1) {
     const next = [...lines.slice(0, start), ...block, ...lines.slice(end + 1)];
@@ -201,7 +245,7 @@ function ensureFinalNewline(text: string): string {
 /**
  * A repo-relative path as a gitignore pattern.
  *
- * Anchored with a leading `/` so it matches the one file FlowLens actually
+ * Anchored with a leading `/` so it matches the one file Flowslens actually
  * writes: an unanchored `graph.json` would also hide a `src/graph.json` the
  * developer wrote themselves. `/` is used on every platform — gitignore has no
  * Windows spelling — and the characters git treats as syntax are escaped, so a
@@ -236,7 +280,12 @@ function dedupe(values: string[]): string[] {
 }
 
 export interface GuardOptions {
-  /** `"gitignore": true` in the project config — update the file, do not ask. */
+  /**
+   * Whether to update `.gitignore` rather than just report.
+   *
+   * Defaults to true: see the note at the top of this file. `false` is the
+   * explicit opt-out, from `--no-gitignore` or `"gitignore": false`.
+   */
   auto?: boolean;
   /** The `-g` value the user typed, echoed back in the suggested command. */
   graphFlag?: string;
@@ -255,7 +304,7 @@ export function guardArtifacts(files: string[], options: GuardOptions = {}): str
   const artifacts = unignored(files);
   if (artifacts.length === 0) return '';
 
-  if (options.auto !== true) {
+  if (options.auto === false) {
     const lines = artifacts.map(
       (artifact) =>
         `${color.yellow(glyph.warn)} ${color.bold(relative(artifact.gitRoot, artifact.file))} ` +
@@ -272,8 +321,18 @@ export function guardArtifacts(files: string[], options: GuardOptions = {}): str
       group.map((artifact) => artifact.entry),
     );
     for (const entry of result.added) {
+      /**
+       * Said out loud, not hidden.
+       *
+       * Flowslens edited a file in someone's repository. That is the right
+       * default, but it is still a write, and a tool that writes silently is a
+       * tool you stop trusting the moment you notice.
+       */
       lines.push(
-        color.gray(`gitignore: added ${entry} to ${relative(process.cwd(), result.path)}`),
+        color.gray(
+          `gitignore: added ${entry} to ${relative(process.cwd(), result.path)} ` +
+            `— Flowslens output stays out of your commits`,
+        ),
       );
     }
     for (const entry of result.tracked) {

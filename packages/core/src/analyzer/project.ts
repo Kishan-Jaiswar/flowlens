@@ -5,7 +5,7 @@ import { Project, ScriptTarget, type SourceFile } from 'ts-morph';
 /**
  * Directories never worth reading.
  *
- * Deliberately broad: FlowLens gets pointed at whatever a developer has on
+ * Deliberately broad: Flowslens gets pointed at whatever a developer has on
  * disk, and walking a `.venv` or a `target/` directory is pure cost. Missing an
  * entry only slows a scan down; a wrong entry hides real code, so anything
  * ambiguous is left out.
@@ -78,7 +78,7 @@ const SKIP_FILE = [
 const TEST_PATTERN = /\.(test|spec|stories|cy|e2e)\.[cm]?[jt]sx?$/;
 
 /**
- * Extensions FlowLens can see but not yet read.
+ * Extensions Flowslens can see but not yet read.
  *
  * Counted so a scan of a Vue or Django project can say "found 40 .vue files,
  * which are not parsed yet" instead of the misleading "no source files found".
@@ -116,7 +116,7 @@ export interface ScanOptions {
    *
    * A frontend and backend often live in sibling repositories
    * (`~/code/app-web`, `~/code/app-api`). The seam between them is the whole
-   * point of FlowLens, so both must be in one graph. Files are labelled by
+   * point of Flowslens, so both must be in one graph. Files are labelled by
    * their root (`app-web/pages/...`) to keep node ids unique and readable.
    */
   extraRoots?: string[];
@@ -147,7 +147,7 @@ export interface LoadedProject {
  * Load one or more directories into ts-morph without requiring a tsconfig.
  *
  * Real projects are messy: a monorepo may hold three tsconfigs, a JS-only
- * frontend and a Nest backend. FlowLens only needs the syntax tree, so we skip
+ * frontend and a Nest backend. Flowslens only needs the syntax tree, so we skip
  * type-checking setup entirely and walk the file system ourselves. That keeps a
  * scan fast and, more importantly, keeps it from failing on a project whose
  * `tsc` build is currently broken.
@@ -156,14 +156,14 @@ export function loadProject(options: ScanOptions): LoadedProject {
   const warnings: string[] = [];
   const primary = resolve(options.root);
   if (!existsSync(primary)) {
-    throw new Error(`FlowLens: path does not exist: ${primary}`);
+    throw new Error(`Flowslens: path does not exist: ${primary}`);
   }
 
   const extraRoots: string[] = [];
   for (const candidate of options.extraRoots ?? []) {
     const path = resolve(candidate);
     if (!existsSync(path)) {
-      throw new Error(`FlowLens: path does not exist: ${path}`);
+      throw new Error(`Flowslens: path does not exist: ${path}`);
     }
     if (path === primary || extraRoots.includes(path)) continue;
     extraRoots.push(path);
@@ -307,7 +307,7 @@ function collectSourceFiles(target: string, options: CollectOptions): string[] {
     return found;
   }
 
-  // Pointing FlowLens at a single file should work.
+  // Pointing Flowslens at a single file should work.
   if (rootStats.isFile()) {
     if (isSourceFile(basename(target), options.includeTests)) found.push(target);
     return found;

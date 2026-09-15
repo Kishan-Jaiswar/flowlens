@@ -1,7 +1,7 @@
 #!/bin/sh
-# FlowLens launcher for macOS and Linux.
+# Flowslens launcher for macOS and Linux.
 #
-# Run FlowLens straight from a checkout — no install step, no global package:
+# Run Flowslens straight from a checkout — no install step, no global package:
 #
 #   ./flowlens init ~/code/my-app
 #   ./flowlens scan ~/code/my-app
@@ -11,7 +11,7 @@
 set -e
 
 if ! command -v node >/dev/null 2>&1; then
-  echo "FlowLens needs Node.js (18.18 or newer). Install it from https://nodejs.org" >&2
+  echo "Flowslens needs Node.js (18.18 or newer). Install it from https://nodejs.org" >&2
   exit 1
 fi
 

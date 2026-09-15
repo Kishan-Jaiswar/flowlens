@@ -1,5 +1,5 @@
 /**
- * The FlowLens graph vocabulary.
+ * The Flowslens graph vocabulary.
  *
  * The unit of the graph is not a *file*, it is a step in a *feature execution*:
  * a user action, the handler it triggers, the state it reads, the API it calls,
@@ -35,6 +35,29 @@ export type NodeKind =
   | 'db-op'
   /** A request validation object (DTO). */
   | 'dto'
+  /**
+   * Something that runs *before* the handler: a guard, middleware, interceptor
+   * or validation pipe.
+   *
+   * Its own kind rather than a `method` because the question it answers is
+   * different. "What happened when I clicked this" includes the auth check that
+   * rejected it and the pipe that reshaped the body — and those are the steps
+   * that surprise you when you change a route, precisely because they are
+   * declared somewhere other than the handler.
+   */
+  | 'middleware'
+  /**
+   * An effect that leaves the application: a third-party HTTP call, a queued
+   * job, a socket emit, a cache write, an email.
+   *
+   * Modelled even though Flowslens cannot read what happens on the other side,
+   * because the alternative is worse. Without it a service that charges a card
+   * or enqueues a job produces a flow that simply stops, and a graph that stops
+   * without saying so teaches a wrong mental model — the developer concludes
+   * nothing else happens. A named terminal node makes the edge of the map
+   * visible.
+   */
+  | 'external-effect'
   /** A field on a model, DTO or payload — used for data lineage. */
   | 'field';
 
@@ -65,11 +88,15 @@ export type EdgeKind =
   | 'defines'
   /** route -> dto, dto -> field */
   | 'validates'
+  /** route -> middleware: the guards and pipes that run before the handler */
+  | 'guarded-by'
+  /** method|middleware -> external-effect: work that leaves the app */
+  | 'emits'
   /** field -> field: payload.name -> dto.name -> customers.name */
   | 'flows-to';
 
 /** Which side of the app a node lives on. Drives the dashboard columns. */
-export type Layer = 'ui' | 'frontend' | 'network' | 'backend' | 'data';
+export type Layer = 'ui' | 'frontend' | 'network' | 'backend' | 'data' | 'external';
 
 export const LAYER_OF: Record<NodeKind, Layer> = {
   'ui-action': 'ui',
@@ -79,6 +106,8 @@ export const LAYER_OF: Record<NodeKind, Layer> = {
   hook: 'frontend',
   'api-call': 'network',
   route: 'network',
+  // A guard runs on the wire, before any controller has been reached.
+  middleware: 'network',
   controller: 'backend',
   service: 'backend',
   method: 'backend',
@@ -86,6 +115,15 @@ export const LAYER_OF: Record<NodeKind, Layer> = {
   model: 'data',
   'db-op': 'data',
   collection: 'data',
+  /**
+   * Its own layer, not the data layer.
+   *
+   * A payment provider listed under "DATABASE" is a wrong answer to the
+   * question the column heading asks. The flow really does leave the
+   * application at this point, and that deserves to be visible as its own step
+   * in the chain rather than filed under storage it never touched.
+   */
+  'external-effect': 'external',
   field: 'data',
 };
 

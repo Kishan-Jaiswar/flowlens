@@ -7,7 +7,7 @@ packages/cli/dashboard/
 packages/cli/runtime/
 packages/*/LICENSE
 
-# FlowLens output, including recorded traces from a local app.
+# Flowslens output, including recorded traces from a local app.
 .flowlens/
 
 # Editors / OS
@@ -15,3 +15,7 @@ packages/*/LICENSE
 .idea/
 .vscode/
 *.log
+
+# flowlens:begin (managed by Flowslens)
+/graph.json
+# flowlens:end

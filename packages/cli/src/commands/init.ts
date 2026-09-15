@@ -25,7 +25,7 @@ export interface InitArgs {
    */
   print?: boolean;
   /**
-   * Also add the artifacts FlowLens writes to `.gitignore`.
+   * Also add the artifacts Flowslens writes to `.gitignore`.
    *
    * Off by default, because on a normal project there is nothing to add: the
    * graph and the trace live in the OS cache. It matters when `-g`,
@@ -126,7 +126,7 @@ export function runInit(args: InitArgs): number {
   }
 
   process.stdout.write(
-    `\n${color.bold('FlowLens')} is set up for ${color.cyan(basename(root) || root)}\n`,
+    `\n${color.bold('Flowslens')} is set up for ${color.cyan(basename(root) || root)}\n`,
   );
   process.stdout.write(heading('What it found') + '\n');
   for (const reason of detection.reasons) {
@@ -140,7 +140,7 @@ export function runInit(args: InitArgs): number {
   if (ignored) process.stdout.write(describeIgnore(ignored));
 
   process.stdout.write(
-    `\n${color.gray('wrote:')}  ${displayPath(target)} ${color.gray('(the only file FlowLens creates in your project)')}\n` +
+    `\n${color.gray('wrote:')}  ${displayPath(target)} ${color.gray('(the only file Flowslens creates in your project)')}\n` +
       `${color.gray('next:')}   flowlens scan\n` +
       `${color.gray('   or:')}   flowlens serve\n`,
   );
@@ -150,7 +150,7 @@ export function runInit(args: InitArgs): number {
 /**
  * `--gitignore`: ignore the artifacts this project will actually produce.
  *
- * Only the paths FlowLens would really write are considered — the graph, the
+ * Only the paths Flowslens would really write are considered — the graph, the
  * trace, and whatever `$FLOWLENS_TRACE` points at — and only if they land
  * inside a work tree. On a default setup they land in the OS cache, so the
  * honest answer is "nothing to do" rather than a block of speculative patterns
@@ -192,7 +192,7 @@ function describeIgnore(summaries: IgnoreSummary[]): string {
   let out = heading('Ignored') + '\n';
   if (added.length === 0) {
     out += color.gray(
-      '  nothing to ignore — FlowLens writes the graph and trace to your OS cache,\n' +
+      '  nothing to ignore — Flowslens writes the graph and trace to your OS cache,\n' +
         '  not into the project. Pass -g or --trace if you keep them in the repo.\n',
     );
   } else {
@@ -300,7 +300,7 @@ function findHalvesInside(root: string): string[] {
  * Sibling repositories that look like the other half of this application.
  *
  * `~/code/shop-web` and `~/code/shop-api` is an extremely common layout, and the
- * seam between the two is the whole point of FlowLens — so a graph built from
+ * seam between the two is the whole point of Flowslens — so a graph built from
  * only one of them is missing the interesting part.
  */
 export function findSiblingRepositories(root: string): string[] {
@@ -339,7 +339,7 @@ export function findSiblingRepositories(root: string): string[] {
  * Read a couple of conventions out of the code so the config is useful rather
  * than empty.
  *
- * Only patterns FlowLens can see in the source are recorded — a guess that is
+ * Only patterns Flowslens can see in the source are recorded — a guess that is
  * wrong is worse than no entry at all, because it silently changes every scan.
  */
 function inferConventions(

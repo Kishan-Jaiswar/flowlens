@@ -4,7 +4,7 @@ import { Model } from 'mongoose';
 import { AuditLog, AuditLogDocument } from './audit-log.schema';
 
 /**
- * Written to by several services — FlowLens flags `auditlogs` as a shared
+ * Written to by several services — Flowslens flags `auditlogs` as a shared
  * write, which is exactly the kind of coupling that surprises people.
  */
 @Injectable()

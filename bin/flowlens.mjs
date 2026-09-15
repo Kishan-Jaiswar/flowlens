@@ -2,7 +2,7 @@
 /**
  * The launcher: `flowlens` from a checkout, with no setup step.
  *
- * FlowLens is meant to be copied onto a machine — a laptop, a USB stick, a
+ * Flowslens is meant to be copied onto a machine — a laptop, a USB stick, a
  * fresh clone — pointed at whatever project is there, and used. That means the
  * first command someone types must work, not fail with "cannot find
  * ../dist/index.js" because they have not run `npm install && npm run build`
@@ -13,7 +13,7 @@
  *   - then hands over to the real CLI
  *
  * Everything here is plain Node with no dependencies, because it has to run
- * before the dependencies exist. It is also the only part of FlowLens that
+ * before the dependencies exist. It is also the only part of Flowslens that
  * shells out, and it only ever shells out to npm.
  *
  * The published `@flowslens/cli` package ships a built `dist` and uses
@@ -50,13 +50,13 @@ if (!existsSync(join(ROOT, 'node_modules'))) {
   if (!npm('npm install --no-fund --no-audit')) {
     fail(
       'npm install failed.\n' +
-        'FlowLens needs its dependencies once, then never again. Check the output above.',
+        'Flowslens needs its dependencies once, then never again. Check the output above.',
     );
   }
 }
 
 if (needsBuild()) {
-  note('Building FlowLens…');
+  note('Building Flowslens…');
   if (!npm('npm run build')) {
     fail('Build failed. Check the output above.');
   }
@@ -67,7 +67,7 @@ if (needsBuild()) {
 // exit-code and event-loop behaviour (`serve` stays alive), and reproducing that
 // here would be a second copy of the same rule.
 const child = spawn(process.execPath, [CLI_BIN, ...argv], { stdio: 'inherit' });
-child.on('error', (error) => fail(`could not start FlowLens: ${error.message}`));
+child.on('error', (error) => fail(`could not start Flowslens: ${error.message}`));
 child.on('exit', (code, signal) => {
   if (signal) {
     // Exit the way the child did, so a Ctrl+C still looks like a Ctrl+C.
@@ -161,6 +161,6 @@ function note(message) {
 }
 
 function fail(message) {
-  process.stderr.write(`\nFlowLens: ${message}\n`);
+  process.stderr.write(`\nFlowslens: ${message}\n`);
   process.exit(1);
 }

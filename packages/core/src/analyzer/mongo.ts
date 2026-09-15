@@ -38,7 +38,7 @@ export const DB_EFFECT_LABEL: Record<DbEffect, string> = {
 export const DB_EFFECT_ORDER: readonly DbEffect[] = ['read', 'create', 'update', 'delete', 'write'];
 
 /**
- * Mongoose/Mongo operations FlowLens recognises, and what each does. Anything
+ * Mongoose/Mongo operations Flowslens recognises, and what each does. Anything
  * not listed is ignored, which keeps `this.logger.log()` out of the data layer
  * of the graph.
  *

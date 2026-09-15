@@ -4,7 +4,7 @@ import { TRACE_VERSION, getSink, type TraceSink } from './sink.js';
 /**
  * Duck-typed Mongoose surface.
  *
- * Typing against `mongoose` would make this package depend on it. FlowLens is a
+ * Typing against `mongoose` would make this package depend on it. Flowslens is a
  * dev tool — it should not pull a database driver into anyone's dependency tree,
  * and it must not be the thing that decides which Mongoose version you run.
  */
@@ -53,8 +53,8 @@ export interface MongoosePluginOptions {
 /**
  * A Mongoose plugin that records one span per database operation.
  *
- * Register it globally, once, in your app's bootstrap — never inside FlowLens
- * itself. FlowLens does not open a connection; it only reads spans your own
+ * Register it globally, once, in your app's bootstrap — never inside Flowslens
+ * itself. Flowslens does not open a connection; it only reads spans your own
  * app chose to emit.
  *
  *   mongoose.plugin(flowlensMongoose());

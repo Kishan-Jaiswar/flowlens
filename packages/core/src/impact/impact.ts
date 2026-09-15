@@ -56,7 +56,20 @@ export interface ImpactReport {
  * resolver goes forward from a click to a collection, this goes the other way:
  * from one function back out to every feature that depends on it.
  */
-export function analyzeImpact(graph: FlowGraph, targetId: string): ImpactReport | undefined {
+export function analyzeImpact(
+  graph: FlowGraph,
+  targetId: string,
+  options: {
+    /**
+     * Pre-resolved flows, so a caller asking about many nodes resolves once.
+     *
+     * Without this, asking the same question of every step in a feature
+     * re-resolved every flow in the project per step — quadratic on the most
+     * interesting projects, which are the big ones.
+     */
+    flows?: FeatureFlow[];
+  } = {},
+): ImpactReport | undefined {
   const target = graph.node(targetId);
   if (!target) return undefined;
 
@@ -78,7 +91,7 @@ export function analyzeImpact(graph: FlowGraph, targetId: string): ImpactReport 
   dependents.sort((a, b) => a.distance - b.distance || a.label.localeCompare(b.label));
 
   // Which user-visible features run through this node?
-  const flows = resolveFlows(graph, { includeLocalOnly: true });
+  const flows = options.flows ?? resolveFlows(graph, { includeLocalOnly: true });
   const affectedFlows = flows
     .filter((flow) => flow.steps.some((step) => step.nodeId === targetId))
     .map((flow) => ({

@@ -4,7 +4,7 @@ import { useEffect } from 'react';
  * How you wire the browser tracer into a Next.js app.
  *
  * It patches `fetch`/`XMLHttpRequest` in development only, so that a click and
- * the requests it causes share one trace id — which is what lets FlowLens say
+ * the requests it causes share one trace id — which is what lets Flowslens say
  * "this button caused these three queries" rather than guessing from source.
  */
 export default function App({

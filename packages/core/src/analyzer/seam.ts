@@ -13,7 +13,7 @@ export interface SeamResult {
 /**
  * Join the two halves of the graph.
  *
- * Until this runs, FlowLens holds two disconnected islands: a frontend that
+ * Until this runs, Flowslens holds two disconnected islands: a frontend that
  * makes requests and a backend that answers them. This is where
  * `POST /api/customers` in a React handler becomes `CustomersController.create`.
  *

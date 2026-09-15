@@ -1,5 +1,5 @@
 name: Bug report
-description: FlowLens analyzed something incorrectly, or crashed
+description: Flowslens analyzed something incorrectly, or crashed
 labels: [bug]
 body:
   - type: markdown
@@ -42,7 +42,7 @@ body:
   - type: input
     id: versions
     attributes:
-      label: FlowLens and Node versions
+      label: Flowslens and Node versions
       placeholder: flowlens 0.1.0, node 22.11.0
     validations:
       required: true

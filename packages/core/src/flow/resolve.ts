@@ -15,9 +15,19 @@ export const EXECUTION_EDGES: readonly EdgeKind[] = [
   'calls',
   'requests',
   'handled-by',
+  /**
+   * The guard runs before the handler, so it is execution, not annotation.
+   *
+   * Listed here rather than hung off the route as a detail because a reader
+   * scanning the path for "why did this 403" needs to meet it in sequence — and
+   * because a step that can stop the flow is the opposite of a footnote.
+   */
+  'guarded-by',
   'queries',
   'reads',
   'writes',
+  /** The last step of a flow that finishes in somebody else's system. */
+  'emits',
 ];
 
 const LAYER_ORDER: Record<Layer, number> = {
@@ -26,6 +36,8 @@ const LAYER_ORDER: Record<Layer, number> = {
   network: 2,
   backend: 3,
   data: 4,
+  // Last: whatever else happened, it happened after this app's own work.
+  external: 5,
 };
 
 export interface FlowStep {
