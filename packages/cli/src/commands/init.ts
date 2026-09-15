@@ -96,7 +96,19 @@ export function runInit(args: InitArgs): number {
   }
 
   const ignored =
-    args.gitignore === true ? updateGitignore(root, args, args.print === true) : undefined;
+    /**
+     * The ignore step runs unless it is refused, not only when it is asked for.
+     *
+     * `init` is the command that *writes* `flowlens.config.json` into someone's
+     * repository, so leaving it out of `.gitignore` guarantees the exact chore
+     * this is meant to remove: an untracked file in `git status` on every
+     * branch, forever, that the developer has to step around on every commit.
+     *
+     * The flag still selects the *mode* above — asking for it is what turns
+     * "this config already exists" from an error into the one job left to do —
+     * but the step itself is the default.
+     */
+    args.gitignore === false ? undefined : updateGitignore(root, args, args.print === true);
 
   if (configOnlyBlocked) {
     return reportIgnoreOnly(existing, ignored ?? [], args);
@@ -157,7 +169,15 @@ export function runInit(args: InitArgs): number {
  * that would sit in the repository forever matching nothing.
  */
 function updateGitignore(root: string, args: InitArgs, dryRun: boolean): IgnoreSummary[] {
-  const candidates = artifactPaths(graphPath(root, args.graph), tracePath(root, args.trace));
+  /**
+   * The config is named explicitly, not looked up.
+   *
+   * `init` ignores it a moment before writing it, so an existence check here
+   * would always miss on the run that matters.
+   */
+  const candidates = artifactPaths(graphPath(root, args.graph), tracePath(root, args.trace), [
+    join(root, CONFIG_FILENAMES[0]),
+  ]);
   const summaries: IgnoreSummary[] = [];
   for (const [gitRoot, group] of byRoot(candidates.map(inspect).filter(isArtifact))) {
     const result = addToGitignore(

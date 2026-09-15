@@ -194,12 +194,42 @@ describe('flowlens scan', () => {
     );
   });
 
-  it('never ignores the config file, which is the project"s own to commit', () => {
-    const root = repository('config-committable');
-    cli(['init', root, '--gitignore', '-g', 'graph.json'], root);
-    const contents = gitignoreOf(root);
+  /**
+   * The config is the one file Flowslens writes into a project on a default
+   * setup, so leaving it unignored guaranteed the chore this feature exists to
+   * remove: `?? flowlens.config.json` in `git status` on every branch forever.
+   */
+  it('ignores the config it writes, so init leaves a clean git status', () => {
+    const root = repository('config-ignored');
+    const { status } = cli(['init', root], root);
+    expect(status).toBe(0);
+    expect(existingBlock(gitignoreOf(root))).toContain('/flowlens.config.json');
+    expect(git(root, ['check-ignore', 'flowlens.config.json']).trim()).toBe('flowlens.config.json');
+    // The artifact is gone from git's view; only the ignore rule remains.
+    expect(git(root, ['status', '--porcelain', '--untracked-files=all'])).not.toContain(
+      'flowlens.config.json',
+    );
+  });
+
+  it('leaves a committed config alone, because ignoring it would do nothing', () => {
+    const root = repository('config-committed');
+    writeFileSync(join(root, 'flowlens.config.json'), '{"roots":["."]}\n', 'utf8');
+    git(root, ['add', '-A']);
+    git(root, ['commit', '-qm', 'shared config']);
+
+    const { status } = cli(['scan', root], root);
+    expect(status).toBe(0);
+    // A pattern for a tracked file changes nothing, and would read as a fix.
+    const contents = existsSync(join(root, '.gitignore')) ? gitignoreOf(root) : '';
     expect(contents).not.toContain('flowlens.config.json');
-    expect(git(root, ['check-ignore', 'flowlens.config.json'])).toBe('');
+  });
+
+  it('adds no pattern for a config nobody created', () => {
+    const root = repository('config-absent');
+    const { status } = cli(['scan', root, '-g', 'graph.json'], root);
+    expect(status).toBe(0);
+    // Only the artifact that really exists, never a speculative name.
+    expect(existingBlock(gitignoreOf(root))).toEqual(['/graph.json']);
   });
 
   it('--no-gitignore keeps the old behaviour: say it, change nothing', () => {
@@ -233,7 +263,7 @@ describe('flowlens scan', () => {
     expect(status).toBe(0);
     // Machine-readable output stays machine-readable.
     expect(() => JSON.parse(out) as unknown).not.toThrow();
-    expect(existingBlock(gitignoreOf(root))).toEqual(['/graph.json']);
+    expect(existingBlock(gitignoreOf(root))).toEqual(['/graph.json', '/flowlens.config.json']);
   });
 
   it('--no-gitignore overrides the config', () => {
@@ -257,7 +287,11 @@ describe('flowlens init --gitignore', () => {
     );
     expect(status).toBe(0);
     expect(out).toContain('Ignored');
-    expect(existingBlock(gitignoreOf(root))).toEqual(['/graph.json', '/spans.jsonl']);
+    expect(existingBlock(gitignoreOf(root))).toEqual([
+      '/graph.json',
+      '/spans.jsonl',
+      '/flowlens.config.json',
+    ]);
     // The config is still written — --gitignore is an addition, not a mode.
     expect(existsSync(join(root, 'flowlens.config.json'))).toBe(true);
   });
@@ -270,15 +304,16 @@ describe('flowlens init --gitignore', () => {
       env: { ...process.env, NO_COLOR: '1', FLOWLENS_TRACE: join(root, 'runtime.jsonl') },
     });
     expect(result.status).toBe(0);
-    expect(existingBlock(gitignoreOf(root))).toEqual(['/runtime.jsonl']);
+    expect(existingBlock(gitignoreOf(root))).toEqual(['/flowlens.config.json', '/runtime.jsonl']);
   });
 
-  it('says plainly when there is nothing to ignore', () => {
+  it('ignores only the config when the graph and trace go to the cache', () => {
     const root = repository('init-nothing');
     const { status, out } = cli(['init', root, '--gitignore'], root);
     expect(status).toBe(0);
-    expect(out).toContain('nothing to ignore');
-    expect(existsSync(join(root, '.gitignore'))).toBe(false);
+    expect(out).toContain('Ignored');
+    // The cache is outside the project, so the config is the only artifact.
+    expect(existingBlock(gitignoreOf(root))).toEqual(['/flowlens.config.json']);
   });
 
   it('works on a project that is already configured, and keeps the config', () => {
@@ -292,7 +327,7 @@ describe('flowlens init --gitignore', () => {
     const { status, out } = cli(['init', root, '--gitignore', '-g', 'graph.json'], root);
     expect(status).toBe(0);
     expect(out).toContain('unchanged');
-    expect(existingBlock(gitignoreOf(root))).toEqual(['/graph.json']);
+    expect(existingBlock(gitignoreOf(root))).toEqual(['/graph.json', '/flowlens.config.json']);
     expect(readFileSync(join(root, 'flowlens.config.json'), 'utf8')).toBe(config);
   });
 

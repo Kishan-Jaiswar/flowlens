@@ -30,6 +30,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { CONFIG_FILENAMES } from '@flowslens/core';
 import { color, glyph } from './ui.js';
 
 const BEGIN = '# flowlens:begin (managed by Flowslens)';
@@ -72,6 +73,24 @@ export interface AddResult {
   skipped: string[];
   /** Entries git is already tracking — ignoring them alone will not help. */
   tracked: string[];
+}
+
+/**
+ * Config files Flowslens has actually written in a project.
+ *
+ * Only what exists. Naming the file unconditionally would add a pattern to
+ * every repository for a config nobody created — the block of speculative
+ * patterns this whole file exists to avoid. `init` passes the path it is about
+ * to write instead, because for that one command the file's absence is
+ * temporary.
+ */
+export function existingConfigFiles(root: string): string[] {
+  const found: string[] = [];
+  for (const name of CONFIG_FILENAMES) {
+    const candidate = resolve(root, name);
+    if (existsSync(candidate)) found.push(candidate);
+  }
+  return found;
 }
 
 /**
@@ -150,6 +169,16 @@ export function unignored(files: string[]): Artifact[] {
     if (!artifact || seen.has(artifact.file)) continue;
     seen.add(artifact.file);
     if (isIgnored(artifact.gitRoot, artifact.file) !== false) continue;
+    /**
+     * A file git already tracks is not ignorable.
+     *
+     * Adding a pattern for it changes nothing — git keeps tracking it — so the
+     * line would be noise that looks like a fix. It also means a team that
+     * committed `flowlens.config.json` on purpose keeps it, which is the right
+     * outcome: the point is to stop the tool leaving mess behind, not to
+     * overrule a decision someone made.
+     */
+    if (isTracked(artifact.gitRoot, artifact.file) === true) continue;
     out.push(artifact);
   }
   return out;
@@ -363,9 +392,25 @@ export function byRoot(artifacts: Artifact[]): Map<string, Artifact[]> {
   return groups;
 }
 
-/** Candidate artifact paths for a project, in the order a user meets them. */
-export function artifactPaths(graphFile: string, traceFile: string): string[] {
-  const paths = [graphFile, traceFile];
+/**
+ * Candidate artifact paths for a project, in the order a user meets them.
+ *
+ * `configRoot` is the directory `flowlens.config.json` would live in. The
+ * config is included because Flowslens *creates* it: `init` writes it into
+ * someone's repository, where it then sits in `git status` as an untracked
+ * change on every branch forever. That is precisely the chore this whole file
+ * exists to remove, and the file's origin — written by the tool, not by the
+ * developer — is what makes ignoring it the right default.
+ *
+ * A config the developer has deliberately committed is left alone; see
+ * {@link unignored}.
+ */
+export function artifactPaths(
+  graphFile: string,
+  traceFile: string,
+  configFiles: readonly string[] = [],
+): string[] {
+  const paths = [graphFile, traceFile, ...configFiles];
   /**
    * The runtime tracer writes wherever `FLOWLENS_TRACE` points, and it is set
    * in the *app's* environment — so this catches the case where someone pointed

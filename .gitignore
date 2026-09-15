@@ -18,4 +18,5 @@ packages/*/LICENSE
 
 # flowlens:begin (managed by Flowslens)
 /graph.json
+/examples/crud/flowlens.config.json
 # flowlens:end

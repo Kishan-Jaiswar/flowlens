@@ -402,8 +402,20 @@ Delete · MedicinesView`), and only when they collide.
     there is nothing to add and `.gitignore` is never opened at all.
   - Only Flowslens's own `# flowlens:begin` block is rewritten; every line the
     developer wrote is preserved byte for byte, and re-running changes nothing.
-  - `flowlens.config.json` is never ignored. It is the project's own
-    configuration, meant to be committed so the whole team gets the same graph.
+  - **`flowlens.config.json` is ignored too**, because Flowslens wrote it. On a
+    default setup it is the only file the tool puts in a project, so leaving it
+    out left `?? flowlens.config.json` in `git status` on every branch forever —
+    the exact chore this feature exists to remove. `init` adds it in the same
+    breath as writing it, rather than a scan later noticing.
+  - **A config the developer committed is left alone.** A pattern for a tracked
+    file changes nothing, so adding one would read as a fix while doing nothing
+    — and a team that committed the config on purpose keeps it. The point is to
+    stop the tool leaving mess behind, not to overrule a decision someone made.
+  - **Nothing is added for a file that does not exist.** Only the config
+    actually on disk is named, and only the alternate spellings (`.flowlensrc`,
+    `.flowlensrc.json`) that a project really uses — three patterns in every
+    repository, two of them matching nothing, is the block of speculative
+    patterns this was always meant to avoid.
   - Each addition is printed (`gitignore: added /graph.json … — Flowslens
 output stays out of your commits`). A tool that writes silently is a tool
     you stop trusting the moment you notice.

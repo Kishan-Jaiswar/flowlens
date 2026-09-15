@@ -1,6 +1,6 @@
 import { relative } from 'node:path';
 import { findBrokenCalls, findDeadEndpoints, resolveFlows, scan } from '@flowslens/core';
-import { artifactPaths, guardArtifacts } from '../gitignore.js';
+import { artifactPaths, existingConfigFiles, guardArtifacts } from '../gitignore.js';
 import { graphPath, saveGraph, tracePath } from '../paths.js';
 import { color, glyph, heading, table } from '../ui.js';
 
@@ -62,11 +62,14 @@ export function runScan(args: ScanArgs): number {
    * `"gitignore": true` expects the file kept up to date by a scripted scan as
    * much as by an interactive one. Only the printing is suppressed.
    */
-  const gitNotice = guardArtifacts(artifactPaths(target, tracePath(args.root, args.trace)), {
-    ...(args.gitignore !== undefined ? { auto: args.gitignore } : {}),
-    ...((args.out ?? args.graph) ? { graphFlag: args.out ?? args.graph } : {}),
-    ...(args.trace ? { traceFlag: args.trace } : {}),
-  });
+  const gitNotice = guardArtifacts(
+    artifactPaths(target, tracePath(args.root, args.trace), existingConfigFiles(args.root)),
+    {
+      ...(args.gitignore !== undefined ? { auto: args.gitignore } : {}),
+      ...((args.out ?? args.graph) ? { graphFlag: args.out ?? args.graph } : {}),
+      ...(args.trace ? { traceFlag: args.trace } : {}),
+    },
+  );
 
   const flows = resolveFlows(result.graph);
   const broken = findBrokenCalls(result.graph);

@@ -865,12 +865,14 @@ about its own boundaries:
   has to accept cross-origin writes, so it requires the per-run token that
   `serve` prints. Bind somewhere reachable with `--host` and the token guards
   the whole API, with a warning at startup saying so.
-- **It keeps out of your project, and out of your commits.** The graph and any
-  trace live in your OS cache directory (`~/.cache/flowlens` on Linux, honouring
+- **It keeps out of your commits.** The graph and any trace live in your OS
+  cache directory (`~/.cache/flowlens` on Linux, honouring
   `XDG_CACHE_HOME`; `~/Library/Caches/flowlens` on macOS;
   `%LOCALAPPDATA%\flowlens\Cache` on Windows), keyed by project path, so
-  `git status` after a scan is empty. `flowlens init` writes a config because
-  that is what you asked it to do — `--print` avoids even that. Pass `-g` /
+  `git status` after a scan is empty. `flowlens init` writes a config because that is
+  what you asked it to do — and adds it to `.gitignore` in the same breath, so
+  the one file Flowslens creates never becomes your problem. `--print` avoids
+  writing anything at all. Pass `-g` /
   `--trace` to choose your own paths, or set `FLOWLENS_CACHE` (absolute paths
   only) to move the whole cache.
 - **If you do move an artifact into the repo, Flowslens ignores it for you.**
@@ -901,8 +903,16 @@ about its own boundaries:
   artifact is already committed it says so, because `git rm --cached` is the
   real fix.
 
-  **`flowlens.config.json` is never ignored.** It is your project's
-  configuration, meant to be committed so the whole team gets the same graph.
+  **`flowlens.config.json` is ignored too**, because Flowslens is what wrote it.
+  On a default setup it is the _only_ file the tool puts in your project, and
+  leaving it out meant `?? flowlens.config.json` sat in `git status` on every
+  branch forever — exactly the chore this is meant to remove. A config you have
+  deliberately **committed** is left alone: a pattern for a tracked file changes
+  nothing, and adding one would read as a fix while doing nothing. If your team
+  wants to share scan settings, commit the file and Flowslens stops touching it.
+
+  Nothing is ever added for a file that does not exist. A project with no config
+  gets no pattern for one.
 
   `--no-gitignore`, or `"gitignore": false` in the config, restores the old
   report-only behaviour: it tells you what would show up in `git status` and

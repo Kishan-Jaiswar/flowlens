@@ -24,7 +24,7 @@ import {
   type TestIndex,
 } from '@flowslens/core';
 import { changedFiles } from '../changedfiles.js';
-import { artifactPaths, guardArtifacts } from '../gitignore.js';
+import { artifactPaths, existingConfigFiles, guardArtifacts } from '../gitignore.js';
 import { browserTracerFile, dashboardDir, graphPath, saveGraph, tracePath } from '../paths.js';
 import { color } from '../ui.js';
 
@@ -210,7 +210,11 @@ export function runServe(args: ServeArgs): number {
    * file git can see.
    */
   const gitNotice = guardArtifacts(
-    artifactPaths(graphPath(root, args.graph), tracePath(root, args.trace)),
+    artifactPaths(
+      graphPath(root, args.graph),
+      tracePath(root, args.trace),
+      existingConfigFiles(root),
+    ),
     {
       ...(args.gitignore !== undefined ? { auto: args.gitignore } : {}),
       ...(args.graph ? { graphFlag: args.graph } : {}),
