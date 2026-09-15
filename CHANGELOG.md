@@ -7,6 +7,8 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-15
+
 ### Added
 
 - **Two more tabs, and the Breaks tab now separates findings from wallpaper.**
@@ -894,7 +896,8 @@ Recorded because each one shaped the design, and the reasoning is in
 - Chained Mongoose modifiers (`.lean()`, `.sort()`) were counted as separate
   database operations.
 
-[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.0.1...HEAD
+[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/Kishan-Jaiswar/flowlens/releases/tag/v0.1.0
