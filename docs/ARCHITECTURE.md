@@ -40,6 +40,8 @@ work:
 | After-effects      | `core/analyzer/aftermath`          | Navigation, cache invalidation, error UI |
 | Test coverage      | `core/analyzer/testcoverage`       | Which tests import which files           |
 | Per-feature views  | `core/flow/{api,insight,contract}` | The dashboard's tabs                     |
+| Table relations    | `core/analyzer/relations`          | Which collections link to which, and how |
+| Screen documents   | `core/flow/explain`                | One screen in plain English, no model    |
 | Diff-scoped risk   | `core/impact/changed`              | What the working tree puts at risk       |
 | Runtime tracer     | `runtime`                          | Record what actually ran                 |
 | Dependency engine  | `core/impact`                      | Walk the graph backwards                 |

@@ -2,7 +2,7 @@ import type { FlowGraph } from '../graph/graph.js';
 import { ids, slug } from '../graph/ids.js';
 import type { EdgeKind, FlowNode, TimingStats } from '../graph/types.js';
 import { bestRouteMatch, normalizePath } from '../analyzer/http.js';
-import { collectionNameOf } from '../analyzer/mongo.js';
+import { collectionNameOf, dbAccessOf, dbEffectOf } from '../analyzer/mongo.js';
 import { groupTraces, type SpanKind, type TraceEvent } from './trace.js';
 
 export interface MergeResult {
@@ -156,12 +156,26 @@ function resolveSpan(
         );
       if (existing) return { nodeId: existing.id, discovered: false };
       const id = ids.dbOp(collection, operation, 'runtime');
+      /**
+       * Classify the operation the same way the source reader does.
+       *
+       * Without this a runtime-only db-op carries no `effect`, and every
+       * reader downstream falls back to "write" — so a `find` the analyzer
+       * never saw is reported as a write to the collection it only read.
+       */
+      const effect = dbEffectOf(operation) ?? (isWriteOperation(operation) ? 'write' : 'read');
       graph.addNode({
         id,
         kind: 'db-op',
         label: `${collection}.${operation}`,
         evidence: 'runtime',
-        meta: { collection, operation, discoveredAtRuntime: true },
+        meta: {
+          collection,
+          operation,
+          effect,
+          access: dbAccessOf(operation) ?? (effect === 'read' ? 'read' : 'write'),
+          discoveredAtRuntime: true,
+        },
       });
       const collectionId = ids.collection(collection);
       graph.addNode({

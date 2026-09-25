@@ -52,38 +52,62 @@ const state = {
   selectedNode: null,
   filter: '',
   includeLocal: false,
-  /** Which tab is showing: flow | timing | impact | tests. */
-  tab: 'flow',
+  /** Which tab is showing: docs | perf | tests | changed | impact. */
+  tab: 'docs',
+  /** How the Docs tab shows the action: the stage list, or the diagram. */
+  docView: 'list',
   /** Timing, blast radius, tests and contract for the selected flow. */
   insight: null,
   /** The diff-scoped report, which is project-wide rather than per feature. */
   changed: null,
   changedLoading: false,
+  /** The Docs tab's document for the selected action, and which action it is for. */
+  actionDoc: null,
+  actionDocFor: null,
+  actionDocLoading: false,
   /** True while /api/insight is in flight, so tabs can say "loading" once. */
   insightLoading: false,
+  /** The Queries tab's answer for the selected action, and which action it is for. */
+  queries: null,
+  queriesFor: null,
+  queriesLoading: false,
+  /** Project-wide findings, read once per scan. */
+  findings: null,
+  /** Which severities and kinds the Issues tab shows for the rest of the project. */
+  issueSeverities: new Set(['high', 'medium']),
+  issueKind: 'all',
 };
 
 /**
- * The four questions the tabs answer, in the order a developer asks them.
+ * The tabs, in the order the user asked for them.
  *
- * "What does this do" comes first because nothing else makes sense without it.
- * "What would I break" comes before "is it tested" because the first decides
- * whether to make the change at all, and the second only decides how nervous
- * to be while making it.
+ * Five, each answering one question and none repeating another: Docs is the
+ * whole action (as a list or as a diagram — the old Flow tab — with the
+ * request details the old APIs tab had folded into its request step),
+ * Performance is where the time goes (steps, and each database query with its
+ * code), then Tests, Changed and Breaks. Links to the tabs that were merged
+ * away still land in the right place (see `LEGACY_TABS`).
  */
 const TABS = [
-  ['flow', 'Flow', 'What happens when a user does this'],
-  ['apis', 'APIs', 'Every request this action makes, in full'],
-  ['timing', 'Timing', 'Where the time goes, from real runs'],
-  ['impact', 'Breaks', 'What else a change here would break'],
+  ['docs', 'Docs', 'This action end to end, as a list or a diagram'],
+  [
+    'issues',
+    'Issues',
+    'Bugs the code shows: missing auth, tenant leaks, mass assignment, N+1, reads that wait',
+  ],
+  ['perf', 'Performance', 'Where the time goes: each step, and each database query with its code'],
   ['tests', 'Tests', 'What would catch it if you broke it'],
-  /**
-   * The odd one out, and last on purpose: this one is about the whole project
-   * rather than the selected feature. It answers "what did I already change",
-   * which is the question you have mid-edit rather than mid-exploration.
-   */
-  ['changed', 'Changed', 'What your uncommitted changes put at risk'],
+  ['changed', 'Changed', 'Which actions your uncommitted changes reach'],
+  ['impact', 'Breaks', 'What else a change here would break'],
 ];
+
+/** Tabs that were merged into others, for links pasted before the merge. */
+const LEGACY_TABS = {
+  flow: ['docs', 'diagram'],
+  apis: ['docs', 'list'],
+  timing: ['perf'],
+  queries: ['perf'],
+};
 
 /** Tabs that ignore the selected feature. */
 const PROJECT_TABS = new Set(['changed']);
@@ -101,11 +125,11 @@ const el = {
   docLink: document.getElementById('doc-link'),
   tabs: document.getElementById('tabs'),
   panels: {
-    flow: document.getElementById('graph'),
-    timing: document.getElementById('panel-timing'),
+    docs: document.getElementById('panel-docs'),
+    issues: document.getElementById('panel-issues'),
+    perf: document.getElementById('panel-perf'),
     impact: document.getElementById('panel-impact'),
     tests: document.getElementById('panel-tests'),
-    apis: document.getElementById('panel-apis'),
     changed: document.getElementById('panel-changed'),
   },
 };
@@ -152,10 +176,31 @@ async function load() {
     renderFlowList();
     renderFindings(doctor);
     void loadChanged();
+    void loadIssues();
 
-    const first = filteredFlows()[0];
+    // `#tab=apis&flow=<id>` (or the older `#docs=<id>`) opens straight onto
+    // that tab and action, so a link pasted into a ticket lands where it was
+    // copied from.
+    const hash = new URLSearchParams(window.location.hash.slice(1));
+    const linked = hash.get('flow') ?? hash.get('docs');
+    const target = state.flows.find((flow) => flow.id === linked);
+    const tab = hash.get('tab') ?? (hash.has('docs') ? 'docs' : null);
+    const legacy = tab ? LEGACY_TABS[tab] : undefined;
+    if (legacy) {
+      state.tab = legacy[0];
+      if (legacy[1]) state.docView = legacy[1];
+    } else if (tab && TABS.some(([candidate]) => candidate === tab)) state.tab = tab;
+    if (hash.get('view') === 'diagram') state.docView = 'diagram';
+    const first = target ?? filteredFlows()[0];
     if (first) selectFlow(first.id);
-    else renderEmpty();
+    else {
+      // A backend scanned on its own has no user actions; its issues are still
+      // the project's, so that is where it opens.
+      renderEmpty();
+      if (!tab) state.tab = 'issues';
+      renderTabs();
+      showTab(state.tab);
+    }
   } catch (error) {
     el.graph.innerHTML = `<p class="error">Could not load the graph: ${escapeHtml(
       String(error.message),
@@ -187,7 +232,16 @@ function renderFlowList() {
     button.className = 'flow-item';
     button.setAttribute('aria-selected', String(flow.id === state.selectedFlow?.id));
     button.onclick = () => selectFlow(flow.id);
+    const issues = issuesFor(flow.id).filter((finding) => finding.severity !== 'low');
+    const worst = issues.some((finding) => finding.severity === 'high') ? 'high' : 'medium';
+    // The mark sits beside the label, not in it: the label stays the action's name.
+    button.classList.toggle('has-issues', issues.length > 0);
     button.innerHTML = `
+      ${
+        issues.length
+          ? `<span class="issue-mark sev-${worst}" title="${issues.length} issue${issues.length === 1 ? '' : 's'} — see the Issues tab">⚠ ${issues.length}</span>`
+          : ''
+      }
       <div class="label">${escapeHtml(flowTitle(flow))}</div>
       <div class="meta">${escapeHtml(
         [eventVerb(flow.event), flow.component, flow.endpoints[0], `risk ${flow.risk.level}`]
@@ -235,6 +289,7 @@ function selectFlow(id) {
   state.selectedNode = null;
   el.docLink.href = apiUrl(`/api/document?flow=${encodeURIComponent(flow.id)}`);
   state.insight = null;
+  if (state.queriesFor !== flow.id) state.queries = null;
   renderFlowList();
   renderFlowHeader(flow);
   renderGraph(flow);
@@ -242,6 +297,45 @@ function selectFlow(id) {
   renderTabs();
   showTab(state.tab);
   void loadInsight(flow.id);
+}
+
+/**
+ * Show the document for the selected action.
+ *
+ * Fetched when the tab is opened rather than with the insight: it reads
+ * source files on the server, and a reader clicking through the list should
+ * not pay for a document they are not looking at.
+ */
+function openDocsForSelection() {
+  const id = state.selectedFlow?.id ?? null;
+  if (id && id !== state.actionDocFor) {
+    void loadActionDoc(id);
+    return;
+  }
+  renderDocs();
+}
+
+async function loadActionDoc(flowId) {
+  state.actionDocFor = flowId;
+  state.actionDoc = null;
+  state.actionDocLoading = true;
+  renderTabs();
+  renderDocs();
+  try {
+    const doc = await getJson(`/api/action?flow=${encodeURIComponent(flowId)}`);
+    // The reader may have picked another action while this was in flight.
+    if (state.actionDocFor !== flowId) return;
+    state.actionDoc = doc;
+  } catch (error) {
+    if (state.actionDocFor !== flowId) return;
+    state.actionDoc = { error: String(error.message ?? error) };
+  } finally {
+    if (state.actionDocFor === flowId) state.actionDocLoading = false;
+    renderTabs();
+    if (state.tab === 'docs') renderDocs();
+    // The graph is drawn before the document arrives, whichever tab is open.
+    if (state.selectedFlow?.id === flowId) renderGraph(state.selectedFlow);
+  }
 }
 
 /**
@@ -255,6 +349,8 @@ async function loadInsight(flowId) {
   renderTabs();
   try {
     const insight = await getJson(`/api/insight?flow=${encodeURIComponent(flowId)}`);
+    // The Docs tab is open by default and every tab links into it.
+    if (state.actionDocFor !== flowId) void loadActionDoc(flowId);
     // The user may have clicked another feature while this was in flight.
     if (state.selectedFlow?.id !== flowId) return;
     state.insight = insight;
@@ -310,33 +406,50 @@ function tabBadge(id) {
     };
   }
 
+  if (id === 'docs') {
+    if (state.actionDocLoading) return { text: '…', tone: 'neutral' };
+    const doc = state.actionDoc;
+    if (!doc || doc.error || doc.flowId !== state.selectedFlow?.id) return undefined;
+    const found = doc.stages.filter((stage) => !stage.absent).length;
+    return { text: `${found} steps`, tone: 'neutral' };
+  }
+
+  if (id === 'issues') {
+    if (!state.findings) return { text: '…', tone: 'neutral' };
+    if (state.findings.error) return undefined;
+    // With an action selected, its issues; without one, the project's worst.
+    const selected = state.selectedFlow;
+    const mine = selected ? issuesFor(selected.id) : state.findings.findings;
+    if (mine.length === 0) return { text: 'none', tone: 'ok' };
+    const high = mine.filter((finding) => finding.severity === 'high').length;
+    const medium = mine.some((finding) => finding.severity === 'medium');
+    if (!selected)
+      return high
+        ? { text: `${high} high`, tone: 'danger' }
+        : { text: String(mine.length), tone: medium ? 'warn' : 'neutral' };
+    return { text: String(mine.length), tone: high ? 'danger' : medium ? 'warn' : 'neutral' };
+  }
+
   const flow = state.selectedFlow;
   if (!flow) return undefined;
-  if (id === 'flow') return { text: String(flow.steps.length), tone: 'neutral' };
-
   if (state.insightLoading && !state.insight) return { text: '…', tone: 'neutral' };
   const insight = state.insight;
   if (!insight || insight.error) return undefined;
 
-  if (id === 'timing') {
-    return insight.timing?.observed
-      ? { text: `${insight.timing.totalMs}ms`, tone: 'neutral' }
-      : { text: 'no runs', tone: 'muted' };
+  if (id === 'perf') {
+    // The whole action when it has run; otherwise the slowest query, if any has.
+    if (insight.timing?.observed) {
+      const slow = (state.queries?.flowId === flow.id ? state.queries.queries : []).some(
+        (query) => (query.timing?.avgMs ?? 0) >= SLOW_QUERY_MS,
+      );
+      return { text: formatMs(insight.timing.totalMs), tone: slow ? 'warn' : 'neutral' };
+    }
+    return { text: 'not run', tone: 'muted' };
   }
   if (id === 'impact') {
     const count = insight.impact?.featuresAtRisk?.length ?? 0;
     if (count === 0) return { text: 'contained', tone: 'ok' };
     return { text: String(count), tone: insight.impact.level === 'high' ? 'danger' : 'warn' };
-  }
-  if (id === 'apis') {
-    const calls = insight.apis?.calls ?? [];
-    if (calls.length === 0) return { text: 'none', tone: 'muted' };
-    // The badge reports the problem when there is one, the count otherwise.
-    const unmatched = calls.filter((call) => !call.matched).length;
-    if (unmatched > 0) return { text: `${unmatched} unmatched`, tone: 'danger' };
-    const drift = calls.reduce((sum, call) => sum + (call.contract?.unexpected.length ?? 0), 0);
-    if (drift > 0) return { text: `${drift} unread key${drift > 1 ? 's' : ''}`, tone: 'warn' };
-    return { text: String(calls.length), tone: 'neutral' };
   }
   if (id === 'tests') {
     const tests = insight.tests;
@@ -351,23 +464,68 @@ function tabBadge(id) {
 }
 
 function showTab(id) {
-  state.tab = TABS.some(([candidate]) => candidate === id) ? id : 'flow';
+  const legacy = LEGACY_TABS[id];
+  if (legacy) {
+    id = legacy[0];
+    if (legacy[1]) state.docView = legacy[1];
+  }
+  state.tab = TABS.some(([candidate]) => candidate === id) ? id : 'docs';
+  const diagram = state.tab === 'docs' && state.docView === 'diagram';
+  // Only the diagram uses the step inspector on the right; everything else
+  // gets the full width.
+  const layout = document.querySelector('.layout');
+  layout?.setAttribute('data-tab', state.tab);
+  layout?.toggleAttribute('data-diagram', diagram);
+  const params = new URLSearchParams();
+  params.set('tab', state.tab);
+  if (state.selectedFlow) params.set('flow', state.selectedFlow.id);
+  if (diagram) params.set('view', 'diagram');
+  window.history.replaceState?.(null, '', `#${params}`);
   for (const [tabId] of TABS) {
     const panel = el.panels[tabId];
-    if (panel) panel.hidden = tabId !== state.tab;
+    if (panel) panel.hidden = tabId !== state.tab || (tabId === 'docs' && diagram);
   }
+  if (el.graph) el.graph.hidden = !diagram;
   for (const button of el.tabs?.querySelectorAll('[data-tab]') ?? []) {
     const active = button.dataset.tab === state.tab;
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', String(active));
   }
 
-  if (state.tab === 'timing') renderTiming();
   if (state.tab === 'impact') renderImpact();
+  if (state.tab === 'issues') renderIssues();
   if (state.tab === 'tests') renderTests();
-  if (state.tab === 'apis') renderApis();
+  if (state.tab === 'perf') openPerfForSelection();
   if (state.tab === 'changed') renderChanged();
+  if (state.tab === 'docs') {
+    openDocsForSelection();
+    // The diagram draws the confirmation and the way back from the document.
+    if (diagram && state.selectedFlow?.id === state.actionDocFor) renderGraph(state.selectedFlow);
+  }
 }
+
+/** Switch the Docs tab between the stage list and the diagram. */
+function setDocView(view) {
+  state.docView = view === 'diagram' ? 'diagram' : 'list';
+  if (state.docView === 'list') {
+    state.selectedNode = null;
+    document.querySelector('.layout')?.removeAttribute('data-inspecting');
+  }
+  showTab('docs');
+}
+
+/** The List / Diagram switch, drawn at the top of both views. */
+function viewSwitch() {
+  const button = (view, label) =>
+    `<button class="view-option${state.docView === view ? ' active' : ''}" data-doc-view="${view}" ` +
+    `aria-pressed="${state.docView === view}">${label}</button>`;
+  return `<div class="view-switch" role="group" aria-label="Show the action as">${button('list', 'List')}${button('diagram', 'Diagram')}</div>`;
+}
+
+document.addEventListener('click', (event) => {
+  const option = event.target.closest?.('[data-doc-view]');
+  if (option) setDocView(option.dataset.docView);
+});
 
 /**
  * Fetch the diff report.
@@ -398,7 +556,11 @@ function renderFlowHeader(flow) {
   if (flow.screen) chips.push(`<span class="chip">${escapeHtml(flow.screen)}</span>`);
   if (flow.event) chips.push(`<span class="chip">${escapeHtml(eventVerb(flow.event))}</span>`);
   if (flow.component) chips.push(`<span class="chip">${escapeHtml(flow.component)}</span>`);
-  if (flow.totalMs != null) chips.push(`<span class="chip">${flow.totalMs}ms observed</span>`);
+  // Summed own time, not the wait: parallel requests overlap. Performance has the wait.
+  if (flow.totalMs != null)
+    chips.push(
+      `<span class="chip" title="The own time of every measured step, added up. Steps that run at the same time overlap, so the user waits less — see Performance.">${formatMs(flow.totalMs)} of work measured</span>`,
+    );
   // A count per effect rather than a chip per collection: a real flow touches a
   // dozen collections, and fourteen chips is a wall, not a summary.
   for (const [effect, , plural] of EFFECTS) {
@@ -411,47 +573,276 @@ function renderFlowHeader(flow) {
     <div class="chips">${chips.join('')}</div>
     ${
       flow.source
-        ? `<p class="muted" style="margin-top:8px">${escapeHtml(flow.source.file)}:${flow.source.line}</p>`
+        ? `<p class="muted" style="margin-top:8px">${fileLink(flow.source.file, flow.source.line)}</p>`
         : ''
     }`;
 }
 
+/** What each lane of the Flow tab holds, in words anyone can read. */
+const LAYER_NOTES = {
+  ui: 'What the user does',
+  frontend: 'Runs in the browser',
+  network: 'The request, and the route that receives it',
+  backend: 'Runs on the server',
+  data: 'What happens in the database',
+  external: 'Work that leaves the app',
+  back: 'What the user sees afterwards',
+};
+
+/**
+ * The Flow tab: every step of the action as a numbered card, top to bottom in
+ * the order it happens, one lane per part of the app.
+ *
+ * Each card leads with a sentence saying what the step does ("Deletes from
+ * products"), with the code name and file underneath, so it reads as a story
+ * before it reads as a call graph. Two things the graph alone cannot say come
+ * from the action document when it has loaded: the confirmation dialog the
+ * handler waits on, and what the screen does with the answer. Hooks that only
+ * hand the handler a helper (`useToast`) are not steps — they run when the
+ * component renders — so they are named on the handler's card instead.
+ */
 function renderGraph(flow) {
-  el.graph.innerHTML = '';
+  el.graph.innerHTML =
+    `<div class="doc-bar"><div class="doc-picker">${viewSwitch()}<span>How this action works, end to end</span></div></div>` +
+    panelIntro(
+      'Read it top to bottom: each numbered box is one step, in the order it happens. ' +
+        'Click a box to see its code.',
+    );
 
-  const groups = LAYERS.map(([layer, title]) => ({
-    layer,
-    title,
-    steps: flow.steps.filter((step) => step.layer === layer),
-  })).filter((group) => group.steps.length > 0);
+  let number = 0;
+  const next = () => (number += 1);
+  const lanes = flowPlan(flow).map((lane) => ({
+    ...lane,
+    columns: lane.columns.map((column) =>
+      column.map((item) =>
+        item.step
+          ? renderNode(item.step, next(), item.helpers, item.say)
+          : storyCard(item.layer, next(), item.kind, item.summary, item.key),
+      ),
+    ),
+  }));
 
-  groups.forEach((group, index) => {
+  lanes.forEach((lane, index) => {
     const section = document.createElement('div');
-    section.className = 'layer';
+    section.className = `layer lane-${lane.layer}`;
+    const count = lane.columns.reduce((sum, column) => sum + column.length, 0);
+    const title = document.createElement('div');
+    title.className = 'layer-title';
+    title.innerHTML =
+      `<span class="layer-name">${escapeHtml(lane.title)}</span>` +
+      `<span class="layer-note">${escapeHtml(LAYER_NOTES[lane.layer] ?? '')}</span>` +
+      `<span class="layer-count">${count} step${count === 1 ? '' : 's'}</span>`;
+    section.appendChild(title);
+    const body = document.createElement('div');
+    body.className = 'layer-body';
+    section.appendChild(body);
 
-    const heading = document.createElement('div');
-    heading.className = 'layer-title';
-    heading.textContent = group.title;
-    section.appendChild(heading);
-
-    // The question the data layer has to answer is "which collections, and what
-    // happened to them" — the individual db-op tiles below spell out the calls,
-    // but the grouped answer has to be readable without counting tiles.
-    if (group.layer === 'data') {
+    // Several collections need the grouped answer; one is already on its card.
+    if (
+      lane.layer === 'data' &&
+      new Set(flow.collections.map((entry) => entry.collection)).size > 1
+    ) {
       const summary = renderCollectionSummary(flow);
-      if (summary) section.appendChild(summary);
+      if (summary) body.appendChild(summary);
     }
 
-    section.appendChild(renderLayerSteps(group.steps));
-
+    body.appendChild(renderColumns(lane.columns));
     el.graph.appendChild(section);
 
-    if (index < groups.length - 1) {
+    if (index < lanes.length - 1) {
       const connector = document.createElement('div');
       connector.className = 'connector';
       el.graph.appendChild(connector);
     }
   });
+}
+
+/**
+ * What the Flow tab draws, before any of it is drawn: lanes of columns of
+ * cards, each card a graph step or a step told from the action document. The
+ * tab badge counts the same list, so the two cannot disagree.
+ */
+function flowPlan(flow) {
+  const doc = flowDoc(flow);
+  const sending = requestHooks(flow);
+  const helpers = flow.steps.filter((step) => step.kind === 'hook' && !sending.has(step.nodeId));
+  const opsOn = new Set(
+    flow.steps.filter((step) => step.kind === 'db-op').map((step) => step.meta?.collection),
+  );
+  const shown = flow.steps.filter(
+    (step) =>
+      !(step.kind === 'hook' && !sending.has(step.nodeId)) &&
+      // The operation card already names its collection.
+      !(step.kind === 'collection' && opsOn.has(step.label)),
+  );
+  const helped =
+    shown.find((step) => step.kind === 'handler') ??
+    shown.find((step) => step.kind === 'ui-action');
+
+  const lanes = LAYERS.map(([layer, title]) => {
+    const steps = shown.filter((step) => step.layer === layer);
+    // The document reads the words on the button; the graph only has the prop name.
+    const trigger = docStageOf(doc, 'trigger');
+    const columns = depthColumns(steps).map((column) =>
+      column.map((step) => ({
+        step,
+        helpers: step === helped ? helpers : [],
+        ...(step.kind === 'ui-action' && trigger && step.meta?.event !== 'mount'
+          ? { say: richText(trigger.summary) }
+          : {}),
+      })),
+    );
+    const confirm = layer === 'ui' ? docStageOf(doc, 'confirm') : undefined;
+    if (confirm)
+      columns.push([
+        { layer: 'ui', kind: 'confirmation dialog', summary: confirm.summary, key: 'confirm' },
+      ]);
+    return { layer, title, columns };
+  });
+
+  // The way back: what the frontend does with the answer, and where the screen ends up.
+  const back = [
+    ['response-handler', 'handles the answer'],
+    ['final-ui', 'what the user sees'],
+  ].flatMap(([key, kind]) => {
+    const stage = docStageOf(doc, key);
+    return stage ? [[{ layer: 'frontend', kind, summary: stage.summary, key }]] : [];
+  });
+  lanes.push({ layer: 'back', title: 'Back on screen', columns: back });
+
+  return lanes.filter((lane) => lane.columns.length > 0);
+}
+
+/** The loaded action document, when it is this flow's. */
+function flowDoc(flow) {
+  const doc = state.actionDoc;
+  return doc && !doc.error && doc.flowId === flow.id ? doc : undefined;
+}
+
+function docStageOf(doc, key) {
+  const stage = doc?.stages.find((candidate) => candidate.key === key);
+  return stage && !stage.absent ? stage : undefined;
+}
+
+/**
+ * Hooks that send the request: the API call is written inside them
+ * (`useDeleteProduct`'s `mutationFn`). Every other hook only hands the
+ * component a helper.
+ */
+function requestHooks(flow) {
+  const sites = flow.steps
+    .filter((step) => step.kind === 'api-call')
+    .flatMap((step) => [
+      step.file,
+      ...(step.meta?.callSites ?? []).map((site) => String(site).replace(/:\d+$/, '')),
+    ]);
+  return new Set(
+    flow.steps
+      .filter((step) => step.kind === 'hook' && step.file && sites.includes(step.file))
+      .map((step) => step.nodeId),
+  );
+}
+
+/**
+ * One lane's steps, grouped by depth: steps at the same depth are siblings and
+ * are stacked in one column rather than chained, because an arrow between them
+ * would claim a call that does not happen.
+ */
+function depthColumns(steps) {
+  const byDepth = new Map();
+  for (const step of steps) {
+    const list = byDepth.get(step.depth);
+    if (list) list.push(step);
+    else byDepth.set(step.depth, [step]);
+  }
+  return [...byDepth.keys()].sort((a, b) => a - b).map((depth) => byDepth.get(depth));
+}
+
+/** Columns left to right, joined by arrows, so a lane reads as a chain. */
+function renderColumns(columns) {
+  const row = document.createElement('div');
+  row.className = 'layer-nodes';
+  columns.forEach((cards, index) => {
+    const column = document.createElement('div');
+    column.className = 'layer-column';
+    for (const card of cards) column.appendChild(card);
+    row.appendChild(column);
+    if (index < columns.length - 1) {
+      const arrow = document.createElement('div');
+      arrow.className = 'arrow-h';
+      // Decorative: the numbers already carry the order.
+      arrow.setAttribute('aria-hidden', 'true');
+      arrow.textContent = '→';
+      row.appendChild(arrow);
+    }
+  });
+  return row;
+}
+
+/** A step the graph does not hold, told from the action document; opens that stage in Docs. */
+function storyCard(layer, number, kind, summary, stageKey) {
+  const card = document.createElement('button');
+  card.className = `node layer-${layer} story`;
+  card.title = 'Open this step in the Docs tab';
+  card.innerHTML =
+    `<div class="node-head"><span class="step-num">${number}</span>` +
+    `<span class="kind">${escapeHtml(kind)}</span></div>` +
+    `<div class="say">${richText(summary)}</div>`;
+  card.onclick = () => {
+    setDocView('list');
+    setTimeout(() => {
+      const stage = el.panels.docs?.querySelector(`[data-stage="${stageKey}"]`);
+      stage?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    }, 50);
+  };
+  return card;
+}
+
+/** What a step does, in one sentence. HTML: names are set in `<code>`. */
+function stepSentence(step) {
+  const name = (text) => `<code>${escapeHtml(text)}</code>`;
+  const label = tileLabel(step);
+  switch (step.kind) {
+    case 'ui-action': {
+      if (step.meta?.event === 'mount') return 'The page opens and loads its data';
+      const action = step.meta?.action ?? step.label;
+      const verb = eventVerb(step.meta?.event) || 'use';
+      return `The user ${escapeHtml(verb === 'submit' ? 'submits' : `${verb}s`)} <strong>“${escapeHtml(action)}”</strong>`;
+    }
+    case 'handler':
+      return `${name(String(step.label).split('.').pop())} runs`;
+    case 'hook':
+      return `${name(step.label)} sends the request${
+        step.meta?.invalidates?.length ? ', and refreshes the cached data when it succeeds' : ''
+      }`;
+    case 'api-call': {
+      const method = step.meta?.httpMethod ?? '';
+      const path = step.meta?.rawPath ?? step.meta?.path ?? step.label;
+      return `The browser sends ${name(`${method} ${path}`.trim())}`;
+    }
+    case 'route':
+      return 'The server route receives it';
+    case 'middleware':
+      return `${name(step.label)} checks the request first`;
+    case 'db-op': {
+      const effect = effectOf({ effect: step.meta?.effect, access: step.meta?.access });
+      const verb = {
+        read: 'Reads',
+        create: 'Inserts into',
+        update: 'Updates',
+        delete: 'Deletes from',
+        write: 'Writes to',
+      }[effect];
+      return `${verb} <strong>${escapeHtml(step.meta?.collection ?? step.label)}</strong>`;
+    }
+    case 'collection':
+      return `Collection <strong>${escapeHtml(step.label)}</strong>`;
+    case 'external-effect':
+      return `Leaves the app: ${name(label)}`;
+    default:
+      if (/ handler$/.test(label)) return 'The route handler runs';
+      return `${name(label)} runs`;
+  }
 }
 
 /**
@@ -487,49 +878,6 @@ function renderCollectionSummary(flow) {
   }
 
   return box;
-}
-
-/**
- * One layer, left to right in call order.
- *
- * Steps are grouped by depth and the groups joined with arrows, so a section
- * reads as a chain — `handleDelete -> useDeleteProduct` — rather than as an
- * unordered row of tiles where nothing says what called what.
- *
- * Everything at the same depth is stacked in one column instead of being strung
- * together, because those are siblings: `handleDelete` calls *both*
- * `useDeleteProduct` and `useToast`, and an arrow between them would claim a
- * call that does not happen.
- */
-function renderLayerSteps(steps) {
-  const byDepth = new Map();
-  for (const step of steps) {
-    const list = byDepth.get(step.depth);
-    if (list) list.push(step);
-    else byDepth.set(step.depth, [step]);
-  }
-
-  const row = document.createElement('div');
-  row.className = 'layer-nodes';
-
-  const depths = [...byDepth.keys()].sort((a, b) => a - b);
-  depths.forEach((depth, index) => {
-    const column = document.createElement('div');
-    column.className = 'layer-column';
-    for (const step of byDepth.get(depth)) column.appendChild(renderNode(step));
-    row.appendChild(column);
-
-    if (index < depths.length - 1) {
-      const arrow = document.createElement('div');
-      arrow.className = 'arrow-h';
-      // Decorative: the reading order already carries the meaning.
-      arrow.setAttribute('aria-hidden', 'true');
-      arrow.textContent = '\u2192';
-      row.appendChild(arrow);
-    }
-  });
-
-  return row;
 }
 
 /** `['a','b']` -> `<code>a</code> <code>b</code>`, or a muted dash. */
@@ -575,9 +923,7 @@ function renderStepDetail(step) {
     blocks.push(
       detailSection(
         `DTO · ${dto.name}`,
-        `${codeList(dto.fields)}${
-          dto.file ? `<br><span class="muted">${escapeHtml(dto.file)}</span>` : ''
-        }`,
+        `${codeList(dto.fields)}${dto.file ? `<br>${fileLink(dto.file)}` : ''}`,
       ),
     );
   }
@@ -586,9 +932,7 @@ function renderStepDetail(step) {
     blocks.push(
       detailSection(
         `Schema · ${d.schema.model} → ${d.schema.collection}`,
-        `${codeList(d.schema.fields)}${
-          d.schema.file ? `<br><span class="muted">${escapeHtml(d.schema.file)}</span>` : ''
-        }`,
+        `${codeList(d.schema.fields)}${d.schema.file ? `<br>${fileLink(d.schema.file)}` : ''}`,
       ),
     );
   }
@@ -614,7 +958,7 @@ function tileDetailLines(step) {
   return lines;
 }
 
-function renderNode(step) {
+function renderNode(step, number, helpers = [], say = undefined) {
   const button = document.createElement('button');
   const warn = Boolean(step.meta?.mismatch || step.meta?.unresolved);
   button.className = `node layer-${step.layer}${warn ? ' warn' : ''}`;
@@ -625,10 +969,18 @@ function renderNode(step) {
     renderDetails(step);
   };
 
+  const sentence = say ?? stepSentence(step);
   const pieces = [
-    `<div class="kind">${escapeHtml(tileKind(step))}</div>`,
-    `<div class="label">${escapeHtml(tileLabel(step))}</div>`,
+    `<div class="node-head"><span class="step-num">${number}</span>` +
+      `<span class="kind">${escapeHtml(tileKind(step))}</span></div>`,
+    `<div class="say">${sentence}</div>`,
   ];
+  // The code name, unless the sentence already says it. A user action's title
+  // is the feature's name, which the header already shows.
+  const said = sentence.replace(/<[^>]+>/g, '').replace(/&[a-z]+;/g, '');
+  if (step.kind !== 'ui-action' && !said.includes(tileLabel(step))) {
+    pieces.push(`<div class="label">${escapeHtml(tileLabel(step))}</div>`);
+  }
   // The words actually on the element, when the title has rephrased them.
   const action = step.meta?.action;
   if (step.kind === 'ui-action' && action && step.meta?.event !== 'mount') {
@@ -636,14 +988,18 @@ function renderNode(step) {
       pieces.push(`<div class="sub">on “${escapeHtml(action)}”</div>`);
     }
   }
-  if (step.file) {
-    pieces.push(
-      `<div class="sub">${escapeHtml(step.file)}${step.line ? `:${step.line}` : ''}</div>`,
-    );
-  }
+  // The card is a button, so the file is a nested link the capture handler opens.
+  if (step.file)
+    pieces.push(`<div class="sub file">${fileRef(step.file, step.line, '', true)}</div>`);
   // The contract this step carries: query, body, dto, schema, state set.
   for (const line of tileDetailLines(step)) {
     pieces.push(`<div class="sub contract">${escapeHtml(line)}</div>`);
+  }
+  // Hooks that only hand it a helper run on render, so they are named here, not drawn as steps.
+  if (helpers.length) {
+    pieces.push(
+      `<div class="sub uses">also uses ${helpers.map((hook) => `<code>${escapeHtml(hook.label)}</code>`).join(', ')}</div>`,
+    );
   }
   // A shared endpoint: the same node appears in every flow that calls it.
   if (step.meta?.otherCallers) {
@@ -655,12 +1011,20 @@ function renderNode(step) {
   if (step.avgMs != null) {
     // Self time is the honest number for "where did the time go"; total is the
     // wall clock including everything this step called.
-    const self = step.avgSelfMs != null ? `${step.avgSelfMs}ms self · ` : '';
+    const own =
+      step.avgSelfMs != null && step.avgSelfMs !== step.avgMs
+        ? ` (${step.avgSelfMs}ms in this step itself)`
+        : '';
+    const runs = (step.observations ?? 0) > 1 ? ` · average of ${step.observations} runs` : '';
+    pieces.push(`<div class="timing">took ${step.avgMs}ms${own}${runs}</div>`);
+  }
+  // Only worth a badge when it says something: "static" is the default for every step.
+  if (step.evidence !== 'static') {
+    const seen = { confirmed: 'seen running', runtime: 'seen running, not found in code' };
     pieces.push(
-      `<div class="timing">${self}${step.avgMs}ms total · ${step.observations ?? 0}x</div>`,
+      `<span class="badge ${step.evidence}">${escapeHtml(seen[step.evidence] ?? step.evidence)}</span>`,
     );
   }
-  pieces.push(`<span class="badge ${step.evidence}">${step.evidence}</span>`);
 
   button.innerHTML = pieces.join('');
   return button;
@@ -711,6 +1075,8 @@ function renderFlowSummary(flow) {
 }
 
 async function renderDetails(step) {
+  // The inspector only takes space while it is showing a step.
+  document.querySelector('.layout')?.toggleAttribute('data-inspecting', Boolean(step));
   if (!step) {
     const flow = state.selectedFlow;
     el.details.innerHTML = flow
@@ -729,6 +1095,7 @@ async function renderDetails(step) {
   }
 
   el.details.innerHTML = `
+    <button class="button ghost small details-close" id="details-close" aria-label="Close">✕ Close</button>
     <h3>${escapeHtml(tileLabel(step))}</h3>
     <dl>
       <dt>kind</dt><dd>${escapeHtml(step.kind)}</dd>
@@ -739,12 +1106,18 @@ async function renderDetails(step) {
       ${step.meta?.action ? `<dt>action</dt><dd>${escapeHtml(step.meta.action)}</dd>` : ''}
       <dt>layer</dt><dd>${escapeHtml(step.layer)}</dd>
       <dt>evidence</dt><dd>${escapeHtml(step.evidence)}</dd>
-      ${step.file ? `<dt>source</dt><dd>${escapeHtml(step.file)}:${step.line ?? ''}</dd>` : ''}
+      ${step.file ? `<dt>source</dt><dd>${fileLink(step.file, step.line)}</dd>` : ''}
       ${step.avgMs != null ? `<dt>avg</dt><dd>${step.avgMs}ms</dd>` : ''}
     </dl>
     ${renderStepDetail(step)}
     <h4>Impact</h4>
     <p class="muted">loading…</p>`;
+
+  el.details.querySelector('#details-close')?.addEventListener('click', () => {
+    state.selectedNode = null;
+    renderDetails(null);
+    if (state.selectedFlow) renderGraph(state.selectedFlow);
+  });
 
   try {
     const impact = await getJson(`/api/impact?node=${encodeURIComponent(step.nodeId)}`);
@@ -817,6 +1190,10 @@ el.rescan.addEventListener('click', async () => {
   el.rescan.textContent = 'Scanning…';
   try {
     await fetch(apiUrl('/api/rescan'), { method: 'POST' });
+    // A rescan merges newly recorded runs; what was read before is stale.
+    state.queriesFor = null;
+    state.actionDocFor = null;
+    state.findings = null;
     await load();
   } finally {
     el.rescan.disabled = false;
@@ -884,6 +1261,34 @@ load();
 // way that costs someone an afternoon.
 // ---------------------------------------------------------------------------
 
+/**
+ * The answer, before the evidence.
+ *
+ * Every tab opens with one coloured box that says its conclusion in plain words
+ * — "safe to change", "nothing tests this" — so a reader who stops there still
+ * leaves with the right idea. The tables underneath are the proof.
+ */
+function answer(tone, title, text) {
+  return `<div class="answer tone-${escapeHtml(tone)}">
+      <div class="answer-title">${escapeHtml(title)}</div>
+      ${text ? `<div class="answer-text">${richText(text)}</div>` : ''}
+    </div>`;
+}
+
+/** A button cell that jumps to another action. */
+function flowLinkCell(id, title) {
+  return {
+    html: `<button class="link" data-goto-flow="${escapeHtml(id)}">${escapeHtml(title)}</button>`,
+  };
+}
+
+/** A section heading inside a tab. */
+function heading(text, note) {
+  return `<h3 class="tab-heading">${escapeHtml(text)}</h3>${
+    note ? `<p class="tab-note">${richText(note)}</p>` : ''
+  }`;
+}
+
 /** A short note explaining the panel, in the user's terms rather than ours. */
 function panelIntro(text) {
   return `<p class="panel-intro">${escapeHtml(text)}</p>`;
@@ -900,33 +1305,14 @@ function panelLoading(panel, what) {
 }
 
 /** Tab 2 — where the time goes. */
-function renderTiming() {
-  const panel = el.panels.timing;
-  if (!panel) return;
-  if (!state.insight) return panelLoading(panel, 'the timings');
-  if (state.insight.error) return panelError(panel, state.insight);
-
-  const timing = state.insight.timing;
-
-  if (!timing.observed) {
-    panel.innerHTML =
-      panelIntro('How long each step of this feature takes, measured from real runs.') +
-      `<div class="empty-state">
-         <h3>Nothing has been measured yet</h3>
-         <p>Flowslens does not guess timings. These numbers come from your app
-            actually running, so there is nothing to show until it has.</p>
-         <ol class="steps-todo">
-           <li>Add <code>@flowslens/runtime</code> to the app you are studying.</li>
-           <li><code>app.use(flowlensHttp())</code>, and <code>traceMethod</code>
-               around the service methods you care about.</li>
-           <li>Use the feature once in a browser, then press <strong>Rescan</strong>.</li>
-         </ol>
-       </div>`;
-    return;
-  }
-
-  const slowest = timing.slowest;
-  const rows = timing.steps
+/**
+ * Time per step, from real runs, for the Performance tab. Database queries are
+ * left out of the table — they are listed under it with their code — so the
+ * table is the rest of the path: handler, request, route, service.
+ */
+function timingHtml(timing) {
+  const steps = timing.steps.filter((step) => step.kind !== 'db-op' && step.kind !== 'collection');
+  const rows = steps
     .map((step) => {
       const share = step.sharePct ?? 0;
       const self = step.avgSelfMs ?? 0;
@@ -935,6 +1321,7 @@ function renderTiming() {
             <span class="layer-dot layer-${step.layer}"></span>
             ${escapeHtml(step.label)}
             <span class="t-kind">${escapeHtml(tileKind(step))}</span>
+            ${step.file ? fileRef(step.file, step.line) : ''}
           </td>
           <td class="t-bar">
             <span class="bar" style="width:${Math.max(share, 1)}%"></span>
@@ -946,37 +1333,546 @@ function renderTiming() {
         </tr>`;
     })
     .join('');
-
-  panel.innerHTML =
-    panelIntro(
-      'How long each step takes, measured from real runs. "Own time" is the step ' +
-        'itself; "total" includes everything it called.',
+  const unobserved = timing.unobserved.filter(
+    (step) => step.kind !== 'db-op' && step.kind !== 'collection',
+  );
+  return (
+    heading(
+      'Time per step',
+      '"Own time" is the step itself; "total" includes everything it called. Queries are listed below.',
     ) +
-    `<div class="stat-row">
-       <div class="stat"><span class="stat-value">${timing.totalMs}ms</span>
-         <span class="stat-label">whole feature</span></div>
-       <div class="stat"><span class="stat-value">${timing.accountedMs}ms</span>
-         <span class="stat-label">accounted for by the steps below</span></div>
-       ${
-         slowest
-           ? `<div class="stat"><span class="stat-value">${escapeHtml(slowest.label)}</span>
-                <span class="stat-label">slowest step (${slowest.avgSelfMs}ms of its own)</span></div>`
-           : ''
-       }
-     </div>
-     <table class="timing-table">
+    (rows
+      ? `<table class="timing-table">
        <thead><tr>
          <th>Step</th><th>Own time</th><th>Share</th><th>Total</th><th>Runs</th>
        </tr></thead>
        <tbody>${rows}</tbody>
-     </table>` +
+     </table>`
+      : '<p class="muted">No step outside the database was timed.</p>') +
     notesList(timing.notes) +
-    (timing.unobserved.length
-      ? `<details class="more"><summary>${timing.unobserved.length} steps with no measurement</summary>
-           <ul class="plain">${timing.unobserved
+    (unobserved.length
+      ? `<details class="more"><summary>${unobserved.length} steps with no measurement</summary>
+           <ul class="plain">${unobserved
              .map((step) => `<li>${escapeHtml(step.label)}</li>`)
              .join('')}</ul></details>`
-      : '');
+      : '')
+  );
+}
+
+/** Other actions that have been measured, for when this one has not. */
+function measuredElsewhereHtml() {
+  const measured = state.flows
+    .filter((flow) => flow.totalMs != null && flow.id !== state.selectedFlow?.id)
+    .sort((a, b) => b.totalMs - a.totalMs);
+  if (!measured.length) return '';
+  return `<details class="more"><summary>${measured.length} other action${measured.length === 1 ? ' has' : 's have'} been measured</summary>${renderDocTable(
+    {
+      columns: ['Action', 'Whole action', 'Requests'],
+      rows: measured.map((flow) => ({
+        cells: [
+          flowLinkCell(flow.id, flowTitle(flow)),
+          `**${formatMs(flow.totalMs)}**`,
+          flow.endpoints.map((endpoint) => `\`${endpoint}\``).join(', '),
+        ],
+      })),
+    },
+  )}</details>`;
+}
+
+/**
+ * The Docs tab — the selected action, from the page opening to the state the
+ * screen is left in.
+ *
+ * Up to nineteen stages, always in the same order, so two actions can be read
+ * side by side. Only the steps the action actually has are drawn, numbered
+ * 1…N; the rest are named under "Not in this action" with the reason, so a
+ * missing guard or validation is still stated rather than silently dropped.
+ * The document is built by `explainAction` in core from the
+ * graph plus the few source files the action touches; the Markdown behind
+ * "Copy" comes from the same document, so the two cannot disagree.
+ */
+function renderDocs() {
+  const panel = el.panels.docs;
+  if (!panel) return;
+  const flow = state.selectedFlow;
+
+  if (!flow) {
+    panel.innerHTML = `<div class="empty-state"><h3>Nothing to describe yet</h3>
+       <p>Select an action on the left.</p></div>`;
+    return;
+  }
+  const bar = docBar(flow);
+  const doc = state.actionDoc;
+
+  if (state.actionDocLoading || !doc || (doc.flowId && doc.flowId !== flow.id)) {
+    panel.innerHTML = bar + '<p class="muted">Reading the code behind this action…</p>';
+    bindDocBar(panel);
+    return;
+  }
+  if (doc.error) {
+    panel.innerHTML = bar + `<p class="error">${escapeHtml(String(doc.error))}</p>`;
+    bindDocBar(panel);
+    return;
+  }
+
+  // Numbered as drawn, so the reader never sees a gap.
+  const shown = doc.stages
+    .filter((stage) => !stage.absent)
+    .map((stage, index) => ({ ...stage, n: index + 1 }));
+  const absent = doc.stages.filter((stage) => stage.absent);
+  const phases = [];
+  for (const stage of shown) {
+    const last = phases.at(-1);
+    if (last && last.phase === stage.phase) last.stages.push(stage);
+    else phases.push({ phase: stage.phase, stages: [stage] });
+  }
+
+  panel.innerHTML =
+    bar +
+    `<article class="adoc">
+       <header class="adoc-intro">
+         <p class="adoc-lede">The user ${richText(doc.trigger.replace(/"([^"]+)"/g, '**"$1"**'))}${
+           doc.screen ? ` on <strong>${escapeHtml(doc.screen)}</strong>` : ''
+         }.</p>
+         <div class="adoc-meta">
+           ${doc.endpoints.map((endpoint) => `<code>${escapeHtml(endpoint)}</code>`).join(' ')}
+           <span class="chip small ${doc.evidence === 'static' ? '' : 'ok'}">${escapeHtml(
+             doc.evidence === 'static'
+               ? 'read from the source'
+               : doc.evidence === 'confirmed'
+                 ? 'confirmed at runtime'
+                 : 'seen at runtime',
+           )}</span>
+           ${doc.source ? fileRef(doc.source.file, doc.source.line) : ''}
+         </div>
+       </header>
+       ${renderGlance(phases)}
+       ${renderAbsent(absent)}
+       ${phases.map(renderPhase).join('')}
+       ${
+         doc.limits.length === 0
+           ? ''
+           : `<details class="more doc-limits"><summary>What this document cannot see</summary>
+                <ul class="plain">${doc.limits.map((line) => `<li>${richText(line)}</li>`).join('')}</ul></details>`
+       }
+     </article>`;
+
+  bindDocBar(panel);
+  for (const head of panel.querySelectorAll('.adoc-head')) {
+    head.addEventListener('click', () => {
+      const stage = head.closest('.adoc-stage');
+      const open = !stage.classList.toggle('is-collapsed');
+      head.setAttribute('aria-expanded', String(open));
+    });
+  }
+  bindTableFolds(panel);
+  bindCopy(panel);
+  bindFlowJumps(panel);
+  for (const link of panel.querySelectorAll('[data-stage-jump]')) {
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      const target = panel.querySelector(`#adoc-stage-${link.dataset.stageJump}`);
+      if (!target) return;
+      target.classList.remove('is-collapsed');
+      target.querySelector('.adoc-head')?.setAttribute('aria-expanded', 'true');
+      target.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+      target.classList.add('is-flash');
+      setTimeout(() => target.classList.remove('is-flash'), 1200);
+    });
+  }
+}
+
+/** The "Show all N rows" buttons under long tables. */
+function bindTableFolds(panel) {
+  for (const button of panel.querySelectorAll('.adoc-more')) {
+    button.addEventListener('click', () => {
+      const wrap = button.closest('.adoc-table-wrap');
+      const folded = wrap.classList.toggle('is-folded');
+      button.textContent = folded ? `Show all ${button.dataset.rows} rows` : 'Show fewer';
+    });
+  }
+}
+
+const PHASE_TITLES = {
+  browser: 'In the browser — before anything is sent',
+  wire: 'Over the network',
+  server: 'On the server',
+  database: 'In the database',
+  back: 'The way back — response to screen',
+};
+
+/**
+ * The whole action on one screen: one line per stage, grouped by where it
+ * happens. The part a developer reads first, and often the only part they need;
+ * every line jumps to its stage below.
+ */
+function renderGlance(phases) {
+  return `<section class="adoc-glance" aria-label="At a glance">
+      <h3>At a glance</h3>
+      ${phases
+        .map(
+          ({ phase, stages }) => `<div class="glance-phase phase-${escapeHtml(phase)}">
+            <div class="glance-phase-title">${escapeHtml(PHASE_TITLES[phase] ?? phase)}</div>
+            <ol class="glance-steps">${stages
+              .map(
+                (stage) => `<li class="${stage.groups.length === 0 ? 'is-empty' : ''}">
+                  <a href="#adoc-stage-${stage.n}" data-stage-jump="${stage.n}">
+                    <span class="glance-num">${stage.n}</span>
+                    <span class="glance-title">${escapeHtml(stage.title)}</span>
+                    <span class="glance-summary">${richText(stage.summary || '—')}</span>
+                  </a>
+                </li>`,
+              )
+              .join('')}</ol>
+          </div>`,
+        )
+        .join('<div class="glance-arrow" aria-hidden="true">↓</div>')}
+    </section>`;
+}
+
+/** The template's steps this action does not have, and why each is missing. */
+function renderAbsent(stages) {
+  if (stages.length === 0) return '';
+  return `<section class="adoc-absent" aria-label="Not in this action">
+      <h4>Not in this action</h4>
+      <ul class="plain">${stages
+        .map(
+          (stage) =>
+            `<li><span class="adoc-absent-title">${escapeHtml(stage.title)}</span> ${richText(stage.summary || '')}</li>`,
+        )
+        .join('')}</ul>
+    </section>`;
+}
+
+function renderPhase({ phase, stages }) {
+  return `<section class="adoc-phase phase-${escapeHtml(phase)}">
+      <h3 class="adoc-phase-title">${escapeHtml(PHASE_TITLES[phase] ?? phase)}</h3>
+      <ol class="adoc-stages">${stages.map(renderStage).join('')}</ol>
+    </section>`;
+}
+
+function renderStage(stage) {
+  return `<li id="adoc-stage-${stage.n}" class="adoc-stage${stage.groups.length === 0 ? ' is-empty' : ''}" data-stage="${escapeHtml(stage.key)}">
+      <button class="adoc-head" aria-expanded="true">
+        <span class="adoc-num">${stage.n}</span>
+        <span class="adoc-heading">
+          <span class="adoc-title">${escapeHtml(stage.title)}</span>
+          ${stage.summary ? `<span class="adoc-summary">${richText(stage.summary)}</span>` : ''}
+        </span>
+      </button>
+      <div class="adoc-body">
+        ${
+          stage.groups.length === 0
+            ? `<p class="adoc-empty">${richText(stage.empty ?? 'Nothing found for this stage.')}</p>`
+            : stage.groups.map(renderDocGroup).join('')
+        }
+        ${stageExtras(stage.key)}
+      </div>
+    </li>`;
+}
+
+/**
+ * What the request and response stages add from the request analysis (what
+ * used to be the APIs tab): the checks on the call itself, a command to try
+ * it, who else calls the endpoint, and what it answered when it ran. Only
+ * facts the document does not already state.
+ */
+function stageExtras(key) {
+  const calls = state.insight && !state.insight.error ? (state.insight.apis?.calls ?? []) : [];
+  if (!calls.length) return '';
+  const many = calls.length > 1;
+  const label = (text, call) => (many ? `${text} · ${call.endpoint}` : text);
+
+  if (key === 'request') {
+    const groups = [];
+    if (many) groups.push({ label: 'Order of the requests', html: requestSequence(calls) });
+    for (const call of calls) {
+      const checks = [
+        ...(call.matched
+          ? []
+          : [
+              {
+                text: 'No route in this project answers this call — it is served elsewhere, or the path or method disagree.',
+                tone: 'error',
+              },
+            ]),
+        // Whether it was seen running is the evidence chip's job, and the chip is
+        // per action — a per-call "never observed" contradicts it when only the
+        // server side of the call was traced.
+        ...call.warnings
+          .filter((warning) => !/never observed/i.test(warning))
+          .map((warning) => ({ text: warning, tone: 'warn' })),
+        ...(call.contract?.unexpected ?? []).map((field) => ({
+          text: `\`${field.name}\` is sent but the route does not declare it — validation usually drops it silently`,
+          tone: 'warn',
+        })),
+        ...(call.contract?.missing ?? []).map((field) => ({
+          text: `\`${field.name}\` is declared by the route but never sent`,
+          tone: 'warn',
+        })),
+      ];
+      if (checks.length) groups.push({ label: label('Checks on this call', call), lines: checks });
+      const curl = curlFor(call);
+      groups.push({
+        label: label('Try it', call),
+        html: `<div class="command"><code>${escapeHtml(curl)}</code>
+            <button class="button ghost small" data-copy="${escapeHtml(curl)}">Copy</button></div>`,
+      });
+      const others = [
+        ...call.alsoUsedBy.map((feature) => ({
+          html: `<button class="link" data-goto-flow="${escapeHtml(feature.id)}">${escapeHtml(feature.title)}</button>${
+            feature.subtitle ? ` <span class="muted">${escapeHtml(feature.subtitle)}</span>` : ''
+          }`,
+        })),
+        ...call.otherCallSites.map((site) => {
+          const [file, line] = splitSite(site);
+          return { html: `also called from ${fileRef(file, line)}` };
+        }),
+      ];
+      groups.push({
+        label: label('Who else calls this endpoint', call),
+        ...(others.length
+          ? {
+              html: `<ul class="adoc-lines">${others.map((entry) => `<li>${entry.html}</li>`).join('')}</ul>`,
+            }
+          : { lines: [{ text: 'Only this action calls it.', tone: 'muted' }] }),
+      });
+    }
+    return groups.map(renderExtraGroup).join('');
+  }
+
+  if (key === 'response') {
+    return calls
+      .map((call) => {
+        const codes = call.response.statusCodes;
+        return renderExtraGroup({
+          label: label('Seen running', call),
+          html: codes.length
+            ? `<p>Answered ${codes
+                .map(
+                  (code) =>
+                    `<span class="chip small ${code >= 500 ? 'danger' : code >= 400 ? 'warn' : 'ok'}">${code}</span>`,
+                )
+                .join(
+                  ' ',
+                )}${call.observations ? ` over ${call.observations} run${call.observations === 1 ? '' : 's'}` : ''}${
+                call.response.landsInState.length
+                  ? ` · the answer lands in ${call.response.landsInState.map((name) => `<code>${escapeHtml(name)}</code>`).join(' ')}`
+                  : ''
+              }</p>`
+            : '<p class="muted">Never seen running — the statuses above are read from the code.</p>',
+        });
+      })
+      .join('');
+  }
+  return '';
+}
+
+function renderExtraGroup(group) {
+  if (group.html) {
+    return `<section class="adoc-group"><h4>${escapeHtml(group.label)}</h4>${group.html}</section>`;
+  }
+  return renderDocGroup({ label: group.label, lines: group.lines ?? [] });
+}
+
+/**
+ * The requests in one line. The join says how they relate: `or` between two
+ * arms of one conditional, `+` for concurrent, `→` for a real sequence — an
+ * arrow between alternatives would claim both happen.
+ */
+function requestSequence(calls) {
+  return `<div class="sequence">${calls
+    .map((call, index) => {
+      const previous = calls[index - 1];
+      const join =
+        index === 0
+          ? ''
+          : previous.order === call.order
+            ? 'or'
+            : call.parallelWith.length && previous.parallelWith.length
+              ? '+'
+              : '→';
+      return (
+        (join ? `<span class="seq-join">${join}</span>` : '') +
+        `<span class="seq-item${call.onFailure ? ' on-failure' : ''}">` +
+        `<span class="seq-n">${call.order}</span>` +
+        `<code>${escapeHtml(call.endpoint)}</code></span>`
+      );
+    })
+    .join('')}</div>`;
+}
+
+function renderDocGroup(group) {
+  const lines = group.lines.length
+    ? `<ul class="adoc-lines">${group.lines.map(renderDocLine).join('')}</ul>`
+    : '';
+  const table = group.table?.rows.length ? renderDocTable(group.table) : '';
+  const tone = group.tone ? ` tone-${escapeHtml(group.tone)}` : '';
+  if (group.collapsed) {
+    return `<details class="adoc-group is-folded${tone}">
+        <summary>${escapeHtml(group.label)}</summary>${lines}${table}
+      </details>`;
+  }
+  return `<section class="adoc-group${tone}">
+      <h4>${escapeHtml(group.label)}</h4>${lines}${table}
+    </section>`;
+}
+
+/** Long tables show this many rows until the reader asks for the rest. */
+const TABLE_FOLD = 8;
+
+function renderDocTable(table) {
+  const refs = table.rows.some((row) => row.at?.file);
+  const head = table.columns.some(Boolean)
+    ? `<thead><tr>${table.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join('')}${
+        refs ? '<th></th>' : ''
+      }</tr></thead>`
+    : '';
+  const fold = table.rows.length > TABLE_FOLD + 2;
+  const rows = table.rows
+    .map(
+      (row, index) =>
+        `<tr class="${row.tone ? `tone-${escapeHtml(row.tone)}` : ''}${fold && index >= TABLE_FOLD ? ' is-extra' : ''}">${row.cells
+          .map(
+            (cell) => `<td>${typeof cell === 'object' && cell ? cell.html : richText(cell)}</td>`,
+          )
+          .join(
+            '',
+          )}${refs ? `<td class="adoc-ref">${row.at?.file ? fileRef(row.at.file, row.at.line) : ''}</td>` : ''}</tr>`,
+    )
+    .join('');
+  return `<div class="adoc-table-wrap${fold ? ' is-folded' : ''}"><table class="adoc-table${
+    table.columns.some(Boolean) ? '' : ' is-keyvalue'
+  }">${head}<tbody>${rows}</tbody></table>${
+    fold
+      ? `<button class="link adoc-more" data-rows="${table.rows.length}">Show all ${table.rows.length} rows</button>`
+      : ''
+  }</div>`;
+}
+
+function renderDocLine(line) {
+  const sub = line.sub?.length
+    ? `<ul class="adoc-lines adoc-sub">${line.sub.map(renderDocLine).join('')}</ul>`
+    : '';
+  return `<li class="${line.tone ? `tone-${escapeHtml(line.tone)}` : ''}">
+      <span class="adoc-text">${richText(line.text)}</span>${line.at?.file ? ` ${fileRef(line.at.file, line.at.line)}` : ''}${sub}
+    </li>`;
+}
+
+/**
+ * Inline code, **bold** and _italic_, escaped first.
+ *
+ * Emphasis is applied only outside `<code>`, so `original._retry` stays code
+ * rather than turning half of it italic.
+ */
+function richText(text) {
+  return inlineCode(text)
+    .split(/(<code>[\s\S]*?<\/code>)/)
+    .map((part) =>
+      part.startsWith('<code>')
+        ? linkFileCode(part)
+        : part
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/(^|[\s(])_([^_]+)_(?=$|[\s).,;:])/g, '$1<em>$2</em>'),
+    )
+    .join('');
+}
+
+/**
+ * `<code>app/api/products/[id]/route.ts</code>` — or `…/route.ts:12`, or a
+ * path at the end of `DELETE /x → app/api/…/route.ts` — opens in the editor
+ * when it names a file the scan read. Nested, because rich text also lands
+ * inside at-a-glance rows, which are links themselves.
+ */
+function linkFileCode(part) {
+  const inner = part
+    .slice('<code>'.length, -'</code>'.length)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+  const match = /^(.*?)([\w@.()[\]/-]+\.(?:[cm]?[jt]sx?|vue|svelte|prisma))(?::(\d+))?$/.exec(
+    inner,
+  );
+  if (!match || !isKnownFile(match[2])) return part;
+  const [, before, file, line] = match;
+  const link = `<code class="code-link">${editorLink(
+    escapeHtml(line ? `${file}:${line}` : file),
+    file,
+    line ? Number(line) : 1,
+    { nested: true },
+  )}</code>`;
+  return before.trim() ? `<code>${escapeHtml(before.trimEnd())}</code> ${link}` : link;
+}
+
+/** The action's name, plus the ways to take the document elsewhere. */
+function docBar(flow) {
+  const markdown = apiUrl(`/api/action?flow=${encodeURIComponent(flow.id)}&format=markdown`);
+  return `<div class="doc-bar">
+      <div class="doc-picker">${viewSwitch()}<span>How this action works, end to end</span></div>
+      <div class="doc-bar-actions">
+        <button class="button ghost" id="doc-toggle">Collapse all</button>
+        <button class="button ghost" id="doc-copy">Copy as Markdown</button>
+        <a class="button ghost" href="${markdown}" target="_blank" rel="noreferrer">Open Markdown</a>
+      </div>
+    </div>`;
+}
+
+function bindDocBar(panel) {
+  panel.querySelector('#doc-toggle')?.addEventListener('click', (event) => {
+    const button = event.currentTarget;
+    const collapse = button.textContent === 'Collapse all';
+    for (const stage of panel.querySelectorAll('.adoc-stage')) {
+      stage.classList.toggle('is-collapsed', collapse);
+      stage.querySelector('.adoc-head')?.setAttribute('aria-expanded', String(!collapse));
+    }
+    button.textContent = collapse ? 'Expand all' : 'Collapse all';
+  });
+
+  panel.querySelector('#doc-copy')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    const id = state.selectedFlow?.id;
+    if (!id) return;
+    // Fetched rather than rebuilt here: one renderer in core, so the pasted
+    // document cannot drift from the one on screen.
+    try {
+      const response = await fetch(
+        apiUrl(`/api/action?flow=${encodeURIComponent(id)}&format=markdown`),
+      );
+      await navigator.clipboard.writeText(await response.text());
+      button.textContent = 'Copied';
+      setTimeout(() => {
+        button.textContent = 'Copy as Markdown';
+      }, 1200);
+    } catch {
+      button.textContent = 'Could not copy';
+      setTimeout(() => {
+        button.textContent = 'Copy as Markdown';
+      }, 1600);
+    }
+  });
+}
+
+/**
+ * `\`GET /products\`` -> `<code>GET /products</code>`.
+ *
+ * The prose carries endpoints and collection names in backticks, which is how
+ * they read in the markdown version. Escaping first and marking up second is
+ * what keeps a collection called `<script>` from being one.
+ */
+function inlineCode(text) {
+  return escapeHtml(String(text)).replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+/** Jumps from the Performance tab stay on the Performance tab. */
+function bindTimingJumps(panel) {
+  for (const button of panel.querySelectorAll('[data-goto-flow]')) {
+    button.addEventListener('click', () => {
+      state.tab = 'perf';
+      selectFlow(button.dataset.gotoFlow);
+    });
+  }
 }
 
 /** Tab 3 — what a change here would break. */
@@ -987,137 +1883,124 @@ function renderImpact() {
   if (state.insight.error) return panelError(panel, state.insight);
 
   const impact = state.insight.impact;
-
   const intro = panelIntro(
-    'Before you change this feature: these are the parts of it that other ' +
-      'features also run through. Change a shared step and you change them too.',
+    'Before you change this action: which other actions run through the same code or ' +
+      'write the same data. Change a shared part and you change them too.',
   );
+  const others = impact.featuresAtRisk ?? [];
+  const contested = impact.contestedCollections ?? [];
 
-  const infraCount = impact.infrastructure?.length ?? 0;
-
-  if (impact.shared.length === 0 && impact.contestedCollections.length === 0) {
-    panel.innerHTML =
-      intro +
-      `<div class="empty-state ok">
-         <h3>This change is contained</h3>
-         <p>${escapeHtml(impact.summary)}</p>
-         <p class="muted">No other feature depends on this one's business logic.${
-           infraCount
-             ? ` It shares ${infraCount} infrastructure step${
-                 infraCount > 1 ? 's' : ''
-               } — a hook, a cache, a log — which is what infrastructure is for.`
-             : ''
-         }</p>
-       </div>` +
-      renderInfrastructure(impact);
-    bindFlowJumps(panel);
-    return;
-  }
-
-  const features = impact.featuresAtRisk
-    .map(
-      (feature) =>
-        `<li>
-           <button class="link" data-goto-flow="${escapeHtml(feature.id)}">${escapeHtml(
-             feature.title,
-           )}</button>
-           ${
-             feature.subtitle
-               ? `<span class="muted small">${escapeHtml(feature.subtitle)}</span>`
-               : ''
-           }
-           <span class="muted">— shares ${feature.viaSteps} step${
-             feature.viaSteps > 1 ? 's' : ''
-           } with this one</span>
-         </li>`,
-    )
-    .join('');
-
-  const sharedRows = impact.shared
-    .map(
-      (step) => `<div class="shared-step level-${step.level}" data-step-id="${escapeHtml(
-        step.nodeId,
-      )}">
-        <div class="shared-head">
-          <span class="layer-dot layer-${step.layer}"></span>
-          <strong>${escapeHtml(step.label)}</strong>
-          <span class="chip small">${escapeHtml(step.kind.replace('-', ' '))}</span>
-          <span class="chip small ${step.level === 'high' ? 'danger' : 'warn'}">
-            ${step.otherFlows.length} other feature${step.otherFlows.length > 1 ? 's' : ''}
-          </span>
-        </div>
-        ${step.file ? `<div class="shared-file">${fileLink(step.file, step.line)}</div>` : ''}
-        <div class="shared-flows">${step.otherFlows
-          .map(
-            (other) =>
-              `<button class="pill" data-goto-flow="${escapeHtml(other.id)}">${escapeHtml(
-                other.title,
-              )}</button>`,
-          )
-          .join('')}</div>
-        ${
-          step.warnings.length
-            ? `<ul class="warn-list">${step.warnings
-                .map((warning) => `<li>${escapeHtml(warning)}</li>`)
-                .join('')}</ul>`
-            : ''
-        }
-      </div>`,
-    )
-    .join('');
-
-  const contested = impact.contestedCollections.length
-    ? `<h3>Collections more than one place writes</h3>
-       <p class="panel-intro">These are written from several methods. Changing the
-          shape of what this feature writes can break the others' assumptions,
-          and nobody gets a compile error.</p>
-       ${impact.contestedCollections
-         .map(
-           (entry) => `<div class="contested">
-              <strong>${escapeHtml(entry.collection)}</strong>
-              <span class="muted">written by</span>
-              ${entry.writers
-                .map((writer) => `<span class="pill flat">${escapeHtml(writer)}</span>`)
-                .join('')}
-            </div>`,
-         )
-         .join('')}`
+  // The verdict: one sentence about code, one about data.
+  const codeAnswer =
+    impact.shared.length === 0
+      ? answer(
+          'ok',
+          'Safe to change on its own',
+          'No other action runs through this action’s code. ' + (impact.summary ?? ''),
+        )
+      : answer(
+          impact.level === 'high' ? 'danger' : 'warn',
+          `${others.length} other action${others.length === 1 ? '' : 's'} share${others.length === 1 ? 's' : ''} code with this one`,
+          `Change risk: **${impact.level}**. ${impact.summary ?? ''}`,
+        );
+  const dataAnswer = contested.length
+    ? answer(
+        'warn',
+        `Shared data: ${contested.map((entry) => entry.collection).join(', ')}`,
+        'Other code writes the same collection' +
+          (contested.length > 1 ? 's' : '') +
+          '. Changing the shape of what this action saves can break it — and there is no compile error to warn you.',
+      )
     : '';
 
-  const infrastructure = renderInfrastructure(impact);
+  const why = (impact.factors ?? []).length
+    ? heading('Why this risk level') +
+      `<ul class="plain why-list">${impact.factors.map((factor) => `<li>${escapeHtml(factor)}</li>`).join('')}</ul>`
+    : '';
+
+  const atRisk = others.length
+    ? heading('Actions that could break') +
+      renderDocTable({
+        columns: ['Action', 'Shares'],
+        rows: others.map((feature) => ({
+          cells: [
+            flowLinkCell(
+              feature.id,
+              feature.title + (feature.subtitle ? ` · ${feature.subtitle}` : ''),
+            ),
+            `${feature.viaSteps} step${feature.viaSteps > 1 ? 's' : ''}`,
+          ],
+          tone: 'warn',
+        })),
+      })
+    : '';
+
+  const shared = impact.shared.length
+    ? heading('Shared code, most-shared first') +
+      renderDocTable({
+        columns: ['Step', 'Kind', 'Also used by', 'Warnings'],
+        rows: impact.shared.map((step) => ({
+          cells: [
+            `\`${step.label}\``,
+            step.kind.replace('-', ' '),
+            {
+              html: step.otherFlows
+                .map(
+                  (other) =>
+                    `<button class="pill" data-goto-flow="${escapeHtml(other.id)}">${escapeHtml(other.title)}</button>`,
+                )
+                .join(' '),
+            },
+            step.warnings.join(' '),
+          ],
+          ...(step.file ? { at: { file: step.file, line: step.line } } : {}),
+          tone: step.level === 'high' ? 'error' : 'warn',
+        })),
+      })
+    : '';
+
+  const data = contested.length
+    ? heading('Shared data') +
+      renderDocTable({
+        columns: ['Collection', 'Also written by'],
+        rows: contested.map((entry) => ({
+          cells: [
+            `**${entry.collection}**`,
+            entry.writers.map((writer) => `\`${writer}\``).join(', '),
+          ],
+          tone: 'warn',
+        })),
+      })
+    : '';
+
+  const exclusive = impact.exclusive.length
+    ? heading(
+        'Only this action uses these — safe to change',
+        `${impact.exclusive.length} step${impact.exclusive.length === 1 ? '' : 's'} nothing else runs through.`,
+      ) +
+      renderDocTable({
+        columns: ['Step', 'Kind'],
+        rows: impact.exclusive.map((step) => ({
+          cells: [`\`${step.label}\``, (step.kind ?? '').replace('-', ' ')],
+          ...(step.file ? { at: { file: step.file, line: step.line } } : {}),
+          tone: 'ok',
+        })),
+      })
+    : '';
 
   panel.innerHTML =
     intro +
-    `<div class="verdict level-${impact.level}">
-       <span class="verdict-level">${escapeHtml(impact.level)} risk</span>
-       <span>${escapeHtml(impact.summary)}</span>
-     </div>
-     <details class="more why"><summary>Why this level</summary>
-       <ul class="plain small">${(impact.factors ?? [])
-         .map((factor) => `<li>${escapeHtml(factor)}</li>`)
-         .join('')}</ul>
-     </details>
-     ${features ? `<h3>Features that could break</h3><ul class="plain">${features}</ul>` : ''}
-     <h3>Shared steps, most-shared first</h3>
-     ${sharedRows}
-     ${infrastructure}
-     ${contested}
-     ${
-       impact.exclusive.length
-         ? `<details class="more"><summary>${impact.exclusive.length} steps only this feature uses — safe to change</summary>
-              <ul class="plain">${impact.exclusive
-                .map(
-                  (step) =>
-                    `<li>${escapeHtml(step.label)} ${
-                      step.file ? `<code>${escapeHtml(step.file)}</code>` : ''
-                    }</li>`,
-                )
-                .join('')}</ul></details>`
-         : ''
-     }`;
+    `<div class="answer-row">${codeAnswer}${dataAnswer}</div>` +
+    atRisk +
+    shared +
+    data +
+    why +
+    exclusive +
+    renderInfrastructure(impact);
 
   bindFlowJumps(panel);
   bindStepSelection(panel);
+  bindTableFolds(panel);
 }
 
 /**
@@ -1160,91 +2043,91 @@ function renderTests() {
   if (state.insight.error) return panelError(panel, state.insight);
 
   const tests = state.insight.tests;
+  const flow = state.selectedFlow;
   const intro = panelIntro(
-    'Which tests import the files this feature runs through — that is, what would ' +
-      'fail if you broke it.',
+    'Which tests would fail if you broke this action — measured by which test files ' +
+      'import the files the action runs through.',
   );
+
+  // The files no test reaches — the chain itself is in Docs, so only the gap is listed.
+  const byFile = new Map();
+  for (const step of flow?.steps ?? []) {
+    if (!step.file) continue;
+    const entry = byFile.get(step.file) ?? { layer: step.layer, steps: [] };
+    entry.steps.push(step.label);
+    byFile.set(step.file, entry);
+  }
+  const uncovered = new Set((tests.uncoveredFiles ?? []).map((entry) => entry.file));
+  const covered = new Set(tests.files.flatMap((file) => file.coversFromFlow ?? []));
+  const untested = [...byFile.entries()].filter(
+    ([file]) =>
+      !(
+        tests.files.length > 0 &&
+        !uncovered.has(file) &&
+        (covered.size === 0 || covered.has(file))
+      ),
+  );
+  const fileTable = untested.length
+    ? heading(
+        'Files no test reaches',
+        'A test that imports one of these would cover the part of the action in it.',
+      ) +
+      renderDocTable({
+        columns: ['File', 'Steps in it'],
+        rows: untested.map(([file, entry]) => ({
+          cells: [`\`${file}\``, [...new Set(entry.steps)].map((step) => `\`${step}\``).join(', ')],
+          tone: 'error',
+        })),
+      })
+    : '';
 
   if (tests.files.length === 0) {
     panel.innerHTML =
       intro +
-      `<div class="empty-state danger">
-         <h3>Nothing covers this feature</h3>
-         <p>No test file imports any file this flow runs through. A change here
-            would fail silently — which makes the <strong>Breaks</strong> tab the
-            one to read before editing.</p>
-       </div>` +
+      answer(
+        'danger',
+        'No test covers this action',
+        `No test file imports any of the ${byFile.size} files it runs through, so breaking it would not fail the suite. Read the **Breaks** tab before editing.`,
+      ) +
+      fileTable +
       notesList(tests.notes);
+    bindTableFolds(panel);
     return;
   }
 
-  const meterTone = tests.coveragePct >= 80 ? 'ok' : tests.coveragePct >= 40 ? 'warn' : 'danger';
-
-  const files = tests.files
+  const tone = tests.coveragePct >= 80 ? 'ok' : tests.coveragePct >= 40 ? 'warn' : 'danger';
+  const cases = tests.files
     .map(
-      (file) => `<div class="test-file">
-        <div class="test-head">
-          <strong>${escapeHtml(file.file)}</strong>
-          <span class="chip small">${file.cases.length} case${
-            file.cases.length === 1 ? '' : 's'
-          }</span>
-          ${file.integration ? '<span class="chip small">integration</span>' : ''}
-        </div>
-        <div class="muted small">covers ${file.coversFromFlow
-          .map((covered) => `<code>${escapeHtml(covered)}</code>`)
-          .join(' ')}</div>
-        <ul class="case-list">${file.cases
-          .slice(0, 12)
-          .map(
-            (testCase) =>
-              `<li>${
-                testCase.suite ? `<span class="muted">${escapeHtml(testCase.suite)} › </span>` : ''
-              }${escapeHtml(testCase.title)}</li>`,
-          )
-          .join('')}</ul>
-        ${
-          file.cases.length > 12
-            ? `<p class="muted small">…and ${file.cases.length - 12} more</p>`
-            : ''
-        }
-      </div>`,
+      (file) =>
+        `<h3 class="tab-heading">${fileLink(file.file)} — ${file.cases.length} case${file.cases.length === 1 ? '' : 's'}${file.integration ? ' · integration' : ''}</h3>` +
+        renderDocTable({
+          columns: ['Test', 'Suite'],
+          // Each case opens at its own `it(...)`.
+          rows: file.cases.map((testCase) => ({
+            cells: [testCase.title, testCase.suite ?? ''],
+            at: { file: file.file, line: testCase.line },
+          })),
+        }),
     )
     .join('');
 
   panel.innerHTML =
     intro +
-    `<div class="stat-row">
-       <div class="stat">
-         <span class="stat-value">${tests.coveragePct}%</span>
-         <span class="stat-label">of this flow's files have a test importing them</span>
-         <span class="meter"><span class="meter-fill ${meterTone}" style="width:${tests.coveragePct}%"></span></span>
-       </div>
-       <div class="stat"><span class="stat-value">${tests.totalCases}</span>
-         <span class="stat-label">test cases touch this feature</span></div>
-     </div>
-     ${
-       tests.uncoveredFiles.length
-         ? `<h3>Unguarded parts of this feature</h3>
-            <p class="panel-intro">No test imports these files, so breaking the steps
-               listed under each one would not fail the suite.</p>
-            ${tests.uncoveredFiles
-              .map(
-                (entry) => `<div class="uncovered">
-                   <code>${escapeHtml(entry.file)}</code>
-                   <span class="muted">— ${entry.steps
-                     .map((step) => escapeHtml(step))
-                     .join(', ')}</span>
-                 </div>`,
-              )
-              .join('')}`
-         : ''
-     }
-     <h3>Tests that cover it</h3>
-     ${files}
-     ${runCommand(tests)}` +
+    answer(
+      tone,
+      `${tests.coveragePct}% of this action’s files are tested`,
+      `${tests.totalCases} test case${tests.totalCases === 1 ? '' : 's'} would run against it.` +
+        (uncovered.size
+          ? ` **${uncovered.size} file${uncovered.size === 1 ? ' has' : 's have'} no test** — see below.`
+          : ''),
+    ) +
+    fileTable +
+    cases +
+    runCommand(tests) +
     notesList(tests.notes);
 
   bindCopy(panel);
+  bindTableFolds(panel);
 }
 
 /**
@@ -1277,7 +2160,7 @@ function bindFlowJumps(panel) {
     button.addEventListener('click', () => {
       const id = button.dataset.gotoFlow;
       if (!state.flows.some((flow) => flow.id === id)) return;
-      state.tab = 'impact';
+      // Stay on the tab the link was clicked in.
       selectFlow(id);
     });
   }
@@ -1306,23 +2189,90 @@ const EDITOR_SCHEMES = {
 };
 
 /**
- * A clickable `file:line`, or plain text when there is nothing to link to.
+ * The absolute path of a scanned file, for the editor.
  *
- * Paths in the graph are relative so a scan stays portable between machines;
- * an editor needs the absolute one, so it is rebuilt from the root the scan
- * recorded.
+ * Paths in the graph are relative so a scan stays portable between machines.
+ * A multi-root scan prefixes each file with its repo's name
+ * (`shop-api/src/…`), and `meta.projects` maps that name back to the
+ * repo; everything else is relative to the root.
  */
+function absolutePath(file) {
+  const meta = state.graph?.meta;
+  if (!file || !meta?.root) return undefined;
+  if (/^(\/|[A-Za-z]:[\\/])/.test(file)) return file;
+  const isAbsolute = (path) => typeof path === 'string' && /^(\/|[A-Za-z]:[\\/])/.test(path);
+  for (const [label, path] of Object.entries(meta.projects ?? {})) {
+    if (isAbsolute(path) && file.startsWith(`${label}/`))
+      return `${path.replace(/[/\\]$/, '')}/${file.slice(label.length + 1)}`;
+  }
+  return `${meta.root.replace(/[/\\]$/, '')}/${file}`;
+}
+
+/** The link that opens `file` at `line` in the editor, or undefined. */
+function editorHref(file, line) {
+  const absolute = absolutePath(file);
+  const scheme = EDITOR_SCHEMES[EDITOR];
+  return absolute && scheme ? scheme(absolute, line ?? 1) : undefined;
+}
+
+/**
+ * A `file:line` that opens in the editor.
+ *
+ * A real link where one is allowed; a span carrying `data-editor-href` where
+ * it sits inside something already clickable (a diagram card is a button, an
+ * at-a-glance row is a link), which the capture handler below opens without
+ * setting off the thing around it.
+ */
+function editorLink(label, file, line, { extraClass = '', title, nested = false } = {}) {
+  const href = editorHref(file, line);
+  const full = line ? `${file}:${line}` : file;
+  const tip = escapeHtml(`${title ?? full} — open in your editor`);
+  if (!href)
+    return `<code class="file-ref ${extraClass}" title="${escapeHtml(full)}">${label}</code>`;
+  return nested
+    ? `<span class="file-link ${extraClass}" role="link" tabindex="0" data-editor-href="${escapeHtml(href)}" title="${tip}">${label}</span>`
+    : `<a class="file-link ${extraClass}" href="${escapeHtml(href)}" data-editor-href="${escapeHtml(href)}" title="${tip}">${label}</a>`;
+}
+
+/** The full `path:line`, clickable. */
 function fileLink(file, line, extraClass = '') {
   if (!file) return '';
-  const shown = line ? `${file}:${line}` : file;
-  const root = state.graph?.meta?.root;
-  const scheme = EDITOR_SCHEMES[EDITOR];
-  if (!root || !scheme) return `<code class="${extraClass}">${escapeHtml(shown)}</code>`;
-  const absolute = `${root.replace(/[/\\]$/, '')}/${file}`;
-  return (
-    `<a class="file-link ${extraClass}" href="${escapeHtml(scheme(absolute, line ?? 1))}" ` +
-    `title="Open in your editor">${escapeHtml(shown)}</a>`
-  );
+  return editorLink(escapeHtml(line ? `${file}:${line}` : file), file, line, { extraClass });
+}
+
+document.addEventListener(
+  'click',
+  (event) => {
+    const target = event.target.closest?.('[data-editor-href]');
+    if (!target) return;
+    // Capture phase, so the card or row around the link never sees the click.
+    event.preventDefault();
+    event.stopPropagation();
+    window.location.href = target.dataset.editorHref;
+  },
+  true,
+);
+
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  const target = event.target.closest?.('span[data-editor-href]');
+  if (!target) return;
+  event.preventDefault();
+  window.location.href = target.dataset.editorHref;
+});
+
+/** Every file the scan read, so a path written in text can be made a link. */
+let knownFiles = { graph: null, files: new Set() };
+function isKnownFile(path) {
+  if (knownFiles.graph !== state.graph) {
+    const files = new Set();
+    for (const node of state.graph?.nodes ?? []) {
+      const file = node.source?.file ?? node.file;
+      if (file) files.add(file);
+    }
+    knownFiles = { graph: state.graph, files };
+  }
+  return knownFiles.files.has(path);
 }
 
 /**
@@ -1339,23 +2289,13 @@ function fileLink(file, line, extraClass = '') {
  * the line number are what identify the place. The whole path stays in the
  * tooltip and in the link itself.
  */
-function fileRef(file, line, extraClass = '') {
+function fileRef(file, line, extraClass = '', nested = false) {
   if (!file) return '';
   const base = file.split('/').pop();
-  const root = state.graph?.meta?.root;
-  const scheme = EDITOR_SCHEMES[EDITOR];
-  const shown = line ? `${base}:${line}` : base;
-  const full = line ? `${file}:${line}` : file;
-  if (!root || !scheme) {
-    return `<code class="file-ref ${extraClass}" title="${escapeHtml(full)}">${escapeHtml(
-      shown,
-    )}</code>`;
-  }
-  const absolute = `${root.replace(/[/\\]$/, '')}/${file}`;
-  return (
-    `<a class="file-link ${extraClass}" href="${escapeHtml(scheme(absolute, line ?? 1))}" ` +
-    `title="${escapeHtml(full)} — open in your editor">${escapeHtml(shown)}</a>`
-  );
+  return editorLink(escapeHtml(line ? `${base}:${line}` : base), file, line, {
+    extraClass,
+    nested,
+  });
 }
 
 function bindStepSelection(panel) {
@@ -1373,397 +2313,447 @@ function bindStepSelection(panel) {
 }
 
 /** Tab 2 — every request this action makes, in full. */
-function renderApis() {
-  const panel = el.panels.apis;
-  if (!panel) return;
-  if (!state.insight) return panelLoading(panel, 'the requests this action makes');
-  if (state.insight.error) return panelError(panel, state.insight);
+/** A query at or above this average is called slow on the tab and its badge. */
+const SLOW_QUERY_MS = 200;
 
-  const calls = state.insight.apis?.calls ?? [];
-  const intro = panelIntro(
-    'Every request this action sends, and everything the endpoint does on the other ' +
-      'side: what is in the body, what runs before the handler, which collections it ' +
-      'touches, and who else calls it.',
-  );
+const QUERY_EFFECT = {
+  read: 'read',
+  create: 'insert',
+  update: 'update',
+  delete: 'delete',
+  write: 'write',
+};
 
-  if (calls.length === 0) {
-    panel.innerHTML =
-      intro +
-      `<div class="empty-state">
-         <h3>This action makes no request</h3>
-         <p>It changes local state only — nothing leaves the browser, so there is no
-            endpoint to describe. The <strong>Flow</strong> tab shows what it does
-            instead.</p>
-       </div>`;
+const PART_ROLE = {
+  filter: 'Filter — which documents',
+  update: 'Update — what changes',
+  document: 'Document inserted',
+  documents: 'Documents inserted',
+  options: 'Options',
+  pipeline: 'Pipeline',
+  operations: 'Operations',
+  field: 'Field',
+  query: 'Query',
+  argument: 'Argument',
+};
+
+function formatMs(ms) {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)}s` : `${Math.round(ms)}ms`;
+}
+
+/** The queries are fetched when the tab opens: they read source files, like the Docs tab. */
+function openPerfForSelection() {
+  const id = state.selectedFlow?.id ?? null;
+  if (id && id !== state.queriesFor) {
+    void loadQueries(id);
     return;
   }
+  renderPerf();
+}
 
-  /**
-   * A one-line map before the detail.
-   *
-   * With three requests the shape of the sequence is the first thing to
-   * understand, and reading it off three expanded cards is harder than reading
-   * it off one line.
-   */
-  const sequence =
-    calls.length > 1
-      ? `<div class="sequence">${calls
-          .map((call, index) => {
-            const previous = calls[index - 1];
-            /**
-             * The join says what the relationship is: `or` between two arms of
-             * one conditional, `+` for concurrent, `→` for a real sequence. An
-             * arrow between alternatives would claim both requests happen.
-             */
-            const join =
-              index === 0
-                ? ''
-                : previous.order === call.order
-                  ? 'or'
-                  : call.parallelWith.length && previous.parallelWith.length
-                    ? '+'
-                    : '→';
-            return (
-              (join ? `<span class="seq-join">${join}</span>` : '') +
-              `<span class="seq-item${call.onFailure ? ' on-failure' : ''}">` +
-              `<span class="seq-n">${call.order}</span>` +
-              `<code>${escapeHtml(call.endpoint)}</code></span>`
-            );
-          })
-          .join('')}</div>`
-      : '';
+async function loadQueries(flowId) {
+  state.queriesFor = flowId;
+  state.queries = null;
+  state.queriesLoading = true;
+  renderTabs();
+  renderPerf();
+  try {
+    const data = await getJson(`/api/queries?flow=${encodeURIComponent(flowId)}`);
+    if (state.queriesFor !== flowId) return;
+    state.queries = data;
+  } catch (error) {
+    if (state.queriesFor !== flowId) return;
+    state.queries = { error: String(error.message ?? error) };
+  } finally {
+    if (state.queriesFor === flowId) state.queriesLoading = false;
+    renderTabs();
+    if (state.tab === 'perf') renderPerf();
+  }
+}
+
+/** Findings, read once per scan: the flow list marks and the Issues tab both need them. */
+async function loadIssues() {
+  try {
+    state.findings = await getJson('/api/findings');
+  } catch (error) {
+    state.findings = { error: String(error.message ?? error), findings: [] };
+  }
+  renderFlowList();
+  renderTabs();
+  if (state.tab === 'issues') renderIssues();
+}
+
+function issuesFor(flowId) {
+  return (state.findings?.findings ?? []).filter((finding) => finding.flowIds.includes(flowId));
+}
+
+const ISSUE_KINDS = {
+  'no-auth': 'No auth check',
+  'tenant-scope': 'Missing tenant filter',
+  'tenant-from-request': 'Tenant taken from the request',
+  'mass-assignment': 'Mass assignment',
+  'n-plus-one': 'Query in a loop (N+1)',
+  'sequential-awaits': 'Reads that wait for each other',
+};
+
+/**
+ * The Issues tab: bugs the graph and the source can show, each with the line
+ * to open, why it matters and how to fix it. The selected action's issues
+ * first, then the rest of the project, filterable — a real codebase has
+ * hundreds, and the high ones must not drown in the low ones.
+ */
+function renderIssues() {
+  const panel = el.panels.issues;
+  if (!panel) return;
+  const data = state.findings;
+  if (!data) return panelLoading(panel, 'the whole project for bugs');
+  if (data.error) {
+    panel.innerHTML = `<p class="error">${escapeHtml(String(data.error))}</p>`;
+    return;
+  }
+  const flow = state.selectedFlow;
+  const mine = flow ? issuesFor(flow.id) : [];
+  const others = data.findings.filter((finding) => !mine.includes(finding));
+
+  const intro = panelIntro(
+    'Bugs the code shows, each with the line to open: routes with no auth, queries that forget the tenant, the request body written as is, queries in loops, and reads that wait for each other. Read from the source — nothing is run.',
+  );
+  const summary = flow
+    ? mine.length
+      ? answer(
+          mine.some((finding) => finding.severity === 'high')
+            ? 'danger'
+            : mine.some((finding) => finding.severity === 'medium')
+              ? 'warn'
+              : 'neutral',
+          `${mine.length} issue${mine.length === 1 ? '' : 's'} in ${flowTitle(flow)}`,
+          'The code this action runs through has the problems below.',
+        )
+      : answer(
+          'ok',
+          `No issues found in ${flowTitle(flow)}`,
+          `The ${data.findings.length} found elsewhere in the project are listed below.`,
+        )
+    : '';
+
+  const counts = { high: 0, medium: 0, low: 0 };
+  for (const finding of others) counts[finding.severity] += 1;
+  const kinds = [...new Set(others.map((finding) => finding.kind))];
+  const shown = others.filter(
+    (finding) =>
+      state.issueSeverities.has(finding.severity) &&
+      (state.issueKind === 'all' || finding.kind === state.issueKind),
+  );
+  const filters = `<div class="issue-filters" role="group" aria-label="Filter issues">
+      ${['high', 'medium', 'low']
+        .map(
+          (severity) =>
+            `<button class="issue-filter sev-${severity}${state.issueSeverities.has(severity) ? ' active' : ''}" data-issue-severity="${severity}" aria-pressed="${state.issueSeverities.has(severity)}">${counts[severity]} ${severity}</button>`,
+        )
+        .join('')}
+      <select class="issue-kind" aria-label="Kind of issue">
+        <option value="all">Every kind</option>
+        ${kinds
+          .map(
+            (kind) =>
+              `<option value="${kind}"${state.issueKind === kind ? ' selected' : ''}>${escapeHtml(ISSUE_KINDS[kind] ?? kind)} (${others.filter((finding) => finding.kind === kind).length})</option>`,
+          )
+          .join('')}
+      </select>
+    </div>`;
+
+  const scope = [
+    `Checked ${data.checked.routes} routes and ${data.checked.queries} queries`,
+    data.tenantKey ? `tenant field: \`${data.tenantKey}\`` : 'no tenant field found',
+  ].join(' · ');
 
   panel.innerHTML =
     intro +
-    sequence +
-    calls.map(renderApiCall).join('') +
-    renderAftermath(state.insight.apis.aftermath) +
-    notesList(state.insight.apis.notes);
-  bindFlowJumps(panel);
-  bindCopy(panel);
+    summary +
+    (mine.length
+      ? `<ol class="issue-list">${mine.map((finding) => renderIssue(finding, true)).join('')}</ol>`
+      : '') +
+    heading(
+      `${flow ? 'Everywhere else in the project' : 'Across the project'} (${others.length})`,
+      `${scope}. Showing ${shown.length}.`,
+    ) +
+    filters +
+    (shown.length
+      ? `<ol class="issue-list">${shown.map((finding) => renderIssue(finding, false)).join('')}</ol>`
+      : '<p class="muted">Nothing at the chosen severity.</p>') +
+    notesList(data.notes);
+
+  for (const button of panel.querySelectorAll('[data-issue-severity]')) {
+    button.addEventListener('click', () => {
+      const severity = button.dataset.issueSeverity;
+      if (state.issueSeverities.has(severity)) state.issueSeverities.delete(severity);
+      else state.issueSeverities.add(severity);
+      renderIssues();
+    });
+  }
+  panel.querySelector('.issue-kind')?.addEventListener('change', (event) => {
+    state.issueKind = event.target.value;
+    renderIssues();
+  });
+  bindIssueJumps(panel);
 }
 
-function renderApiCall(call) {
-  const rows = [];
-
-  // --- the request ---------------------------------------------------------
-  rows.push(
-    section(
-      'Request',
-      `<dl class="kv">
-        ${kv('Endpoint', `<code>${escapeHtml(call.endpoint)}</code>`)}
-        ${call.rawPath ? kv('URL in the frontend', `<code>${escapeHtml(call.rawPath)}</code>`) : ''}
-        ${call.client ? kv('Sent with', `<code>${escapeHtml(call.client)}</code>`) : ''}
-        ${kv(
-          'Called from',
-          call.callSites.length
-            ? call.callSites
-                .map((site) => {
-                  const [file, line] = splitSite(site);
-                  return fileRef(file, line);
-                })
-                .join(' ')
-            : '<span class="muted">unknown</span>',
-        )}
-        ${
-          call.queryKeys.length
-            ? kv('Query', call.queryKeys.map((key) => `<code>${escapeHtml(key)}</code>`).join(' '))
-            : ''
-        }
-      </dl>`,
-    ),
-  );
-
-  // --- body, with the contract folded in -----------------------------------
-  const contract = call.contract;
-  const unexpected = new Set((contract?.unexpected ?? []).map((field) => field.name));
-  const carriesBody = ['POST', 'PUT', 'PATCH'].includes(call.method);
-  if (call.payload.length === 0 && carriesBody) {
-    /**
-     * A body we could not read is not the same as no body.
-     *
-     * `api.post(url, payload)` with a variable rather than an object literal
-     * leaves nothing to enumerate at the call site. Skipping the section
-     * silently would read as "this request sends nothing", which is wrong in
-     * the one place someone is checking what it sends.
-     */
-    rows.push(
-      section(
-        'Body',
-        `<p class="muted small">This request sends a body, but the keys are not
-           readable at the call site — the payload is a variable rather than an
-           object literal. The <strong>Flow</strong> tab shows the state it is built
-           from.</p>`,
-      ),
-    );
-  } else if (call.payload.length > 0 || contract?.missing.length) {
-    rows.push(
-      section(
-        'Body',
-        `${
-          call.payload.length
-            ? `<table class="kv-table">
-                 <thead><tr><th>Key</th><th>From</th><th>Accepted?</th></tr></thead>
-                 <tbody>${call.payload
-                   .map(
-                     (field) => `<tr>
-                        <td><code>${escapeHtml(field.name)}</code></td>
-                        <td class="muted">${
-                          field.from ? `<code>${escapeHtml(field.from)}</code>` : '—'
-                        }</td>
-                        <td>${
-                          !contract || !call.dto
-                            ? '<span class="muted">no DTO to check</span>'
-                            : unexpected.has(field.name)
-                              ? '<span class="chip small danger">not declared</span>'
-                              : '<span class="chip small ok">yes</span>'
-                        }</td>
-                      </tr>`,
-                   )
-                   .join('')}</tbody>
-               </table>`
-            : '<p class="muted small">No body.</p>'
-        }
-        ${
-          contract?.missing.length
-            ? `<p class="small">Declared but never sent: ${contract.missing
-                .map((field) => `<code>${escapeHtml(field.name)}</code>`)
-                .join(' ')}</p>`
-            : ''
-        }
-        ${
-          unexpected.size > 0
-            ? `<p class="small warn-text">A key the route does not declare is usually
-                 dropped by the validation layer — the request succeeds and the value
-                 disappears.</p>`
-            : ''
-        }`,
-        true,
-      ),
-    );
-  }
-
-  // --- the server side -----------------------------------------------------
-  if (!call.matched) {
-    rows.push(
-      section(
-        'Handled by',
-        `<p class="small warn-text">Nothing in this project answers this call.</p>`,
-      ),
-    );
-  } else {
-    rows.push(
-      section(
-        'Handled by',
-        `<dl class="kv">
-          ${kv(
-            'Route',
-            `<code>${escapeHtml(call.route.method)} ${escapeHtml(call.route.path)}</code>` +
-              (call.route.framework
-                ? ` <span class="chip small">${escapeHtml(call.route.framework)}</span>`
-                : ''),
-          )}
+/** One finding: the headline always; why, fix, code and the actions it reaches when opened. */
+function renderIssue(finding, open) {
+  const actions = finding.flowIds
+    .map((id) => state.flows.find((candidate) => candidate.id === id))
+    .filter(Boolean);
+  return `<li class="issue sev-${escapeHtml(finding.severity)}">
+      <details${open ? ' open' : ''}>
+        <summary>
+          <span class="chip small sev-${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span>
+          <span class="issue-kind-label">${escapeHtml(ISSUE_KINDS[finding.kind] ?? finding.kind)}</span>
+          <span class="issue-title">${richText(finding.title)}</span>
+          <span class="issue-where">${fileRef(finding.at.file, finding.at.line, '', true)}</span>
+        </summary>
+        <div class="issue-body">
+          <p>${richText(finding.why)}</p>
           ${
-            call.route.controller
-              ? kv('Controller', `<code>${escapeHtml(call.route.controller)}</code>`)
+            finding.code
+              ? `<div class="q-code-wrap"><pre class="q-code"><code>${escapeHtml(finding.code)}</code></pre>${editorLink('Open in editor', finding.at.file, finding.at.line, { extraClass: 'q-open' })}</div>`
               : ''
           }
-          ${call.route.handler ? kv('Handler', `<code>${escapeHtml(call.route.handler)}</code>`) : ''}
-          ${call.route.file ? kv('Declared in', fileRef(call.route.file, call.route.line)) : ''}
-        </dl>`,
-      ),
-    );
-
-    rows.push(
-      section(
-        'Before the handler',
-        call.middleware.length
-          ? `<ul class="plain small">${call.middleware
-              .map(
-                (entry) =>
-                  `<li><strong>${escapeHtml(entry.name)}</strong>
-                     <span class="muted">${escapeHtml(entry.role)}</span>
-                     ${entry.file ? fileRef(entry.file, entry.line) : ''}</li>`,
-              )
-              .join('')}</ul>`
-          : '<p class="muted small">No guard, pipe or middleware — the handler runs directly.</p>',
-      ),
-    );
-
-    if (call.dto) {
-      rows.push(
-        section(
-          'Validated by',
-          `<p class="small"><code>${escapeHtml(call.dto.name)}</code> declares
-             ${call.dto.fields.map((f) => `<code>${escapeHtml(f.name)}</code>`).join(' ')}</p>`,
-        ),
-      );
-    }
-
-    if (call.handlers.length) {
-      rows.push(
-        section(
-          'Code it runs',
-          `<ul class="ref-list">${call.handlers
-            .map(
-              (entry) =>
-                `<li><span class="ref-name">${escapeHtml(entry.label)}</span>${
-                  entry.file ? fileRef(entry.file, entry.line) : ''
-                }</li>`,
-            )
-            .join('')}</ul>`,
-          true,
-        ),
-      );
-    }
-
-    if (call.data.length) {
-      rows.push(
-        section(
-          'Data it touches',
-          `<table class="data-table">
-             <thead><tr>
-               <th>Effect</th><th>Collection</th><th>Operation</th><th>Issued by</th><th>Where</th>
-             </tr></thead>
-             <tbody>${call.data
-               .map(
-                 (entry) => `<tr>
-                    <td><span class="chip small effect-${escapeHtml(
-                      entry.effect,
-                    )}">${escapeHtml(entry.effect)}</span></td>
-                    <td><code>${escapeHtml(entry.collection)}</code></td>
-                    <td class="mono muted">${escapeHtml(entry.operation)}</td>
-                    <td class="muted">${escapeHtml(entry.by ?? '—')}</td>
-                    <td>${entry.file ? fileRef(entry.file, entry.line) : ''}</td>
-                  </tr>`,
-               )
-               .join('')}</tbody>
-           </table>`,
-          true,
-        ),
-      );
-    }
-
-    if (call.effects.length) {
-      rows.push(
-        section(
-          'Leaves the app',
-          `<ul class="ref-list">${call.effects
-            .map(
-              (entry) =>
-                `<li><span class="ref-name">${escapeHtml(entry.label)}</span>
-                   <span class="muted">${escapeHtml(entry.kind)}</span>
-                   ${entry.file ? fileRef(entry.file, entry.line) : ''}</li>`,
-            )
-            .join('')}</ul>`,
-          true,
-        ),
-      );
-    }
-
-    rows.push(
-      section(
-        'What comes back',
-        `<dl class="kv">
-          ${kv(
-            'Status seen',
-            call.response.statusCodes.length
-              ? call.response.statusCodes
+          <p class="issue-fix"><strong>Fix:</strong> ${richText(finding.fix)}</p>
+          ${
+            finding.related?.length
+              ? `<ul class="adoc-lines">${finding.related
                   .map(
-                    (code) =>
-                      `<span class="chip small ${
-                        code >= 500 ? 'danger' : code >= 400 ? 'warn' : 'ok'
-                      }">${code}</span>`,
+                    (entry) =>
+                      `<li>${escapeHtml(entry.text)} ${fileRef(entry.at.file, entry.at.line)}</li>`,
                   )
-                  .join(' ')
-              : '<span class="muted">never observed running</span>',
-          )}
-          ${kv(
-            'Lands in',
-            call.response.landsInState.length
-              ? call.response.landsInState
-                  .map((name) => `<code>${escapeHtml(name)}</code>`)
-                  .join(' ')
-              : '<span class="muted">no state Flowslens can see</span>',
-          )}
-        </dl>`,
-      ),
-    );
+                  .join('')}</ul>`
+              : ''
+          }
+          ${
+            actions.length
+              ? `<p class="muted issue-actions">Reached by ${actions
+                  .map(
+                    (flow) =>
+                      `<button class="link" data-issue-flow="${escapeHtml(flow.id)}">${escapeHtml(flowTitle(flow))}</button>`,
+                  )
+                  .join(', ')}</p>`
+              : ''
+          }
+        </div>
+      </details>
+    </li>`;
+}
 
-    rows.push(
-      section(
-        'Who else uses it',
-        call.alsoUsedBy.length || call.otherCallSites.length
-          ? `${
-              call.alsoUsedBy.length
-                ? `<ul class="plain small">${call.alsoUsedBy
-                    .map(
-                      (feature) =>
-                        `<li><button class="link" data-goto-flow="${escapeHtml(
-                          feature.id,
-                        )}">${escapeHtml(feature.title)}</button>${
-                          feature.subtitle
-                            ? ` <span class="muted">${escapeHtml(feature.subtitle)}</span>`
-                            : ''
-                        }</li>`,
-                    )
-                    .join('')}</ul>`
-                : ''
-            }
-             ${
-               call.otherCallSites.length
-                 ? `<p class="small muted">Also called from ${call.otherCallSites
-                     .map((site) => {
-                       const [file, line] = splitSite(site);
-                       return fileRef(file, line);
-                     })
-                     .join(' ')}</p>`
-                 : ''
-             }`
-          : '<p class="muted small">Only this feature calls it.</p>',
-      ),
+/** An action named under an issue opens that action, staying on Issues. */
+function bindIssueJumps(panel) {
+  for (const button of panel.querySelectorAll('[data-issue-flow]')) {
+    button.addEventListener('click', () => {
+      state.tab = 'issues';
+      selectFlow(button.dataset.issueFlow);
+    });
+  }
+}
+
+/**
+ * The Performance tab: where the action's time goes. One answer at the top,
+ * then the time of each step, then each database query as the code wrote it
+ * with its own time.
+ *
+ * Every number comes from runtime spans; FlowLens never connects to the
+ * database itself. The query code is read from the source, including the
+ * lines that build a filter held in a variable — `find(filter)` says nothing
+ * until you see what goes into `filter`. Nothing measured says so, with how to
+ * measure, rather than a guess.
+ */
+function renderPerf() {
+  const panel = el.panels.perf;
+  if (!panel) return;
+  const flow = state.selectedFlow;
+  if (!flow) {
+    panel.innerHTML = `<div class="empty-state"><h3>Nothing selected</h3><p>Select an action on the left.</p></div>`;
+    return;
+  }
+  if (!state.insight) return panelLoading(panel, 'the timings');
+  if (state.insight.error) return panelError(panel, state.insight);
+  const data = state.queries;
+  if (state.queriesLoading || !data || (data.flowId && data.flowId !== flow.id))
+    return panelLoading(panel, 'the queries behind this action');
+
+  const timing = state.insight.timing;
+  const queries = data.error ? [] : data.queries;
+  const timed = queries.filter((query) => query.timing);
+  const slowestQuery = timed.reduce(
+    (worst, query) => (!worst || query.timing.avgMs > worst.timing.avgMs ? query : worst),
+    undefined,
+  );
+
+  let summary;
+  if (!timing.observed && timed.length === 0) {
+    summary = answer(
+      'neutral',
+      'This action has not been run with tracing on',
+      'FlowLens does not guess timings — the numbers come from your app actually running. See **How to measure it** at the end.',
+    );
+  } else {
+    const facts = [];
+    if (timing.slowest)
+      facts.push(
+        `Slowest step: \`${timing.slowest.label}\` (${formatMs(timing.slowest.avgSelfMs)} of its own).`,
+      );
+    if (slowestQuery)
+      facts.push(
+        `Slowest query: \`${slowestQuery.collection}.${slowestQuery.operation}\` at ${formatMs(slowestQuery.timing.avgMs)} on average.`,
+      );
+    if (data.dbMs)
+      facts.push(
+        `The ${timed.length} timed ${timed.length === 1 ? 'query adds' : 'queries add'} up to **${formatMs(data.dbMs)}** — queries started together overlap, so that can be more than the wait.`,
+      );
+    const slow = slowestQuery && slowestQuery.timing.avgMs >= SLOW_QUERY_MS;
+    // The wait is the longest step start to finish; the own times add up to more
+    // when requests run side by side, and the header chip shows that sum.
+    if (timing.observed && timing.accountedMs > timing.totalMs * 1.1)
+      facts.push(
+        `The steps' own times add up to ${formatMs(timing.accountedMs)} because some run at the same time.`,
+      );
+    summary = answer(
+      slow ? 'warn' : 'ok',
+      timing.observed
+        ? `The user waits about ${formatMs(timing.totalMs)} — the longest step, start to finish`
+        : 'Only some queries have been timed',
+      facts.join(' '),
     );
   }
 
-  const curl = curlFor(call);
+  const stepsPart = timing.observed ? timingHtml(timing) : '';
+  const queriesPart = data.error
+    ? `<p class="error">${escapeHtml(String(data.error))}</p>`
+    : queriesHtml(queries, flow);
 
-  return `<div class="api-call">
-    <div class="api-head">
-      <span class="seq-n big" title="${escapeHtml(call.when)}">${call.order}</span>
-      <span class="method method-${escapeHtml(call.method.toLowerCase())}">${escapeHtml(
-        call.method,
-      )}</span>
-      <code class="api-path">${escapeHtml(call.path)}</code>
-      ${
-        call.matched
-          ? '<span class="chip small ok">matched</span>'
-          : '<span class="chip small danger">no route</span>'
-      }
-      <span class="chip small">${escapeHtml(call.evidence)}</span>
-      ${
-        call.observations
-          ? `<span class="muted small">${call.observations} run${
-              call.observations === 1 ? '' : 's'
-            }${call.avgMs ? ` · ${call.avgMs}ms` : ''}</span>`
-          : ''
-      }
-    </div>
-    <div class="api-when">
-      ${escapeHtml(call.when)}${call.awaited ? ' · awaited' : ''}
-    </div>
-    ${
-      call.warnings.length
-        ? `<ul class="warn-list">${call.warnings
-            .map((warning) => `<li>${escapeHtml(warning)}</li>`)
-            .join('')}</ul>`
-        : ''
-    }
-    <div class="api-sections">${rows.join('')}</div>
-    <div class="command">
-      <code>${escapeHtml(curl)}</code>
-      <button class="button ghost small" data-copy="${escapeHtml(curl)}">Copy</button>
-    </div>
-  </div>`;
+  const howTo = `<details class="more q-howto"${timing.observed || timed.length ? '' : ' open'}>
+      <summary>How to measure it</summary>
+      <ol>
+        <li>Run the app with FlowLens tracing on: <code>@flowslens/runtime</code> in a Node server,
+            or the app's own instrumentation (a Next.js app's <code>.env.local</code> can point
+            <code>NEXT_PUBLIC_FLOWLENS_SPANS</code> at this dashboard).</li>
+        <li>The dashboard has to run with the token the app sends: <code>flowlens serve &lt;project&gt; --token flowlens-dev</code>.</li>
+        <li>Do the action in the app a few times — every run adds to the averages.</li>
+        <li>Press <strong>Rescan</strong> at the top.</li>
+      </ol>
+      <p class="muted">FlowLens never connects to the database. The app measures its own work and sends only
+         names and times — for a query, the collection and the operation; no filter values, no documents.</p>
+    </details>`;
+
+  panel.innerHTML =
+    panelIntro(
+      'Where the time goes when a user does this: each step, and each database query with the code that runs it.',
+    ) +
+    summary +
+    stepsPart +
+    queriesPart +
+    (timing.observed ? '' : measuredElsewhereHtml()) +
+    howTo;
+  bindTimingJumps(panel);
+}
+
+/** Each database query: its time, its code, and where its variables come from. */
+function queriesHtml(queries, flow) {
+  if (queries.length === 0) {
+    return (
+      heading('Database queries') +
+      `<p class="muted">${
+        flow.hitsBackend
+          ? 'No database query was found on the way — the endpoint may answer from memory or call another service.'
+          : 'This action never reaches the backend, so there is nothing to query.'
+      }</p>`
+    );
+  }
+  const timed = queries.filter((query) => query.timing);
+  const maxMs = Math.max(1, ...timed.map((query) => query.timing.maxMs));
+  const rows = queries
+    .map((query, index) => {
+      const effect = QUERY_EFFECT[query.effect] ?? query.effect;
+      const t = query.timing;
+      const bar = t
+        ? `<div class="q-bar" title="fastest ${formatMs(t.minMs)} · slowest ${formatMs(t.maxMs)}">
+             <span class="q-bar-range" style="left:${(t.minMs / maxMs) * 100}%;width:${Math.max(0.5, ((t.maxMs - t.minMs) / maxMs) * 100)}%"></span>
+             <span class="q-bar-avg" style="width:${Math.max(1, (t.avgMs / maxMs) * 100)}%"></span>
+           </div>`
+        : '';
+      const time = t
+        ? `<div class="q-time${t.avgMs >= SLOW_QUERY_MS ? ' is-slow' : ''}">
+             <strong>${formatMs(t.avgMs)}</strong> average
+             <span class="muted">· fastest ${formatMs(t.minMs)} · slowest ${formatMs(t.maxMs)} · ${t.count} run${t.count === 1 ? '' : 's'}</span>
+           </div>${bar}`
+        : `<div class="q-time muted">Not measured yet</div>`;
+      const where = [
+        query.inFunction ? `in <code>${escapeHtml(query.inFunction)}</code>` : '',
+        query.at ? fileRef(query.at.file, query.at.line) : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      const code = query.code
+        ? `<div class="q-code-wrap"><pre class="q-code"><code>${escapeHtml(query.code)}</code></pre>${
+            query.at
+              ? editorLink('Open in editor', query.at.file, query.at.line, {
+                  extraClass: 'q-open',
+                })
+              : ''
+          }</div>`
+        : `<p class="muted q-nocode">${
+            query.evidence === 'runtime'
+              ? 'Seen running, but not found in the code — it is called through something FlowLens cannot follow (a cached helper, a dynamic collection name, a library).'
+              : 'The code for this query could not be read.'
+          }</p>`;
+      const variables = query.parts
+        .flatMap((part) => (part.variables ?? []).map((variable) => ({ part, variable })))
+        .filter(({ variable }) => variable.builtBy?.length || variable.parameterOf);
+      const built = variables.length
+        ? `<div class="q-built">${variables.map(({ part, variable }) => renderQueryVariable(part, variable)).join('')}</div>`
+        : '';
+      return `<li class="q-item">
+          <div class="q-head">
+            <span class="q-num">${index + 1}</span>
+            <span class="chip small effect-${escapeHtml(query.effect)}">${escapeHtml(effect)}</span>
+            <span class="q-name"><strong>${escapeHtml(query.collection)}</strong>.${escapeHtml(query.operation)}</span>
+            <span class="q-where muted">${where}</span>
+          </div>
+          ${time}
+          ${code}
+          ${built}
+        </li>`;
+    })
+    .join('');
+  return (
+    heading(
+      `Database queries (${queries.length})`,
+      `${timed.length} of ${queries.length} timed. The code is what the backend runs; a variable is followed to the lines that build it.`,
+    ) + `<ol class="q-list">${rows}</ol>`
+  );
+}
+
+/** Where a variable in a query comes from: the caller, or the lines that build it. */
+function renderQueryVariable(part, variable) {
+  const role = PART_ROLE[part.role] ?? part.role;
+  const lead = part.text === variable.name ? role : `${role}: uses`;
+  if (variable.parameterOf) {
+    return `<p class="q-var"><span class="muted">${escapeHtml(lead)}</span> <code>${escapeHtml(variable.name)}</code>
+      — passed in by whoever calls <code>${escapeHtml(variable.parameterOf)}</code></p>`;
+  }
+  const lines = (list) =>
+    // Each line opens where it is written.
+    `<pre class="q-code small"><code>${list
+      .map((line) =>
+        line.at?.file && editorHref(line.at.file, line.at.line)
+          ? `<span class="q-line" data-editor-href="${escapeHtml(editorHref(line.at.file, line.at.line))}" title="${escapeHtml(`${line.at.file}:${line.at.line}`)} — open in your editor">${escapeHtml(line.text)}</span>`
+          : escapeHtml(line.text),
+      )
+      .join('\n')}</code></pre>`;
+  const helper = variable.helper
+    ? `<p class="q-var muted">…and <code>${escapeHtml(variable.helper.name)}</code> builds the
+         <code>${escapeHtml(variable.helper.returns)}</code> it returns like this:</p>${lines(variable.helper.builtBy)}`
+    : '';
+  return `<p class="q-var"><span class="muted">${escapeHtml(lead)}</span> <code>${escapeHtml(variable.name)}</code>, built here <span class="muted">— click a line to open it</span>:</p>
+    ${lines(variable.builtBy)}${helper}`;
 }
 
 /**
@@ -1780,23 +2770,6 @@ function curlFor(call) {
   return `curl -X ${call.method} "$BASE_URL${call.rawPath ?? call.path}"${headers}${body}`;
 }
 
-/**
- * A labelled block. `wide` spans the whole card.
- *
- * Tables and lists of file paths need the full width; four key/value pairs do
- * not. Mixing them in one auto-fit grid is what produced a four-column layout
- * with `updat/e` wrapping mid-word.
- */
-function section(title, html, wide = false) {
-  return `<section class="api-section${wide ? ' wide' : ''}"><h4>${escapeHtml(
-    title,
-  )}</h4>${html}</section>`;
-}
-
-function kv(key, value) {
-  return `<dt>${escapeHtml(key)}</dt><dd>${value}</dd>`;
-}
-
 /** `web/src/Form.tsx:16` -> `['web/src/Form.tsx', 16]` */
 function splitSite(site) {
   const match = /^(.*):(\d+)$/.exec(site);
@@ -1811,112 +2784,85 @@ function renderChanged() {
 
   const changed = state.changed;
   const intro = panelIntro(
-    'This tab is about the whole project, not the selected feature: the files you ' +
-      'have changed since the last commit, and the features that run through them.',
+    'Your uncommitted changes, seen through the app: which user actions run through the ' +
+      'files you edited. Git shows the lines; this shows who is affected. It is about the ' +
+      'whole project, not the selected action.',
   );
 
   if (changed.error) {
     panel.innerHTML =
       intro +
-      `<div class="empty-state">
-         <h3>Could not read your changes</h3>
-         <p>${escapeHtml(changed.error)}</p>
-         <p class="muted">This view needs the project to be a git repository.</p>
-       </div>`;
+      answer(
+        'neutral',
+        'Could not read your changes',
+        `${changed.error} — this view needs a git repository.`,
+      );
     return;
   }
 
-  const refresh = `<button class="button ghost small" id="changed-refresh">Re-read changes</button>`;
+  const refresh = `<p><button class="button ghost small" id="changed-refresh">Re-read changes</button></p>`;
+  const files = renderDocTable({
+    columns: ['Changed file', 'Status', 'Steps of the app in it'],
+    rows: changed.files.map((entry) => ({
+      cells: [
+        { html: fileLink(entry.file) },
+        entry.status ?? 'modified',
+        entry.steps === 0 ? '_none — config, styles, or not analysed_' : `**${entry.steps}**`,
+      ],
+      tone: entry.steps === 0 ? 'muted' : 'warn',
+    })),
+  });
 
   if (changed.features.length === 0) {
     panel.innerHTML =
       intro +
-      `<div class="empty-state ${changed.files.length === 0 ? 'ok' : ''}">
-         <h3>${
-           changed.files.length === 0
-             ? 'Nothing has changed'
-             : 'No traced feature runs through your changes'
-         }</h3>
-         <p>${escapeHtml(changed.summary)}</p>
-         ${
-           changed.files.length > 0
-             ? `<ul class="plain">${changed.files
-                 .map((entry) => `<li>${fileLink(entry.file)}</li>`)
-                 .join('')}</ul>`
-             : ''
-         }
-         <p>${refresh}</p>
-       </div>` +
+      answer(
+        changed.files.length === 0 ? 'ok' : 'ok',
+        changed.files.length === 0 ? 'Nothing has changed' : 'Your changes reach no user action',
+        changed.summary,
+      ) +
+      (changed.files.length ? heading('Changed files') + files : '') +
+      refresh +
       notesList(changed.notes);
     bindChangedRefresh(panel);
+    bindTableFolds(panel);
     return;
   }
 
   panel.innerHTML =
     intro +
-    `<div class="verdict level-${changed.level}">
-       <span class="verdict-level">${escapeHtml(changed.level)} risk</span>
-       <span>${escapeHtml(changed.summary)}</span>
-     </div>
-     <div class="stat-row">
-       <div class="stat"><span class="stat-value">${changed.features.length}</span>
-         <span class="stat-label">features run through your changed files</span></div>
-       <div class="stat"><span class="stat-value">${changed.untested.length}</span>
-         <span class="stat-label">of them have no test at all</span></div>
-       ${
-         changed.collections.length
-           ? `<div class="stat"><span class="stat-value">${changed.collections.length}</span>
-                <span class="stat-label">collections the changed code touches:
-                ${escapeHtml(changed.collections.join(', '))}</span></div>`
-           : ''
-       }
-     </div>
-
-     <h3>Features affected, most-touched first</h3>
-     ${changed.features
-       .map(
-         (feature) => `<div class="affected ${feature.testCases === 0 ? 'untested' : ''}">
-            <div class="affected-head">
-              <button class="link" data-goto-flow="${escapeHtml(feature.id)}">${escapeHtml(
-                feature.title,
-              )}</button>
-              ${
-                feature.subtitle
-                  ? `<span class="muted small">${escapeHtml(feature.subtitle)}</span>`
-                  : ''
-              }
-              <span class="chip small ${feature.testCases === 0 ? 'danger' : 'ok'}">
-                ${
-                  feature.testCases === 0
-                    ? 'no test'
-                    : `${feature.testCases} test${feature.testCases === 1 ? '' : 's'}`
-                }
-              </span>
-            </div>
-            <ul class="plain small">${feature.touchedSteps
-              .map(
-                (step) =>
-                  `<li>${escapeHtml(step.label)} ${fileLink(step.file, step.line, 'tiny')}</li>`,
-              )
-              .join('')}</ul>
-          </div>`,
-       )
-       .join('')}
-
-     <h3>Changed files</h3>
-     <ul class="plain small">${changed.files
-       .map(
-         (entry) =>
-           `<li>${fileLink(entry.file)} <span class="muted">${escapeHtml(
-             entry.status ?? 'modified',
-           )}${entry.steps === 0 ? ' · not in the graph' : ` · ${entry.steps} steps`}</span></li>`,
-       )
-       .join('')}</ul>
-     <p>${refresh}</p>` +
+    answer(
+      changed.level === 'high' ? 'danger' : changed.level === 'medium' ? 'warn' : 'neutral',
+      `Your changes reach ${changed.features.length} action${changed.features.length === 1 ? '' : 's'}` +
+        (changed.untested.length ? ` — ${changed.untested.length} with no test` : ''),
+      `Risk: **${changed.level}**. ${changed.summary}` +
+        (changed.collections.length
+          ? ` Data touched: ${changed.collections.map((c) => `\`${c}\``).join(', ')}.`
+          : ''),
+    ) +
+    heading('Actions affected, most-touched first', 'Click an action to open it.') +
+    renderDocTable({
+      columns: ['Action', 'Changed steps it runs through', 'Tests'],
+      rows: changed.features.map((feature) => ({
+        cells: [
+          flowLinkCell(
+            feature.id,
+            feature.title + (feature.subtitle ? ` · ${feature.subtitle}` : ''),
+          ),
+          feature.touchedSteps.map((step) => `\`${step.label}\``).join(', '),
+          feature.testCases === 0 ? '**none**' : `${feature.testCases}`,
+        ],
+        tone: feature.testCases === 0 ? 'error' : 'ok',
+      })),
+    }) +
+    heading('Changed files') +
+    files +
+    refresh +
     notesList(changed.notes);
 
   bindFlowJumps(panel);
   bindChangedRefresh(panel);
+  bindTableFolds(panel);
 }
 
 /** Copy-to-clipboard for any element carrying `data-copy`. */
@@ -1942,78 +2888,4 @@ function bindChangedRefresh(panel) {
   panel.querySelector('#changed-refresh')?.addEventListener('click', () => {
     void loadChanged();
   });
-}
-
-/**
- * What happens once the requests come back.
- *
- * Rendered as its own block below the calls rather than inside one, because
- * these are consequences of the action as a whole: a navigation happens once,
- * not once per request.
- */
-function renderAftermath(after) {
-  if (!after) return '';
-  const hasContent =
-    after.navigatesTo.length ||
-    after.invalidates.length ||
-    after.errorStates.length ||
-    after.notifies.length ||
-    after.notes.length;
-  if (!hasContent) return '';
-
-  const block = (title, html) =>
-    html ? `<section class="api-section wide"><h4>${escapeHtml(title)}</h4>${html}</section>` : '';
-
-  return `<div class="api-call aftermath">
-    <div class="api-head">
-      <span class="api-path">After the response</span>
-      ${
-        after.handlesErrors
-          ? '<span class="chip small ok">failures handled</span>'
-          : '<span class="chip small warn">no error handling</span>'
-      }
-    </div>
-    <div class="api-sections">
-      ${block(
-        'Goes to',
-        after.navigatesTo.length
-          ? `<ul class="ref-list">${after.navigatesTo
-              .map((target) => `<li><span class="ref-name">${escapeHtml(target)}</span></li>`)
-              .join('')}</ul>`
-          : '',
-      )}
-      ${block(
-        'Refetches',
-        after.invalidates.length
-          ? `<ul class="ref-list">${after.invalidates
-              .map(
-                (entry) =>
-                  `<li><span class="ref-name">${escapeHtml(entry.key)}</span>` +
-                  `<span class="muted">${
-                    entry.refetches.length
-                      ? `→ ${entry.refetches.map((e) => escapeHtml(e)).join(', ')}`
-                      : '→ no GET endpoint matched this key'
-                  }</span></li>`,
-              )
-              .join('')}</ul>`
-          : '',
-      )}
-      ${block(
-        'The user sees',
-        after.notifies.length || after.errorStates.length
-          ? `<ul class="ref-list">${[
-              ...after.notifies.map(
-                (entry) => `<li><span class="ref-name">${escapeHtml(entry)}</span></li>`,
-              ),
-              ...after.errorStates.map(
-                (entry) =>
-                  `<li><span class="ref-name">${escapeHtml(entry)}</span>` +
-                  `<span class="muted">error state</span></li>`,
-              ),
-            ].join('')}</ul>`
-          : '',
-      )}
-    </div>
-    ${notesList(after.notes)}
-  </div>`;
 }

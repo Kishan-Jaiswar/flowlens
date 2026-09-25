@@ -4,11 +4,15 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  projectFindings,
+  actionQueries,
   analyzeChanged,
   analyzeFlowImpact,
+  explainAction,
   flowApis,
   flowTiming,
   indexTests,
+  renderActionDocument,
   resolveFlows,
   scan,
   testsForFlow,
@@ -58,6 +62,20 @@ function apiResponse(path: string): unknown {
       ),
     };
   }
+  if (path.startsWith('/api/findings')) return projectFindings(scanned.graph);
+  if (path.startsWith('/api/queries')) {
+    const flow = flows.find(
+      (candidate) => candidate.id === new URL(path, 'http://x').searchParams.get('flow'),
+    );
+    return flow ? actionQueries(scanned.graph, flow) : { error: 'unknown flow' };
+  }
+  if (path.startsWith('/api/action')) {
+    const params = new URL(path, 'http://x').searchParams;
+    const flow = flows.find((candidate) => candidate.id === params.get('flow'));
+    if (!flow) return { error: 'unknown flow' };
+    const doc = explainAction(scanned.graph, flow);
+    return params.get('format') === 'markdown' ? renderActionDocument(doc) : doc;
+  }
   if (path.startsWith('/api/insight')) {
     const id = new URL(path, 'http://x').searchParams.get('flow');
     const flow = flows.find((candidate) => candidate.id === id);
@@ -89,6 +107,9 @@ async function loadDashboard(): Promise<void> {
       } as Response;
     }),
   );
+
+  // The Docs tab writes `#docs=<flow>` to the URL, which jsdom keeps between tests.
+  window.history.replaceState(null, '', '/');
 
   // A fresh module registry per test: `app.js` runs `load()` on import.
   vi.resetModules();
@@ -124,6 +145,10 @@ describe('the dashboard renders a real graph', () => {
     for (const flow of flows.slice(0, 3)) {
       expect(text).toContain(flow.title);
     }
+    // Every row keeps its detail line: how it is triggered, where, what it calls.
+    for (const item of document.querySelectorAll('#flow-list .flow-item')) {
+      expect(item.querySelector('.meta')?.textContent?.trim()).toBeTruthy();
+    }
   });
 
   it('selects the first flow and draws its layers in execution order', () => {
@@ -143,6 +168,16 @@ describe('the dashboard renders a real graph', () => {
     for (const node of nodes) {
       expect(node.className).toMatch(/layer-(ui|frontend|network|backend|data|external)/);
     }
+  });
+
+  it('draws the diagram as numbered steps that say what they do, inside the Docs tab', async () => {
+    await openDiagram();
+    const nodes = [...document.querySelectorAll('#graph .node')];
+    expect(nodes.length).toBeGreaterThan(0);
+    const numbers = nodes.map((node) => node.querySelector('.step-num')?.textContent);
+    expect(numbers).toEqual(nodes.map((_, i) => String(i + 1)));
+    for (const node of nodes) expect(node.querySelector('.say')?.textContent?.trim()).toBeTruthy();
+    expect(document.getElementById('tab-docs')?.getAttribute('aria-selected')).toBe('true');
   });
 
   it('escapes what it renders', () => {
@@ -182,6 +217,16 @@ describe('the dashboard labels a step by what it did', () => {
   });
 });
 
+/** Open the Docs tab's diagram view and wait for it to draw. */
+async function openDiagram(): Promise<void> {
+  await openTab('docs');
+  document.querySelector<HTMLElement>('#panel-docs [data-doc-view="diagram"]')?.click();
+  await vi.waitFor(() => {
+    expect(document.getElementById('graph')?.hidden).toBe(false);
+    expect(document.querySelectorAll('#graph .node').length).toBeGreaterThan(0);
+  });
+}
+
 /** Click a tab and wait for its panel to be the visible one. */
 async function openTab(id: string): Promise<HTMLElement> {
   const button = document.getElementById(`tab-${id}`) as HTMLElement | null;
@@ -195,13 +240,67 @@ async function openTab(id: string): Promise<HTMLElement> {
 }
 
 describe('the tabs', () => {
-  it('offers the six questions, with Flow open first', async () => {
+  it('offers the six tabs in the agreed order, with Docs open first', async () => {
     const labels = [...document.querySelectorAll('#tabs .tab-label')].map(
       (node) => node.textContent,
     );
-    expect(labels).toEqual(['Flow', 'APIs', 'Timing', 'Breaks', 'Tests', 'Changed']);
-    expect(document.getElementById('tab-flow')?.getAttribute('aria-selected')).toBe('true');
-    expect(document.getElementById('graph')?.hidden).toBe(false);
+    expect(labels).toEqual(['Docs', 'Issues', 'Performance', 'Tests', 'Changed', 'Breaks']);
+    expect(document.getElementById('tab-docs')?.getAttribute('aria-selected')).toBe('true');
+    expect(document.getElementById('panel-docs')?.hidden).toBe(false);
+  });
+
+  it('switches Docs between the list and the diagram, and only the diagram opens the inspector', async () => {
+    const layout = document.querySelector('.layout')!;
+    expect(layout.getAttribute('data-tab')).toBe('docs');
+    expect(layout.hasAttribute('data-diagram')).toBe(false);
+    await openDiagram();
+    expect(layout.hasAttribute('data-diagram')).toBe(true);
+    expect(document.getElementById('panel-docs')?.hidden).toBe(true);
+    expect(layout.hasAttribute('data-inspecting')).toBe(false);
+    document.querySelector<HTMLElement>('#graph .node')!.click();
+    expect(layout.hasAttribute('data-inspecting')).toBe(true);
+    document.querySelector<HTMLElement>('#details-close')!.click();
+    expect(layout.hasAttribute('data-inspecting')).toBe(false);
+    document.querySelector<HTMLElement>('#graph [data-doc-view="list"]')!.click();
+    expect(document.getElementById('panel-docs')?.hidden).toBe(false);
+    expect(document.getElementById('graph')?.hidden).toBe(true);
+  });
+
+  it('opens a file mentioned inside a diagram card in the editor, not the card', async () => {
+    await openDiagram();
+    const layout = document.querySelector('.layout')!;
+    const link = document.querySelector<HTMLElement>('#graph .node [data-editor-href]')!;
+    expect(link.dataset.editorHref).toMatch(/^vscode:\/\/file\/.+:\d+$/);
+    const opened: string[] = [];
+    const assign = vi.spyOn(window, 'location', 'get').mockReturnValue({
+      ...window.location,
+      set href(value: string) {
+        opened.push(value);
+      },
+    } as Location);
+    link.click();
+    assign.mockRestore();
+    // Every import of app.js in this file adds its document listener, so the
+    // count is the number of loads; what matters is that only this link opened.
+    expect(new Set(opened)).toEqual(new Set([link.dataset.editorHref]));
+    expect(layout.hasAttribute('data-inspecting')).toBe(false);
+  });
+
+  it('sends links to the merged tabs where their content went', async () => {
+    for (const [legacy, tab, diagram] of [
+      ['flow', 'docs', true],
+      ['apis', 'docs', false],
+      ['timing', 'perf', false],
+      ['queries', 'perf', false],
+    ] as const) {
+      window.history.replaceState(null, '', `/#tab=${legacy}&flow=${flows[0]!.id}`);
+      vi.resetModules();
+      await import(resolve(publicDir, 'app.js') + `?legacy-${legacy}`);
+      await vi.waitFor(() => {
+        expect(document.getElementById(`tab-${tab}`)?.getAttribute('aria-selected')).toBe('true');
+      });
+      expect(document.getElementById('graph')?.hidden).toBe(!diagram);
+    }
   });
 
   it('shows only one panel at a time', async () => {
@@ -214,39 +313,83 @@ describe('the tabs', () => {
   it('puts the worrying number on the tab itself, before it is opened', () => {
     // The example app has no trace and no tests of its own, and that is exactly
     // what the badges must say without the user clicking anything.
-    expect(document.querySelector('#tab-timing .tab-badge')?.textContent?.trim()).toBe('no runs');
+    expect(document.querySelector('#tab-perf .tab-badge')?.textContent?.trim()).toBe('not run');
     expect(document.querySelector('#tab-tests .tab-badge')?.textContent?.trim()).toBe('none');
     const breaks = document.querySelector('#tab-impact .tab-badge');
     expect(breaks?.textContent?.trim()).toBeTruthy();
   });
 
   it('every panel opens with a sentence saying what it answers', async () => {
-    for (const id of ['timing', 'impact', 'tests', 'apis', 'changed']) {
+    for (const id of ['issues', 'perf', 'impact', 'tests', 'changed']) {
       const panel = await openTab(id);
-      const intro = panel.querySelector('.panel-intro, .empty-state p');
-      expect((intro?.textContent ?? '').length, `${id} explains itself`).toBeGreaterThan(20);
+      // Some tabs fetch on open; the sentence comes with the answer.
+      await vi.waitFor(() => {
+        const intro = panel.querySelector('.panel-intro, .empty-state p');
+        expect((intro?.textContent ?? '').length, `${id} explains itself`).toBeGreaterThan(20);
+      });
     }
   });
 });
 
-describe('the Timing tab', () => {
+describe('the Issues tab', () => {
+  it('shows the selected action first, then the rest of the project with filters', async () => {
+    const panel = await openTab('issues');
+    await vi.waitFor(() => {
+      expect(panel.querySelector('.answer')).not.toBeNull();
+    });
+    expect(panel.querySelector('.answer-title')?.textContent).toMatch(/issue|No issues found/);
+    expect(panel.textContent).toContain('Everywhere else in the project');
+    expect(panel.querySelectorAll('[data-issue-severity]')).toHaveLength(3);
+    const badge = document.querySelector('#tab-issues .tab-badge')?.textContent?.trim();
+    expect(badge).toBeTruthy();
+    expect(badge).not.toBe('…');
+  });
+});
+
+describe('the Performance tab', () => {
   it('explains how to get numbers rather than inventing them', async () => {
-    const panel = await openTab('timing');
+    const panel = await openTab('perf');
+    await vi.waitFor(() => {
+      expect(panel.querySelector('.answer')).not.toBeNull();
+    });
     const text = panel.textContent ?? '';
-    expect(text).toContain('Nothing has been measured yet');
+    expect(text).toContain('has not been run with tracing on');
     expect(text).toContain('@flowslens/runtime');
     // No fabricated milliseconds anywhere in an unmeasured flow.
     expect(panel.querySelector('.timing-table')).toBeNull();
+    expect(panel.querySelector('.q-howto')?.hasAttribute('open')).toBe(true);
+  });
+
+  it('lists each query of a database action with its code', async () => {
+    const dbFlow = flows.find((flow) => flow.collections.length > 0)!;
+    const item = [...document.querySelectorAll<HTMLElement>('#flow-list [data-flow-id]')].find(
+      (node) => node.getAttribute('data-flow-id') === dbFlow.id,
+    );
+    item?.click();
+    const panel = await openTab('perf');
+    await vi.waitFor(() => {
+      expect(panel.querySelectorAll('.q-item').length).toBeGreaterThan(0);
+    });
+    expect(panel.querySelector('.q-code')?.textContent).toMatch(
+      /\.(find|findOne|save|create|insertOne|updateOne|deleteOne|findById\w*)\(/,
+    );
+    expect(panel.querySelector('.q-time')?.textContent).toContain('Not measured yet');
   });
 });
 
 describe('the Breaks tab', () => {
-  it('leads with a verdict and a sentence, not a table', async () => {
+  it('leads with the answer in a sentence, before any table', async () => {
     const panel = await openTab('impact');
-    const verdict = panel.querySelector('.verdict');
+    const verdict = panel.querySelector('.answer');
     expect(verdict).not.toBeNull();
-    expect(verdict?.className).toMatch(/level-(low|medium|high)/);
-    expect((verdict?.textContent ?? '').length).toBeGreaterThan(30);
+    expect(verdict?.className).toMatch(/tone-(ok|warn|danger)/);
+    expect((verdict?.textContent ?? '').trim().length).toBeGreaterThan(30);
+    const table = panel.querySelector('.adoc-table');
+    if (table) {
+      expect(
+        verdict!.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
   });
 
   it('names the other features a change here would reach', async () => {
@@ -274,7 +417,8 @@ describe('the Breaks tab', () => {
   it('warns about a collection several places write', async () => {
     const panel = await openTab('impact');
     expect(panel.textContent).toContain('customers');
-    expect(panel.querySelector('.contested')).not.toBeNull();
+    const answers = [...panel.querySelectorAll('.answer')].map((node) => node.textContent ?? '');
+    expect(answers.some((text) => text.includes('Shared data'))).toBe(true);
   });
 
   it('jumping to another feature switches the selection and keeps the tab', async () => {
@@ -297,8 +441,10 @@ describe('the Tests tab', () => {
   it('says plainly when nothing guards the feature', async () => {
     const panel = await openTab('tests');
     const text = panel.textContent ?? '';
-    expect(text).toContain('Nothing covers this feature');
-    expect(text).toContain('would fail silently');
+    expect(text).toContain('No test covers this action');
+    expect(text).toContain('would not fail the suite');
+    // …and says what a test would have to reach.
+    expect(panel.querySelectorAll('.adoc-table tbody tr').length).toBeGreaterThan(0);
   });
 });
 
@@ -314,3 +460,135 @@ function state(what: 'selectedFlowId'): string | undefined {
   }
   return undefined;
 }
+
+/**
+ * The Docs tab.
+ *
+ * One action, end to end. What is worth pinning is what would quietly make it
+ * useless: documenting something other than the selected action, losing a
+ * stage, or showing Markdown punctuation instead of styled text.
+ */
+describe('the Docs tab', () => {
+  it('carries what the APIs tab used to add: a command to try the request, and who else calls it', async () => {
+    const backend = flows.find((flow) => flow.hitsBackend)!;
+    [...document.querySelectorAll<HTMLElement>('#flow-list [data-flow-id]')]
+      .find((node) => node.getAttribute('data-flow-id') === backend.id)
+      ?.click();
+    const panel = await openTab('docs');
+    await vi.waitFor(() => {
+      expect(panel.querySelector('[data-stage="request"] .command code')).not.toBeNull();
+    });
+    const request = panel.querySelector('[data-stage="request"]')!.textContent ?? '';
+    expect(request).toContain('curl -X');
+    expect(request).toContain('Who else calls this endpoint');
+  });
+
+  it('draws only the steps the action has, numbered without gaps, and names the rest', async () => {
+    const panel = await openTab('docs');
+    await vi.waitFor(() => {
+      expect(panel.querySelectorAll('.adoc-stage').length).toBeGreaterThan(0);
+    });
+    const drawn = panel.querySelectorAll('.adoc-stage').length;
+    const numbers = [...panel.querySelectorAll('.adoc-num')].map((node) => node.textContent);
+    expect(numbers).toEqual(Array.from({ length: drawn }, (_, i) => String(i + 1)));
+    // Every one of the nineteen is either drawn or listed as not in this action.
+    expect(drawn + panel.querySelectorAll('.adoc-absent li').length).toBe(19);
+    expect(panel.querySelector('.adoc-stage .adoc-title')?.textContent).toBe('User opens page');
+  });
+
+  it('writes styled text, not markup', async () => {
+    const panel = await openTab('docs');
+    await vi.waitFor(() => {
+      expect(panel.querySelector('.adoc-lines')).not.toBeNull();
+    });
+    const text = panel.querySelector('.adoc')?.textContent ?? '';
+    expect(text).not.toContain('`');
+    expect(text).not.toContain('**');
+    expect(panel.querySelectorAll('.adoc code').length).toBeGreaterThan(0);
+  });
+
+  it('opens with the whole action at a glance, grouped by where it happens', async () => {
+    const panel = await openTab('docs');
+    await vi.waitFor(() => {
+      expect(panel.querySelectorAll('.glance-steps li')).toHaveLength(
+        panel.querySelectorAll('.adoc-stage').length,
+      );
+      expect(panel.querySelectorAll('.glance-steps li').length).toBeGreaterThan(0);
+    });
+    const phases = [...panel.querySelectorAll('.glance-phase-title')].map(
+      (node) => node.textContent,
+    );
+    expect(phases[0]).toContain('In the browser');
+    expect(phases.at(-1)).toContain('The way back');
+    // The overview comes before the detail it summarises.
+    const glance = panel.querySelector('.adoc-glance')!;
+    const firstStage = panel.querySelector('.adoc-stage')!;
+    expect(
+      glance.compareDocumentPosition(firstStage) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('shows facts of the same shape as tables', async () => {
+    const panel = await openTab('docs');
+    await vi.waitFor(() => {
+      expect(panel.querySelectorAll('.adoc-table').length).toBeGreaterThan(0);
+    });
+    expect(panel.querySelector('.adoc-table th')).not.toBeNull();
+  });
+
+  it('follows the selection to another action', async () => {
+    const panel = await openTab('docs');
+    const lede = (): string => panel.querySelector('.adoc-lede')?.textContent ?? '';
+    await vi.waitFor(() => {
+      expect(panel.querySelectorAll('.adoc-stage').length).toBeGreaterThan(0);
+    });
+    const before = lede();
+
+    const other = flows.find((flow) => flow.title !== flows[0]?.title)!;
+    const item = [...document.querySelectorAll<HTMLElement>('.flow-item')].find(
+      (node) => node.querySelector('.label')?.textContent === other.title,
+    )!;
+    item.click();
+    await vi.waitFor(() => {
+      expect(lede()).not.toBe(before);
+      expect(lede()).not.toBe('');
+    });
+  });
+
+  it('collapses and expands every stage', async () => {
+    const panel = await openTab('docs');
+    await vi.waitFor(() => {
+      expect(panel.querySelector('#doc-toggle')).not.toBeNull();
+      expect(panel.querySelectorAll('.adoc-stage').length).toBeGreaterThan(0);
+    });
+    const drawn = panel.querySelectorAll('.adoc-stage').length;
+    panel.querySelector<HTMLButtonElement>('#doc-toggle')!.click();
+    expect(panel.querySelectorAll('.adoc-stage.is-collapsed')).toHaveLength(drawn);
+    panel.querySelector<HTMLButtonElement>('#doc-toggle')!.click();
+    expect(panel.querySelectorAll('.adoc-stage.is-collapsed')).toHaveLength(0);
+  });
+
+  it('opens straight onto an action from a #docs= link', async () => {
+    const other = flows.find((flow) => flow.id !== flows[0]?.id)!;
+    window.history.replaceState(null, '', `/#docs=${other.id}`);
+    vi.resetModules();
+    await import(resolve(publicDir, 'app.js') + '?deep-link');
+    await vi.waitFor(() => {
+      const href = document.querySelector('#panel-docs .doc-bar a')?.getAttribute('href') ?? '';
+      expect(new URL(href, 'http://x').searchParams.get('flow')).toBe(other.id);
+    });
+    expect(document.getElementById('panel-docs')?.hidden).toBe(false);
+  });
+
+  it('links to the Markdown of the same action', async () => {
+    const panel = await openTab('docs');
+    await vi.waitFor(() => {
+      expect(panel.querySelector('.doc-bar a')).not.toBeNull();
+    });
+    const href = panel.querySelector('.doc-bar a')?.getAttribute('href') ?? '';
+    const url = new URL(href, 'http://x');
+    expect(url.pathname).toBe('/api/action');
+    expect(url.searchParams.get('flow')).toBe(flows[0]?.id);
+    expect(url.searchParams.get('format')).toBe('markdown');
+  });
+});

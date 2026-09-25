@@ -130,10 +130,21 @@ export function packageFile(...segments: string[]): string {
 
 /** The dashboard lives in apps/dashboard, outside the CLI package. */
 export function dashboardDir(): string | undefined {
+  /**
+   * The working copy first, the packaged copy second.
+   *
+   * `prepack` stages `apps/dashboard/public` into `packages/cli/dashboard`,
+   * and that staged copy is gitignored build output that nothing deletes on
+   * its own. Looked up first, it silently shadowed the files being edited:
+   * `flowlens serve` in this checkout kept serving whatever the last `npm
+   * pack` had copied, so a dashboard change appeared to do nothing. A
+   * published package has no `apps/` beside it, so preferring the source is
+   * only ever a development-time difference.
+   */
   const candidates = [
-    packageFile('dashboard'),
     packageFile('..', '..', 'apps', 'dashboard', 'public'),
     packageFile('..', '..', '..', 'apps', 'dashboard', 'public'),
+    packageFile('dashboard'),
   ];
   return candidates.find((candidate) => existsSync(join(candidate, 'index.html')));
 }

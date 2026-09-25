@@ -93,7 +93,22 @@ export type EdgeKind =
   /** method|middleware -> external-effect: work that leaves the app */
   | 'emits'
   /** field -> field: payload.name -> dto.name -> customers.name */
-  | 'flows-to';
+  | 'flows-to'
+  /**
+   * field -> collection: `orders.customerId` holds the id of a `customers` record.
+   *
+   * The one relationship in a document database that is never written down in
+   * the place it matters. A reader looking at `orders` cannot tell from the
+   * schema that half the screen's data arrives from `customers`, and a
+   * developer changing `customers._id` cannot tell who depends on it. Both
+   * questions are answered by the same edge, so it is modelled rather than
+   * left to be rediscovered by reading every query.
+   *
+   * `meta.via` says how it was known — a declared `ref`, a Prisma
+   * `@relation`, a `$lookup`, or inferred from the field's name — because a
+   * guessed link and a declared one are not the same claim.
+   */
+  | 'references';
 
 /** Which side of the app a node lives on. Drives the dashboard columns. */
 export type Layer = 'ui' | 'frontend' | 'network' | 'backend' | 'data' | 'external';

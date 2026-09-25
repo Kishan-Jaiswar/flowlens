@@ -18,6 +18,8 @@
 
   --ui: #7c3aed;
   --frontend: #2563eb;
+  /* Anything that opens the editor. */
+  --link: #1d4ed8;
   --network: #0891b2;
   --backend: #059669;
   --data: #d97706;
@@ -37,6 +39,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
+    --link: #7ab4ff;
     --bg: #0f1115;
     --surface: #171a21;
     --surface-2: #1f232c;
@@ -143,6 +146,24 @@ body {
   grid-template-columns: 280px minmax(0, 1fr) 320px;
   gap: 0;
   height: calc(100vh - 61px);
+}
+
+/*
+ * The step inspector on the right belongs to the Docs diagram, where clicking
+ * a step fills it. Everything else is a page to read, and gets the whole width.
+ */
+.layout:not([data-diagram]),
+.layout:not([data-inspecting]) {
+  grid-template-columns: 280px minmax(0, 1fr);
+}
+
+.layout:not([data-diagram]) .details,
+.layout:not([data-inspecting]) .details {
+  display: none;
+}
+
+.details-close {
+  float: right;
 }
 
 .sidebar,
@@ -378,7 +399,7 @@ body {
   border-radius: var(--radius);
   padding: 9px 12px;
   min-width: 190px;
-  max-width: 340px;
+  width: 100%;
   cursor: pointer;
   box-shadow: var(--shadow);
   text-align: left;
@@ -444,6 +465,70 @@ body {
 }
 .node.layer-external {
   border-left-color: var(--external);
+}
+
+.node .node-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The order is the story; the number is the first thing the eye lands on. */
+.node .step-num {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.node .say {
+  font-size: 14px;
+  font-weight: 550;
+  line-height: 1.4;
+  margin-top: 6px;
+}
+
+.node .say code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+/* With a sentence on top, the code name is the secondary line. */
+.node .say + .label {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.node .sub.uses {
+  font-family: inherit;
+  word-break: normal;
+}
+
+.node .sub.uses code {
+  font-family: var(--mono);
+}
+
+/* Told from the action document rather than drawn from the graph. */
+.node.story {
+  border-style: dashed;
+  border-left-style: solid;
+}
+
+.lane-back .layer-name {
+  color: var(--frontend);
 }
 
 .node.warn {
@@ -757,7 +842,6 @@ code {
   color: var(--text-muted);
   font-size: 13px;
   line-height: 1.55;
-  max-width: 68ch;
 }
 
 .panel h3 {
@@ -1079,7 +1163,6 @@ code {
   border: 1px dashed var(--border);
   border-radius: var(--radius);
   background: var(--surface);
-  max-width: 70ch;
 }
 
 .empty-state h3 {
@@ -1118,7 +1201,6 @@ code {
   font-size: 12px;
   line-height: 1.6;
   color: var(--text-muted);
-  max-width: 70ch;
 }
 
 .warn-list {
@@ -1167,19 +1249,38 @@ code {
  * Contract, Changed, and the actionable bits.
  * --------------------------------------------------------------------------- */
 
-/* A file you can open. Underlined on hover only — a panel of permanently
-   underlined paths reads as a wall of links. */
+/*
+ * A file you can open looks like a link: link colour, a thin underline, and a
+ * small arrow saying it leaves the page for the editor. The underline is kept
+ * light so a table of paths does not become a wall of heavy lines; hover makes
+ * it solid.
+ */
 .file-link {
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--text-muted);
+  /* One unit: the arrow never wraps away from its file in a narrow column. */
+  white-space: nowrap;
+  color: var(--link);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--link) 45%, transparent);
+  border-bottom: 0;
+  cursor: pointer;
+}
+
+.file-link::after {
+  content: '↗';
+  display: inline-block;
+  margin-left: 2px;
+  font-family: var(--sans);
+  font-size: 0.85em;
   text-decoration: none;
-  border-bottom: 1px dotted var(--border);
 }
 
 .file-link:hover {
-  color: var(--frontend);
-  border-bottom-color: var(--frontend);
+  text-decoration-color: var(--link);
+  text-decoration-thickness: 1.5px;
 }
 
 .file-link.tiny {
@@ -1634,4 +1735,1133 @@ ul.plain.small {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+/* ---------------------------------------------------------------------------
+ * The Docs tab.
+ *
+ * One action, read in two passes. First "At a glance": one line per stage,
+ * grouped by where it happens, so the whole round trip fits on a screen. Then
+ * the same stages in detail, each a card whose facts are tables — the columns
+ * do the parsing a reader would otherwise do in their head. Colour means one
+ * thing throughout: where in the round trip you are (browser, network, server,
+ * database, back), and green / red for the success and failure paths.
+ * ------------------------------------------------------------------------ */
+
+.doc-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.doc-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.doc-picker strong {
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text);
+}
+
+.doc-bar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.doc-limits {
+  margin-top: 24px;
+}
+
+/* Phase colours, set once and used by every part of the document. */
+.phase-browser {
+  --phase: var(--frontend);
+}
+.phase-wire {
+  --phase: var(--network);
+}
+.phase-server {
+  --phase: var(--backend);
+}
+.phase-database {
+  --phase: var(--data);
+}
+.phase-back {
+  --phase: var(--ui);
+}
+
+.adoc {
+  line-height: 1.55;
+  font-size: 14px;
+}
+
+.adoc code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+  overflow-wrap: anywhere;
+}
+
+.adoc-intro h2 {
+  margin: 0 0 4px;
+  font-size: 22px;
+}
+
+.adoc-lede {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+
+.adoc-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 20px;
+}
+
+/* ----- At a glance ----- */
+
+.adoc-glance {
+  margin-bottom: 28px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.adoc-absent {
+  margin: -16px 0 28px;
+  padding: 10px 18px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.adoc-absent h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.adoc-absent li {
+  margin: 2px 0;
+}
+
+.adoc-absent-title {
+  display: inline-block;
+  min-width: 190px;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.adoc-glance h3 {
+  margin: 0 0 12px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.glance-phase {
+  border-left: 3px solid var(--phase);
+  padding: 2px 0 2px 12px;
+}
+
+.glance-phase-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--phase);
+  margin-bottom: 4px;
+}
+
+.glance-arrow {
+  padding: 2px 0 2px 4px;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.glance-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.glance-steps a {
+  display: grid;
+  grid-template-columns: 26px minmax(170px, 210px) 1fr;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.glance-steps a:hover {
+  background: var(--surface-2);
+}
+
+.glance-num {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid var(--phase);
+  color: var(--phase);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.glance-title {
+  font-weight: 600;
+}
+
+.glance-summary {
+  color: var(--text);
+}
+
+.glance-steps li.is-empty .glance-summary,
+.glance-steps li.is-empty .glance-title {
+  color: var(--text-muted);
+}
+
+.glance-steps li.is-empty .glance-num {
+  border-style: dashed;
+  opacity: 0.6;
+}
+
+/* ----- Detail ----- */
+
+.adoc-phase {
+  margin-bottom: 8px;
+}
+
+.adoc-phase-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 10px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--phase);
+}
+
+.adoc-phase-title::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.adoc-stages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* The line joining the stages of a phase. */
+.adoc-stage {
+  position: relative;
+  padding: 0 0 14px 42px;
+  scroll-margin-top: 12px;
+}
+
+.adoc-stage::before {
+  content: '';
+  position: absolute;
+  left: 13px;
+  top: 28px;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+
+.adoc-stage:last-child::before {
+  display: none;
+}
+
+.adoc-head {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 2px 0 8px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.adoc-num {
+  position: absolute;
+  left: -42px;
+  top: 0;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--phase);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.adoc-stage.is-empty .adoc-num {
+  background: var(--surface);
+  border: 2px dashed var(--phase);
+  color: var(--phase);
+}
+
+.adoc-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.adoc-title {
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.adoc-summary {
+  color: var(--text-muted);
+}
+
+.adoc-head::after {
+  content: '▾';
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.adoc-stage.is-collapsed .adoc-head::after {
+  content: '▸';
+}
+
+.adoc-stage.is-collapsed .adoc-body {
+  display: none;
+}
+
+.adoc-stage.is-flash .adoc-body {
+  box-shadow: 0 0 0 2px var(--phase);
+}
+
+.adoc-body {
+  display: grid;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--phase);
+  border-radius: var(--radius);
+  background: var(--surface);
+  transition: box-shadow 0.3s;
+}
+
+.adoc-stage.is-empty .adoc-body {
+  padding: 8px 14px;
+  border-left-style: dashed;
+}
+
+.adoc-empty {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.adoc-group {
+  min-width: 0;
+}
+
+.adoc-group h4,
+.adoc-group > summary {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+}
+
+.adoc-group > summary {
+  cursor: pointer;
+}
+
+.adoc-group.tone-ok h4 {
+  color: var(--ok);
+}
+
+.adoc-group.tone-error h4 {
+  color: var(--danger);
+}
+
+.adoc-group.tone-warn h4 {
+  color: var(--warning);
+}
+
+.adoc-group.tone-ok,
+.adoc-group.tone-error,
+.adoc-group.tone-warn {
+  padding-left: 10px;
+  border-left: 3px solid var(--ok);
+}
+
+.adoc-group.tone-error {
+  border-left-color: var(--danger);
+}
+
+.adoc-group.tone-warn {
+  border-left-color: var(--warning);
+}
+
+.adoc-lines {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.adoc-lines li {
+  margin: 3px 0;
+}
+
+.adoc-sub {
+  margin-top: 2px;
+  padding-left: 16px;
+  border-left: 1px solid var(--border);
+  list-style: none;
+  font-size: 0.95em;
+}
+
+.adoc .file-ref,
+.adoc .file-link {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Only a path that cannot be opened is dimmed: it is not a link. */
+.adoc .file-ref {
+  opacity: 0.7;
+}
+
+.adoc-lines li.tone-warn > .adoc-text {
+  color: var(--warning);
+}
+
+.adoc-lines li.tone-error > .adoc-text {
+  color: var(--danger);
+}
+
+.adoc-lines li.tone-muted > .adoc-text {
+  color: var(--text-muted);
+}
+
+.adoc-lines li.tone-ok > .adoc-text {
+  color: var(--ok);
+}
+
+/* ----- Tables ----- */
+
+.adoc-table-wrap {
+  overflow-x: auto;
+  margin-top: 4px;
+}
+
+.adoc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.adoc-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.adoc-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.adoc-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.adoc-table tbody tr:hover td {
+  background: var(--surface-2);
+}
+
+.adoc-table td:first-child {
+  white-space: nowrap;
+}
+
+.adoc-table.is-keyvalue td:first-child {
+  width: 130px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.adoc-table tr.tone-ok td:first-child {
+  box-shadow: inset 3px 0 0 var(--ok);
+}
+
+.adoc-table tr.tone-error td:first-child {
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+
+.adoc-table tr.tone-warn td:first-child {
+  box-shadow: inset 3px 0 0 var(--warning);
+}
+
+.adoc-table tr.tone-muted td {
+  color: var(--text-muted);
+}
+
+.adoc-ref {
+  width: 1%;
+  text-align: right;
+}
+
+.adoc-table-wrap.is-folded tr.is-extra {
+  display: none;
+}
+
+.adoc-more {
+  margin: 6px 10px 0;
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Flow tab: one full-width lane per part of the app.
+ * ------------------------------------------------------------------------ */
+
+/*
+ * No box around a lane: the step cards are the only boxes, so the eye follows
+ * them and not their frames. A lane is its coloured label and a hairline
+ * between it and the next.
+ */
+.graph .layer {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+}
+
+.graph .layer:first-of-type {
+  border-top: 0;
+}
+
+.graph .layer-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--lane, var(--border));
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+/* The numbers carry the order; a line between lanes would only add noise. */
+.graph .connector {
+  display: none;
+}
+
+.lane-ui {
+  --lane: var(--ui);
+}
+.lane-frontend,
+.lane-back {
+  --lane: var(--frontend);
+}
+.lane-network {
+  --lane: var(--network);
+}
+.lane-backend {
+  --lane: var(--backend);
+}
+.lane-data {
+  --lane: var(--data);
+}
+.lane-external {
+  --lane: var(--external);
+}
+
+.layer-name {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.layer-note {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.layer-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.lane-ui .layer-name {
+  color: var(--ui);
+}
+.lane-frontend .layer-name {
+  color: var(--frontend);
+}
+.lane-network .layer-name {
+  color: var(--network);
+}
+.lane-backend .layer-name {
+  color: var(--backend);
+}
+.lane-data .layer-name {
+  color: var(--data);
+}
+.lane-external .layer-name {
+  color: var(--external);
+}
+
+.graph .layer-nodes {
+  overflow-x: visible;
+  flex-wrap: wrap;
+}
+
+.graph .layer-column {
+  flex: 1 1 220px;
+  max-width: 420px;
+}
+
+.graph .collection-summary {
+  margin-bottom: 10px;
+}
+
+.node .sub.file {
+  word-break: normal;
+}
+
+/* ---------------------------------------------------------------------------
+ * The answer box and headings every tab shares.
+ * ------------------------------------------------------------------------ */
+
+.answer-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.answer {
+  margin-bottom: 18px;
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--text-muted);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.answer-row .answer {
+  margin-bottom: 0;
+}
+
+.answer-title {
+  font-size: 17px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.answer-text {
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.answer.tone-ok {
+  border-left-color: var(--ok);
+}
+.answer.tone-ok .answer-title {
+  color: var(--ok);
+}
+.answer.tone-warn {
+  border-left-color: var(--warning);
+}
+.answer.tone-warn .answer-title {
+  color: var(--warning);
+}
+.answer.tone-danger {
+  border-left-color: var(--danger);
+}
+.answer.tone-danger .answer-title {
+  color: var(--danger);
+}
+.answer.tone-neutral {
+  border-left-color: var(--network);
+}
+
+.answer code,
+.tab-note code,
+.panel .adoc-table code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.tab-heading {
+  margin: 22px 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+}
+
+.tab-note {
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.panel .adoc-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 4px 6px;
+}
+
+.why-list li {
+  margin: 4px 0;
+}
+
+.api-doc {
+  font-size: 13px;
+}
+
+.api-block {
+  margin-top: 18px;
+  padding: 4px 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+/* ---------------------------------------------------------------------------
+ * Queries tab: one row per query, separated by hairlines rather than boxed,
+ * so the code blocks are the only shaded areas on the page.
+ * ------------------------------------------------------------------------ */
+
+.q-list {
+  list-style: none;
+  margin: 18px 0 0;
+  padding: 0;
+}
+
+.q-item {
+  padding: 18px 0;
+  border-top: 1px solid var(--border);
+}
+
+.q-item:first-child {
+  border-top: 0;
+}
+
+.q-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.q-num {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.q-name {
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+.q-where {
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.q-time {
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.q-time.is-slow strong {
+  color: var(--warning);
+}
+
+/* Average as the solid bar, fastest–slowest as the faint band behind it. */
+.q-bar {
+  position: relative;
+  height: 8px;
+  margin-top: 6px;
+  max-width: 560px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.q-bar-range {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--data) 25%, transparent);
+}
+
+.q-bar-avg {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 0;
+  border-radius: 3px;
+  background: var(--data);
+}
+
+.q-time.is-slow + .q-bar .q-bar-avg {
+  background: var(--warning);
+}
+
+.q-code {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-x: auto;
+  /* Wrap rather than scroll: a long `$or` is read, not skimmed sideways. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The inline-code chip style would indent only the first line. */
+.q-code code {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: inherit;
+}
+
+.q-code.small {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.q-built {
+  margin-top: 12px;
+  padding-left: 14px;
+  border-left: 2px solid var(--border);
+}
+
+.q-var {
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+
+.q-nocode {
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+
+.q-howto {
+  margin-top: 22px;
+}
+
+.q-howto li {
+  margin: 4px 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Docs: the List / Diagram switch, drawn at the top of both views.
+ * ------------------------------------------------------------------------ */
+
+.doc-picker {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.view-switch {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.view-option {
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.view-option.active {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--shadow);
+}
+
+.graph .doc-bar {
+  margin-bottom: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Links that open the editor: files, lines of code, test cases.
+ * ------------------------------------------------------------------------ */
+
+span.file-link,
+.q-line {
+  cursor: pointer;
+}
+
+.file-link:focus-visible,
+.q-line:focus-visible {
+  outline: 2px solid var(--frontend);
+  outline-offset: 1px;
+}
+
+/* A path inside prose keeps its code chip, and its text reads as a link. */
+code.code-link .file-link {
+  font-size: inherit;
+}
+
+/*
+ * Each line of a "built here" block opens where it is written: link-coloured
+ * with a dotted underline, so it reads as clickable without the block turning
+ * into solid blue.
+ */
+.q-line {
+  color: var(--link);
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in srgb, var(--link) 50%, transparent);
+  text-underline-offset: 3px;
+}
+
+.q-line:hover {
+  text-decoration-style: solid;
+  text-decoration-color: var(--link);
+  background: color-mix(in srgb, var(--link) 12%, transparent);
+  border-radius: 3px;
+}
+
+.q-code-wrap {
+  position: relative;
+}
+
+.q-code-wrap .q-open {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  font-family: var(--sans);
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Issues: one row per finding, separated by hairlines; the headline is the
+ * summary of a <details>, so a long list stays scannable.
+ * ------------------------------------------------------------------------ */
+
+.issue-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+.issue {
+  border-top: 1px solid var(--border);
+}
+
+.issue:first-child {
+  border-top: 0;
+}
+
+.issue summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.issue summary::-webkit-details-marker {
+  display: none;
+}
+
+.issue summary::before {
+  content: '▸';
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.issue details[open] > summary::before {
+  content: '▾';
+}
+
+.issue-kind-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.issue-title {
+  flex: 1 1 320px;
+  font-weight: 600;
+}
+
+.issue-where {
+  margin-left: auto;
+}
+
+.issue-body {
+  padding: 0 0 16px 22px;
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+.issue-body p {
+  margin: 0 0 10px;
+}
+
+.issue-fix strong {
+  color: var(--ok);
+}
+
+.chip.sev-high {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+}
+
+.chip.sev-medium {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 50%, transparent);
+}
+
+.chip.sev-low {
+  color: var(--text-muted);
+}
+
+.issue-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+
+.issue-filter {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.issue-filter.active.sev-high {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.issue-filter.active.sev-medium {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
+.issue-filter.active.sev-low {
+  color: var(--text);
+  border-color: var(--text-muted);
+}
+
+.issue-kind {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+/* In the action list: how many high/medium issues the action runs into. */
+.flow-item {
+  position: relative;
+}
+
+.flow-item.has-issues {
+  padding-right: 44px;
+}
+
+.issue-mark {
+  position: absolute;
+  top: 9px;
+  right: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.issue-mark.sev-high {
+  color: var(--danger);
+}
+
+.issue-mark.sev-medium {
+  color: var(--warning);
 }

@@ -10,7 +10,7 @@ git clone https://github.com/Kishan-Jaiswar/flowlens.git
 cd flowlens
 nvm use            # Node 22+ required; .nvmrc pins the version used here
 npm install        # also builds, via the prepare script
-npm test           # 482 tests, ~10s
+npm test           # 540 tests, ~10s
 ```
 
 **Development needs Node 22.12 or newer**, even though the published CLI
@@ -123,7 +123,7 @@ nodes and the rest follows.
 
 ## Tests
 
-Vitest, in `tests/` — 482 tests across 21 files. All of them matter, and they
+Vitest, in `tests/` — 540 tests across 23 files. All of them matter, and they
 are deliberately different kinds:
 
 | Suite                           | What it holds down                                                                                                   |

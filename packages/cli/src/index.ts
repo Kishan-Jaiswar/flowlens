@@ -5,6 +5,7 @@ import { parseArgs } from 'node:util';
 import { loadConfig } from '@flowslens/core';
 import { splitPositionals } from './args.js';
 import { runFlow, runFlows } from './commands/flows.js';
+import { runFindings } from './commands/findings.js';
 import { runDoctor, runImpact } from './commands/impact.js';
 import { runInit } from './commands/init.js';
 import { runScan } from './commands/scan.js';
@@ -49,6 +50,8 @@ ${color.bold('COMMANDS')}
   where <file>:<line>     "What is this code for?" — features running through it
   impact <symbol>         "If I change this, what breaks?"
   doctor [project]        Broken API calls, dead endpoints, shared writes
+  findings [project]      Bugs with the line to open: no auth, missing tenant
+                          filter, mass assignment, N+1, sequential reads
   trace [project]         Merge recorded runtime spans into the graph
   serve [project]         Open the dashboard (default http://127.0.0.1:4177)
 
@@ -71,6 +74,8 @@ ${color.bold('OPTIONS')}
       --max-files <n>     Cap on files parsed (default 20000)
       --ignore <dir>      Skip a directory (repeatable)
       --include-tests     Analyze test files too
+      --fail-on <level>   findings: exit 1 on a finding at this severity or
+                          above (high, medium, low) — for CI
       --port <n>          Dashboard port (serve, default 4177; the next free
                           port is used if it is busy)
       --host <h>          Dashboard host (serve, default 127.0.0.1)
@@ -148,6 +153,7 @@ export function main(argv = process.argv.slice(2)): number {
         ignore: { type: 'string', multiple: true },
         'include-tests': { type: 'boolean', default: false },
         port: { type: 'string' },
+        'fail-on': { type: 'string' },
         host: { type: 'string' },
         token: { type: 'string' },
         open: { type: 'boolean' },
@@ -340,6 +346,18 @@ export function main(argv = process.argv.slice(2)): number {
 
       case 'doctor':
         return runDoctor(common);
+
+      case 'findings': {
+        const failOn = values['fail-on'];
+        if (failOn && !['high', 'medium', 'low'].includes(failOn)) {
+          process.stderr.write(`${color.red('error')} --fail-on takes high, medium or low\n`);
+          return 1;
+        }
+        return runFindings({
+          ...common,
+          ...(failOn ? { failOn: failOn as 'high' | 'medium' | 'low' } : {}),
+        });
+      }
 
       case 'trace':
         return runTrace(common);

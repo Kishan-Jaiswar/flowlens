@@ -10,7 +10,7 @@
  *   api.post('/coupons/validate').then(() => api.put('/carts/current'));
  *                                               // only if the first resolved
  *
- *   await Promise.all([api.get('/medicines'), api.get('/clinics')]);
+ *   await Promise.all([api.get('/products'), api.get('/shops')]);
  *                                               // both at once, neither waits
  *
  * The graph knew all three sets of calls and could not tell them apart: every
@@ -263,12 +263,17 @@ function producedState(call: CallExpression): string[] {
 
   const binding = resultBinding(call);
   if (binding) {
-    // `const { data: cart } = useQuery(...)` and `const { data } = useQuery(...)`
-    for (const match of binding.matchAll(/\bdata\s*:\s*([A-Za-z_$][\w$]*)/g)) {
-      if (match[1]) found.add(match[1]);
+    // `const { data: cart } = useQuery(...)` and `const { data } = useQuery(...)`.
+    // Only a hook's result is state the component renders from; the binding of a
+    // plain `await api.post(...)` is a local variable, and calling it state made
+    // the APIs tab claim the response "lands in data".
+    if (/^use[A-Z]/.test(calleeName(call))) {
+      for (const match of binding.matchAll(/\bdata\s*:\s*([A-Za-z_$][\w$]*)/g)) {
+        if (match[1]) found.add(match[1]);
+      }
+      if (/^\{[^}]*\bdata\b[^}]*\}$/.test(binding.replace(/\s+/g, ''))) found.add('data');
+      if (/^[A-Za-z_$][\w$]*$/.test(binding)) found.add(binding);
     }
-    if (/^\{[^}]*\bdata\b[^}]*\}$/.test(binding.replace(/\s+/g, ''))) found.add('data');
-    if (/^[A-Za-z_$][\w$]*$/.test(binding)) found.add(binding);
 
     // `const user = await api.get(...); setUser(user)`
     const scope = enclosingBody(call);

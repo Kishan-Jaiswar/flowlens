@@ -7,6 +7,122 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Issues: bugs the code shows, each with the line to open.** A new tab and a
+  `flowlens findings` command run six checks over the whole project — routes
+  with no auth check, queries that forget the tenant, the tenant id taken from
+  the request, the request body written as is (mass assignment), queries run
+  once per item of a loop (N+1), and independent reads awaited one after
+  another. The tenant field is learned from the filters that use it. Each
+  finding says why it matters, how to fix it, and what would make it a false
+  alarm; nothing it cannot read is guessed at, and a by-id query is only rated
+  high when its id is traced to the request. `--json` and `--fail-on high` make
+  it a CI gate.
+- **Queries with their code and their time.** Every database query an action
+  runs, as the backend wrote it — the whole chain, and the lines that build a
+  filter held in a variable, one helper deep — with its average, fastest and
+  slowest time from runtime spans. Nothing connects to a database.
+- **Every `file:line` opens the editor**, including inside diagram cards and in
+  prose, and looks like a link (`?editor=` picks VS Code, Cursor, IntelliJ, Zed…).
+- **Confirmation dialogs** (`confirm()`, SweetAlert, a `confirmDelete` helper)
+  are their own step in the action document and the diagram, instead of being
+  reported as frontend validation.
+
+### Changed
+
+- **Six tabs, none repeating another:** Docs, Issues, Performance, Tests,
+  Changed, Breaks. The Flow diagram is now Docs' _Diagram_ view; what only the
+  APIs tab showed (the contract check, a curl command, who else calls the
+  endpoint, statuses seen) moved into Docs' request and response steps; Timing
+  and Queries became Performance. Old `#tab=flow|apis|timing|queries` links
+  still land in the right place.
+- **The action document shows only the steps an action has**, numbered without
+  gaps, and lists the rest under "Not in this action" with the reason — so "no
+  auth check" is still stated.
+- **The diagram reads as a story:** numbered cards that say what each step does,
+  hooks that only hand the handler a helper folded onto its card, and the way
+  back to the screen as its own lane.
+- **Findings are fast on large backends:** line numbers come from a per-file
+  index instead of rescanning the source (193s → 4s on a 925-query backend).
+- **The launcher sends first-run build output to stderr**, so `--json` output
+  stays machine-readable.
+
+- **A seventh dashboard tab: Docs.** The other six answer a developer's
+  question about one action. This one describes the whole screen that action
+  sits on — what the page is for, what it does when it opens, what every
+  button does end to end, what it stores and what to be careful with — in
+  sentences with no jargon in them. It is the answer to "can you write up what
+  this page does" that used to mean an afternoon and a wiki page that went
+  stale the same week.
+
+  The document is deliberately complete rather than short, because the
+  question is really four questions:
+
+  - **Everything on this screen, at a glance** — one row per control, with the
+    requests it makes and the tables it reads, adds to, changes or deletes
+    beside it. Reading eight paragraphs to learn that only one button writes
+    anything was the failure this table exists to prevent.
+  - **Each action, start to finish** — what the user supplies, the steps in
+    order, and a table of exactly which collection each step reads or writes,
+    down to the call (`find` versus `findOne` is the difference between a list
+    and a detail page, and the name is the only place it is written down).
+  - **The information this screen works with** — every collection, its schema,
+    the fields that schema declares, and which actions on the screen use it.
+  - **How the information fits together** — see below.
+
+  **No model is involved.** Every sentence is a template over a fact already in
+  the graph (`core/flow/explain.ts`), so it says only what the code says, reads
+  the same on every run, and cannot invent a step that is not there. Where a
+  fact is missing it is left out and said so under "What this document does not
+  cover", because a confident sentence nobody can check is worse than a gap.
+
+  A screen picker switches pages without disturbing the feature list, and
+  **Copy as Markdown** hands over the same document — one renderer, so the page
+  and the paste cannot drift apart. New endpoints: `GET /api/screens` and
+  `GET /api/screen?name=…` (`&format=markdown`).
+
+- **Flowslens now reads how the collections link to each other**
+  (`core/analyzer/relations.ts`), which is the one relationship a document
+  database never writes down where it matters. A screen showing orders is
+  showing customers too, and no amount of reading the `orders` schema reveals
+  it. Four sources, kept apart rather than flattened:
+
+  - a declared Mongoose `ref`, including `[{ ref }]` for a list;
+  - a Prisma `@relation(fields: […])`, read from `schema.prisma`;
+  - an aggregation `$lookup`, a `.populate()` or a Prisma `include` — a query
+    _following_ the link, which is stronger evidence than a declaration;
+  - the naming convention, when a field called `customerId` sits next to a
+    `customers` collection — including one level down, so the `productId`
+    inside `products: Array<{ productId }>` is found, which is how every
+    order, invoice and cart is modelled.
+
+  The last of those is an inference and is labelled as one everywhere it
+  appears, in the table cell and again by name under "What this document does
+  not cover". It is only reported when the collection on the other end is one
+  the scan actually found: a `subjectId` in a project with no `subjects`
+  produces nothing at all rather than a plausible-looking wrong answer.
+
+  What it buys, beyond the prose: the Docs tab now warns when **a screen
+  deletes records that other collections point at** and nothing on the screen
+  tidies them up. That is invisible from the screen, from the code it runs and
+  from every other tab — the orders naming a deleted customer are not on the
+  page, which is exactly why nobody notices until they are.
+
+### Fixed
+
+- **A collection a trace discovered was reported as written to.** A db-op that
+  only runtime had seen carried no effect, so every reader fell back to
+  "write": a `find` the static analyzer never reached was described as changing
+  the collection it had only read. The merge now classifies runtime operations
+  the same way the source reader does.
+- **`flowlens serve` in a checkout served a stale dashboard.** `prepack` stages
+  `apps/dashboard/public` into `packages/cli/dashboard`, which is gitignored
+  build output that nothing deletes; the lookup found it first, so edits to the
+  dashboard appeared to do nothing until the next `npm run clean`. The working
+  copy now wins, which can only ever differ during development — a published
+  package has no `apps/` beside it.
+
 ## [1.1.2] - 2026-09-15
 
 ### Changed
@@ -72,7 +188,7 @@ shipping broken links, not about secrecy.
   Measured against a real 132-flow project, the first version had two problems
   worth fixing before adding anything: `useToast` was the single most-flagged
   "shared step" in the whole graph (13 features, because they all show a toast),
-  and "Medicines · Delete" appeared twice in the same list with no way to tell
+  and "Products · Delete" appeared twice in the same list with no way to tell
   the two apart.
 
   - **Shared by design versus shared by accident.** A toast hook, a cache, a
@@ -84,9 +200,9 @@ shipping broken links, not about secrecy.
     features is a platform utility whatever it is called, which is knowable from
     the graph rather than from a vocabulary. On the same project this moved
     high-risk features from 16 of 132 to 3, and the top of the findings list from
-    `useToast` to `GET /medicines`.
-  - **Colliding feature titles get a distinguishing suffix** (`Medicines ·
-Delete · MedicinesView`), and only when they collide.
+    `useToast` to `GET /products`.
+  - **Colliding feature titles get a distinguishing suffix** (`Products ·
+Delete · ProductsView`), and only when they collide.
   - **"Why this level"** discloses the factors behind the verdict, for the same
     reason the CLI lists its risk factors: a score nobody can audit is a score
     nobody trusts.
@@ -157,12 +273,12 @@ Delete · MedicinesView`), and only when they collide.
 
   api.post('/coupons/validate').then(() => api.put('/carts/current')); // only if that resolved
 
-  await Promise.all([api.get('/medicines'), api.get('/clinics')]); // both at once
+  await Promise.all([api.get('/products'), api.get('/shops')]); // both at once
   ```
 
   Requests are now numbered in source order and each one says when it happens:
   `needs the response from GET /carts/current`, `only after POST
-/coupons/validate resolves`, `sent at the same time as GET /clinics`.
+/coupons/validate resolves`, `sent at the same time as GET /shops`.
 
   - The waiting relationship is read from the **data**, not from line order: an
     earlier call bound its result to a variable and this call's arguments
@@ -422,13 +538,13 @@ Delete · MedicinesView`), and only when they collide.
     rejection is a different outcome from an error message.
   - **Cache invalidation followed to the refetch it causes.** This is the
     continuation no amount of reading the handler reveals:
-    `invalidateQueries({ queryKey: queryKeys.medicines.all })` fires fresh
+    `invalidateQueries({ queryKey: queryKeys.products.all })` fires fresh
     requests from components you are not looking at. Reading it needed two
     fixes beyond the obvious one — after-effects are collected from **hooks**
     as well as handlers, because `useMutation({ onSuccess })` inside a custom
     hook is where a React Query app actually keeps its invalidation; and key
-    **factories** are read as written (`queryKeys.medicines.all`) rather than
-    only literals, since a real project has no literal keys. On the pharma
+    **factories** are read as written (`queryKeys.products.all`) rather than
+    only literals, since a real project has no literal keys. On the production
     project this went from 0 flows to 8. Keys are paired to endpoints by name,
     on a path segment, and the panel says so — the alternative is reading key
     factories, which are ordinary functions and can be anything.
@@ -601,10 +717,10 @@ text/plain` it is a CORS simple request, so no preflight stood in the way and
 
   ```text
   before                              after
-  1. PUT  /medicines/:param  first     1. PUT  /medicines/:param  only when isEdit — otherwise POST /medicines
-  2. POST /medicines         second    1. POST /medicines         only when not isEdit — otherwise PUT /medicines/:param
-  3. POST /errors            third     2. GET  /medicines         sent second
-                                       3. POST /errors            only when the request fails
+  1. PUT  /products/:param  first     1. PUT  /products/:param  only when isEdit — otherwise POST /products
+  2. POST /products         second    1. POST /products         only when not isEdit — otherwise PUT /products/:param
+  3. POST /errors           third     2. GET  /products         sent second
+                                      3. POST /errors           only when the request fails
   ```
 
   Alternatives now share a step number and are joined with `or` rather than an

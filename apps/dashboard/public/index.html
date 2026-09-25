@@ -54,12 +54,20 @@
         -->
         <nav id="tabs" class="tabs" role="tablist" aria-label="Feature views"></nav>
 
-        <div id="graph" class="graph panel" role="tabpanel" aria-labelledby="tab-flow"></div>
+        <!-- The Docs tab's diagram view; shown instead of #panel-docs when chosen. -->
         <div
-          id="panel-timing"
+          id="graph"
+          class="graph panel"
+          role="tabpanel"
+          aria-label="The action as a diagram"
+          hidden
+        ></div>
+        <div id="panel-perf" class="panel" role="tabpanel" aria-labelledby="tab-perf" hidden></div>
+        <div
+          id="panel-issues"
           class="panel"
           role="tabpanel"
-          aria-labelledby="tab-timing"
+          aria-labelledby="tab-issues"
           hidden
         ></div>
         <div
@@ -76,7 +84,7 @@
           aria-labelledby="tab-tests"
           hidden
         ></div>
-        <div id="panel-apis" class="panel" role="tabpanel" aria-labelledby="tab-apis" hidden></div>
+        <div id="panel-docs" class="panel" role="tabpanel" aria-labelledby="tab-docs" hidden></div>
         <div
           id="panel-changed"
           class="panel"

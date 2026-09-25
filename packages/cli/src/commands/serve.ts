@@ -11,14 +11,22 @@ import {
   findBrokenCalls,
   findDeadEndpoints,
   findSharedWrites,
+  actionQueries,
+  explainAction,
+  projectFindings,
+  explainScreen,
+  listScreens,
   mergeRuntimeTrace,
   parseTraceFile,
   flowApis,
   flowTiming,
   indexTests,
+  renderActionDocument,
   renderFeatureDocument,
+  renderScreenDocument,
   resolveFlows,
   scan,
+  SourceReader,
   testsForFlow,
   type FlowGraph,
   type TestIndex,
@@ -202,6 +210,10 @@ export function runServe(args: ServeArgs): number {
    */
   let tests: TestIndex = indexTests(testRoots(root, args));
   let lastScan = new Date();
+  /** Source files read for action documents; dropped on rescan. */
+  let reader: SourceReader | undefined;
+  /** Findings read the whole project; computed once per scan. */
+  let findings: ReturnType<typeof projectFindings> | undefined;
 
   /**
    * `serve` writes twice — the graph on every re-scan, the trace on every batch
@@ -398,6 +410,93 @@ export function runServe(args: ServeArgs): number {
       return;
     }
 
+    /**
+     * The screen picker for the Docs tab: every screen, busiest first.
+     *
+     * Cheap enough to answer on every tab switch, and separate from
+     * `/api/screen` so the picker is populated before a document is chosen.
+     */
+    if (path === '/api/screens') {
+      sendJson(response, listScreens(graph));
+      return;
+    }
+
+    /**
+     * One screen, written out for somebody who does not read code.
+     *
+     * Not part of `/api/insight`: that endpoint is keyed by the selected
+     * feature, and this document is about the screen the feature sits on —
+     * switching features within a screen must not refetch it.
+     */
+    if (path === '/api/screen') {
+      const name = url.searchParams.get('name');
+      const doc = name ? explainScreen(graph, name) : undefined;
+      if (!doc) {
+        sendJson(response, { error: 'unknown screen' }, 404);
+        return;
+      }
+      if (url.searchParams.get('format') === 'markdown') {
+        response.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
+        response.end(renderScreenDocument(doc));
+        return;
+      }
+      sendJson(response, doc);
+      return;
+    }
+
+    /**
+     * One action, documented stage by stage — what the Docs tab shows.
+     *
+     * Reads the handful of source files the action touches on demand, through
+     * one reader per scan so a file parsed for one action is not parsed again
+     * for the next. The reader is replaced on rescan: its files may have changed.
+     */
+    if (path === '/api/action') {
+      const flowId = url.searchParams.get('flow');
+      const flow = resolveFlows(graph, { includeLocalOnly: true }).find((f) => f.id === flowId);
+      if (!flow) {
+        sendJson(response, { error: 'unknown flow' }, 404);
+        return;
+      }
+      reader ??= new SourceReader(graph);
+      const doc = explainAction(graph, flow, { reader });
+      if (url.searchParams.get('format') === 'markdown') {
+        response.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
+        response.end(renderActionDocument(doc));
+        return;
+      }
+      sendJson(response, doc);
+      return;
+    }
+
+    /**
+     * The database queries one action runs — what the Queries tab shows: the
+     * code of each query read from the source, and its time from the runtime
+     * spans already merged into the graph. Nothing here touches a database.
+     */
+    if (path === '/api/queries') {
+      const flowId = url.searchParams.get('flow');
+      const flow = resolveFlows(graph, { includeLocalOnly: true }).find((f) => f.id === flowId);
+      if (!flow) {
+        sendJson(response, { error: 'unknown flow' }, 404);
+        return;
+      }
+      reader ??= new SourceReader(graph);
+      sendJson(response, actionQueries(graph, flow, { reader }));
+      return;
+    }
+
+    /**
+     * Bugs the graph and the source can show — the Issues tab. Project-wide,
+     * computed on first request and kept until the next scan.
+     */
+    if (path === '/api/findings') {
+      reader ??= new SourceReader(graph);
+      findings ??= projectFindings(graph, { reader });
+      sendJson(response, findings);
+      return;
+    }
+
     if (path === '/api/document') {
       const flowId = url.searchParams.get('flow');
       const flow = resolveFlows(graph, { includeLocalOnly: true }).find((f) => f.id === flowId);
@@ -412,6 +511,8 @@ export function runServe(args: ServeArgs): number {
 
     if (path === '/api/rescan' && request.method === 'POST') {
       graph = buildGraph(root, args);
+      reader = undefined;
+      findings = undefined;
       tests = indexTests(testRoots(root, args));
       lastScan = new Date();
       sendJson(response, { ok: true, nodes: graph.nodeCount, edges: graph.edgeCount });

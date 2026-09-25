@@ -12,6 +12,7 @@ import { analyzeServerModules } from './analyzer/servermodules.js';
 import { collectionAliasesOf } from './analyzer/dbaccess.js';
 import { isEmptyPrismaSchema, loadPrismaSchema } from './analyzer/prisma.js';
 import { detectProjects, loadProject, type ScanOptions } from './analyzer/project.js';
+import { linkCollectionRelations } from './analyzer/relations.js';
 import { linkDataLineage, linkFrontendToBackend, type SeamResult } from './analyzer/seam.js';
 
 /** Cap on `requestFunctionPattern`: see the check in {@link scan}. */
@@ -79,6 +80,8 @@ export interface ScanStats {
   externalEffects: number;
   /** Prisma schema files read, if any. */
   prismaSchemas: number;
+  /** Links between collections: declared refs, `@relation`s, joins, conventions. */
+  collectionRelations: number;
 }
 
 /**
@@ -195,6 +198,13 @@ export function scan(options: ScanOptions & FlowslensConfig): ScanResult {
    * because it joins the route handlers those declared to the module functions.
    */
   analyzeServerModules(loaded, graph, collectionAliases, prisma);
+  /**
+   * How the collections link to each other — last of the data passes, because
+   * an inferred link is only reported when the collection on the other end is
+   * one the scan actually found, and that set is not complete until every
+   * query has been read.
+   */
+  const relationLinks = linkCollectionRelations(loaded, graph, prisma);
   const seam = linkFrontendToBackend(graph);
   const lineageLinks = linkDataLineage(graph);
 
@@ -214,6 +224,7 @@ export function scan(options: ScanOptions & FlowslensConfig): ScanResult {
     middleware: graph.nodesOfKind('middleware').length,
     externalEffects: graph.nodesOfKind('external-effect').length,
     prismaSchemas: prisma.files.length,
+    collectionRelations: relationLinks,
   };
 
   return {

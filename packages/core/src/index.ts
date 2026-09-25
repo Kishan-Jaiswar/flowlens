@@ -57,6 +57,55 @@ export {
   type FlowApis,
 } from './flow/api.js';
 export {
+  explainAction,
+  renderActionDocument,
+  type ActionDoc,
+  type ActionStage,
+  type DocGroup,
+  type DocLine,
+  type ExplainActionOptions,
+  type StageKey,
+} from './flow/action.js';
+export {
+  projectFindings,
+  type Finding,
+  type FindingKind,
+  type FindingSeverity,
+  type FindingsOptions,
+  type ProjectFindings,
+} from './flow/findings.js';
+export {
+  actionQueries,
+  type ActionQueries,
+  type ActionQueriesOptions,
+  type ActionQuery,
+  type QueryLine,
+  type QueryPart,
+  type QueryVariable,
+  type QueryPartRole,
+} from './flow/queries.js';
+export {
+  SourceReader,
+  type SchemaFacts,
+  type SchemaField,
+  type SourcePoint,
+} from './flow/actionsource.js';
+export {
+  explainScreen,
+  listScreens,
+  renderScreenDocument,
+  type ActionData,
+  type ControlRow,
+  type DataNote,
+  type DocReference,
+  type ExplainOptions,
+  type GlossaryEntry,
+  type RelationNote,
+  type ScreenDoc,
+  type ScreenIndexEntry,
+  type ScreenStory,
+} from './flow/explain.js';
+export {
   checkFlowContract,
   type ContractCheck,
   type ContractField,
@@ -121,8 +170,16 @@ export {
   loadPrismaSchema,
   prismaEffectOf,
   prismaTableOf,
+  type PrismaRelation,
   type PrismaSchema,
 } from './analyzer/prisma.js';
+export {
+  collectionRelations,
+  linkCollectionRelations,
+  referenceTargetOf,
+  type CollectionRelation,
+  type RelationVia,
+} from './analyzer/relations.js';
 export {
   DEFAULT_ACTION_PROPS,
   DEFAULT_FRONTEND_CONFIG,

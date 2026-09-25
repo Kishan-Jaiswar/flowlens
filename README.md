@@ -33,7 +33,7 @@ is not proven:
 | Operating systems      | Windows, macOS and Linux: unit suite, every CLI command, and a from-scratch launcher run, all three in CI                                                                                                                     |
 | Runtime tracing        | **Proven live for HTTP and method spans**: a real server, real sockets, a real trace file, merged into a real scan and asserted `confirmed`. The Mongoose plugin is still driven by fakes — a real database is the last piece |
 | Stacks read            | React/Next, NestJS/Express, Mongoose, the MongoDB driver and Prisma. Vue, Svelte, TypeORM, GraphQL and raw SQL are not read yet, and `flowlens stack` tells you so before you spend the afternoon                             |
-| Test suite             | 482 tests across 21 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                                                     |
+| Test suite             | 540 tests across 23 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                                                     |
 
 `docs/ROADMAP.md` leads with what is missing rather than what is planned.
 
@@ -696,15 +696,93 @@ node packages/cli/bin/flowlens.mjs trace examples/crud --trace /tmp/demo-trace.j
 
 ---
 
-## The dashboard's six tabs
+## The dashboard's seven tabs
 
-`flowlens serve` opens one feature at a time and asks six questions about it,
+`flowlens serve` opens one feature at a time and asks seven questions about it,
 in the order a developer actually asks them. Each tab carries its own headline
 number, so the worrying one is visible before you open it:
 
 ```text
-Flow · 24   APIs · 1   Timing · no runs   Breaks · 2   Tests · none   Changed · 5
+Flow · 24   APIs · 1   Timing · no runs   Breaks · 2   Tests · none   Docs · 6 actions   Changed · 5
 ```
+
+**Docs** is the one you can forward to somebody who does not read code. The
+other six describe one action to a developer; this one describes the whole
+screen the action sits on, in sentences with no jargon in them — this is real
+output, not an illustration:
+
+```text
+# Login
+
+Page address: /login
+
+Login is the page at /login. There are two things a user can do here.
+
+It works with shops, shopsettings, otps and users — the information the
+app has stored.
+
+## What a user can do here
+
+### Verify & continue
+
+The user submits "Verify & continue".
+
+1. The browser sends information to the server — POST /auth/verify-otp.
+2. The server looks up what is stored in shops, otps and users.
+3. The server stores something new in users.
+4. The server changes what is already stored in otps and users.
+5. What comes back is held by the screen as data, which is what you see on
+   the page.
+
+- A short message confirms it to the user.
+
+Takes about 157ms from start to finish, measured over 4 real runs.
+
+Confirmed: the source code says this happens, and Flowslens has watched it
+happen in a real run.
+```
+
+Each action also carries a table of exactly what it does to each collection,
+because "which of these buttons deletes something" is a glance in a table and a
+careful read in a paragraph:
+
+```text
+| Where   | What happens to it                                    | Which call  |
+| otps    | Reads from otps — a single record.                    | findOne     |
+| users   | Adds to users — one new record.                       | create      |
+| otps    | Changes in otps — one record.                          | updateOne   |
+```
+
+And the section a page description cannot do without — **how the information
+fits together**. A screen showing orders is showing customers too, and nothing
+in the `orders` schema, the request, or any other tab says so:
+
+```text
+| Link                  | What it means                                  | How this is known |
+| orders.customerId     | Each record in orders names one record in       | inferred          |
+|   → customers         | customers, by keeping its id in customerId.     |                   |
+| orders.products[]     | Each record in orders names any number of       | inferred          |
+|   .productId          | records in products.                            |                   |
+|   → products          |                                                 |                   |
+```
+
+Flowslens reads those links from a declared Mongoose `ref`, a Prisma
+`@relation`, a `$lookup`/`.populate()` that actually follows one, or — labelled
+as a guess, every time — the naming convention. That is also what lets the tab
+say something no other view can:
+
+```text
+## Worth knowing
+
+- This screen deletes from `customers`, and records in `orders` point at it.
+  Nothing on this screen touches those, so after a delete they may hold an id
+  that no longer exists. Check whether something elsewhere cleans that up.
+```
+
+Every sentence is a template over a fact already in the graph — no model is
+involved, and nothing is sent anywhere — so it says only what the code says and
+reads the same on every run. **Copy as Markdown** hands you the same document
+for a wiki, a handover note or a release ticket.
 
 **Changed** is the one to reach for mid-edit. It ignores the selected feature and
 asks the project-wide question instead — what have I touched, and what runs
@@ -714,10 +792,10 @@ through it:
 high risk   1 changed file is used by 5 features; 5 of them have no test.
 
 Features affected, most-touched first
-  Medicines · Delete   MedicinesView        no test
-    DELETE /medicines/:param             app/api/medicines/[id]/route.ts:1
-  Medicines · Delete   MedicineDetailPage   no test
-    DELETE /medicines/:param             app/api/medicines/[id]/route.ts:38
+  Products · Delete   ProductsView        no test
+    DELETE /products/:param             app/api/products/[id]/route.ts:1
+  Products · Delete   ProductDetailPage   no test
+    DELETE /products/:param             app/api/products/[id]/route.ts:38
 ```
 
 Unlike Timing it needs no instrumentation, and unlike Tests it says something
@@ -740,7 +818,7 @@ Code it runs    verifyOtp          lib/auth/user-store.ts:125
 Data it touches otps    findOne     read     verifyOtp          …user-store.ts:127
                 otps    updateOne   update   verifyOtp          …user-store.ts:135
                 users   insertOne   create   findOrCreateUser   …user-store.ts:175
-Leaves the app  cache (get), cache (set)     lib/db/clinics.ts:49
+Leaves the app  cache (get), cache (set)     lib/db/shops.ts:49
 Who else uses it   the other features calling the same endpoint
 ```
 
@@ -797,8 +875,8 @@ lands in — followed by one block for the action as a whole:
 ```text
 AFTER THE RESPONSE                                    failures handled
 
-Goes to        /medicines
-Refetches      queryKeys.medicines.all  → GET /medicines, GET /medicines/:param
+Goes to        /products
+Refetches      queryKeys.products.all  → GET /products, GET /products/:param
                queryKeys.dashboard      → GET /dashboard
 The user sees  toast: Saved
                toast: Could not save
@@ -998,7 +1076,7 @@ node --version       # expect the version in .nvmrc
 ```bash
 npm install          # also builds, via the prepare script
 npm run build        # compile all three packages
-npm test             # build, then run the suite — 482 tests, ~10s
+npm test             # build, then run the suite — 540 tests, ~10s
 npm run test:watch
 npm run smoke        # run every CLI command for real, on this OS
 npm run test:package # pack, install into a throwaway project, drive over HTTP

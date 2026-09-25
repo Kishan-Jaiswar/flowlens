@@ -146,7 +146,9 @@ function newestSourceTime() {
  * command line is a constant in this file and no user input reaches it.
  */
 function npm(commandLine) {
-  const result = spawnSync(commandLine, { cwd: ROOT, stdio: 'inherit', shell: true });
+  // npm's output goes to stderr: stdout belongs to the command the user ran, so
+  // a first-run build must not corrupt `flowlens findings --json | jq`.
+  const result = spawnSync(commandLine, { cwd: ROOT, stdio: ['ignore', 2, 2], shell: true });
   if (result.error) {
     fail(
       `could not run npm: ${result.error.message}\n` +

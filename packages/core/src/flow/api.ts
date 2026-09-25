@@ -45,6 +45,19 @@ export interface ApiDataAccess {
   effect: string;
   /** The method that issues it, so there is something to open. */
   by?: string;
+  /** `mongodb` or `prisma` — which of the two words to use for the store. */
+  database?: string;
+  /**
+   * Collections this one query brings back alongside its own.
+   *
+   * A `$lookup`, a `.populate()` or a Prisma `include`: the data arrives
+   * together, which is the difference between two reads and one. Without it a
+   * join reads as a query against a single collection, and the reader
+   * concludes the related records are fetched somewhere else.
+   */
+  joins?: string[];
+  /** Relation fields the query asks to be filled in: `customer`, `items`. */
+  follows?: string[];
   file?: string;
   line?: number;
 }
@@ -165,7 +178,7 @@ export interface FlowAftermath {
    * Caches it invalidates, and the endpoints that will refetch as a result.
    *
    * This is a continuation of the flow that no amount of reading the handler
-   * reveals: `invalidateQueries(['medicines'])` fires a second request from a
+   * reveals: `invalidateQueries(['products'])` fires a second request from a
    * completely different component.
    */
   invalidates: Array<{ key: string; refetches: string[] }>;
@@ -452,11 +465,18 @@ export function flowApis(graph: FlowGraph, flow: FeatureFlow): FlowApis {
           });
         } else if (reachedNode.kind === 'db-op') {
           const owner = graph.predecessors(nodeId, ['queries'])[0];
+          const joins = asStrings(reachedNode.meta?.['joins']);
+          const follows = asStrings(reachedNode.meta?.['follows']);
           detail.data.push({
             collection: String(reachedNode.meta?.['collection'] ?? ''),
             operation: String(reachedNode.meta?.['operation'] ?? ''),
             effect: String(reachedNode.meta?.['effect'] ?? reachedNode.meta?.['access'] ?? 'write'),
             ...(owner ? { by: owner.label } : {}),
+            ...(reachedNode.meta?.['database']
+              ? { database: String(reachedNode.meta['database']) }
+              : {}),
+            ...(joins.length > 0 ? { joins } : {}),
+            ...(follows.length > 0 ? { follows } : {}),
             ...(reachedNode.source
               ? { file: reachedNode.source.file, line: reachedNode.source.line }
               : {}),
@@ -558,8 +578,8 @@ export function flowApis(graph: FlowGraph, flow: FeatureFlow): FlowApis {
 /**
  * What the feature does after its requests return.
  *
- * Invalidated keys are matched to endpoints by name: a key of `medicines`
- * against a path containing `medicines`. It is a heuristic, and a deliberately
+ * Invalidated keys are matched to endpoints by name: a key of `products`
+ * against a path containing `products`. It is a heuristic, and a deliberately
  * visible one — the alternative is reading React Query's key factories, which
  * are ordinary functions and can be anything. A named endpoint the reader can
  * check beats a silent gap.
@@ -591,7 +611,7 @@ function aftermathFor(
     /**
      * The part of a key that names a resource.
      *
-     * `queryKeys.medicines.all` matches on `medicines`, not on `queryKeys` or
+     * `queryKeys.products.all` matches on `products`, not on `queryKeys` or
      * `all` — those are the scaffolding every key in the project shares, and
      * matching on them would pair every invalidation with every endpoint.
      */
@@ -601,10 +621,10 @@ function aftermathFor(
       .filter((candidate) => {
         if (String(candidate.meta?.['httpMethod'] ?? '').toUpperCase() !== 'GET') return false;
         /**
-         * Segment match, not substring: `/premedicines` is not `/medicines`.
+         * Segment match, not substring: `/preproducts` is not `/products`.
          *
          * Still deliberately broad within that, because React Query's own
-         * invalidation is prefix-based — invalidating `medicines` really does
+         * invalidation is prefix-based — invalidating `products` really does
          * refetch every key beginning with it.
          */
         return String(candidate.meta?.['path'] ?? '')
@@ -737,7 +757,7 @@ function keyNeedle(key: string): string {
     .split(/[./]/)
     .map((part) => part.trim().toLowerCase())
     .filter((part) => part !== '' && !KEY_SCAFFOLDING.has(part));
-  // The last meaningful segment: `queryKeys.medicines.all` -> `medicines`.
+  // The last meaningful segment: `queryKeys.products.all` -> `products`.
   return parts[parts.length - 1] ?? '';
 }
 

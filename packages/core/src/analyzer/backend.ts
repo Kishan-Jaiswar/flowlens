@@ -3,6 +3,7 @@ import {
   SyntaxKind,
   type ClassDeclaration,
   type MethodDeclaration,
+  type ObjectLiteralExpression,
   type ParameterDeclaration,
   type PropertyDeclaration,
   type SourceFile,
@@ -285,19 +286,81 @@ function declareSchemaClass(
 
   const modelId = ids.model(modelName);
   for (const property of declaration.getProperties()) {
-    const hasProp = property.getDecorators().some((d) => d.getName() === 'Prop');
-    if (!hasProp) continue;
+    const prop = property.getDecorators().find((d) => d.getName() === 'Prop');
+    if (!prop) continue;
     const fieldName = property.getName();
     const fieldId = ids.field(modelId, fieldName);
+    const declaredType = property.getTypeNode()?.getText();
     graph.addNode({
       id: fieldId,
       kind: 'field',
       label: fieldName,
       source: { file: rel, line: lineOf(property) },
-      meta: { owner: modelName, type: property.getTypeNode()?.getText() },
+      meta: {
+        owner: modelName,
+        type: declaredType,
+        /**
+         * `@Prop({ ref: 'Customer' })` — the link between two collections,
+         * read here because this is the only place it is written down.
+         */
+        ...schemaRefOf(asObjectLiteral(prop.getArguments()[0]), declaredType),
+      },
     });
     graph.addEdge({ from: modelId, to: fieldId, kind: 'defines' });
   }
+}
+
+/**
+ * The `ref` on one schema field, and whether it holds one id or many.
+ *
+ * Mongoose spells the same relationship four ways — `{ ref: 'X' }`,
+ * `{ type: [..], ref: 'X' }`, `[{ ref: 'X' }]` and a `ref` on a nested `type`
+ * object — and a reader of the *document* does not care which. All four are
+ * normalised to the two facts that matter: the model on the other end, and
+ * whether this side is a list.
+ *
+ * `cardinality` comes from the declared TypeScript type as well as the option
+ * object, because `@Prop({ ref: 'Product' }) products: Types.ObjectId[]` says
+ * "many" only in the type.
+ */
+function schemaRefOf(
+  options: ObjectLiteralExpression | undefined,
+  declaredType?: string,
+): { ref?: string; refMany?: boolean } {
+  if (!options) return {};
+
+  const direct = readString(propertyValue(options, 'ref'));
+  const typeValue = propertyValue(options, 'type');
+  // `type: [{ type: ObjectId, ref: 'X' }]` and `type: { ref: 'X' }`.
+  const nestedElement =
+    typeValue && Node.isArrayLiteralExpression(typeValue)
+      ? asObjectLiteral(typeValue.getElements()[0])
+      : asObjectLiteral(typeValue);
+  const nested = nestedElement ? readString(propertyValue(nestedElement, 'ref')) : undefined;
+
+  const ref = direct ?? nested;
+  if (!ref) return {};
+
+  const many =
+    (typeValue !== undefined && Node.isArrayLiteralExpression(typeValue)) ||
+    /\[\s*\]\s*$|^Array</.test(declaredType ?? '');
+  return { ref, ...(many ? { refMany: true } : {}) };
+}
+
+/**
+ * The same reading for a plain `new Schema({...})` field value.
+ *
+ * `customerId: { ref: 'Customer' }` is an object; `customerIds: [{ ref:
+ * 'Customer' }]` is an array of one. Anything else — a bare `String`, a
+ * function, an import — declares no relation.
+ */
+function literalRefOf(value: Node | undefined): { ref?: string; refMany?: boolean } {
+  if (!value) return {};
+  if (Node.isArrayLiteralExpression(value)) {
+    const inner = schemaRefOf(asObjectLiteral(value.getElements()[0]));
+    return inner.ref ? { ref: inner.ref, refMany: true } : {};
+  }
+  return schemaRefOf(asObjectLiteral(value));
 }
 
 function declareDto(
@@ -358,12 +421,20 @@ function declareMongooseModels(
     for (const fieldName of objectKeys(schemaLiteral)) {
       if (fieldName.startsWith('...')) continue;
       const fieldId = ids.field(modelId, fieldName);
+      /**
+       * The field's own value, for the `ref` inside it.
+       *
+       * `objectKeys` is enough to name the fields, but a relation is declared
+       * in the value — `customerId: { type: ObjectId, ref: 'Customer' }` — so
+       * the value is read too where there is one to read.
+       */
+      const value = propertyValue(schemaLiteral, fieldName);
       graph.addNode({
         id: fieldId,
         kind: 'field',
         label: fieldName,
         source: { file: rel, line: lineOf(schemaLiteral) },
-        meta: { owner: modelName },
+        meta: { owner: modelName, ...literalRefOf(value) },
       });
       graph.addEdge({ from: modelId, to: fieldId, kind: 'defines' });
     }

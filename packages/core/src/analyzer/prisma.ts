@@ -62,15 +62,37 @@ export function prismaEffectOf(operation: string): DbEffect | undefined {
  */
 const CLIENT_HEADS = new Set(['prisma', 'db', 'database', 'client', 'dbClient', 'prismaClient']);
 
+/**
+ * One declared link between two tables.
+ *
+ * Only the side that *holds* the key is recorded. `@relation(fields:
+ * [authorId])` on `Post` says `posts.author_id` points at a row in `users`;
+ * the matching `posts Post[]` on `User` is the same fact written from the
+ * other end, and recording both would report one relationship as two.
+ * Anything that wants the reverse direction can read the incoming links.
+ */
+export interface PrismaRelation {
+  /** Table holding the foreign key. */
+  from: string;
+  /** The column that holds it: `authorId`. */
+  field: string;
+  /** Table the key points at. */
+  to: string;
+  /** True when this side holds a list of keys. */
+  many: boolean;
+}
+
 /** Model name -> physical table name, as declared by the schema. */
 export interface PrismaSchema {
   /** Client property (camelCase model name) -> table name. */
   tables: ReadonlyMap<string, string>;
+  /** Declared links between tables, key-holding side only. */
+  relations: readonly PrismaRelation[];
   /** Schema files the models were read from, relative to the scan root. */
   files: readonly string[];
 }
 
-const EMPTY_SCHEMA: PrismaSchema = { tables: new Map(), files: [] };
+const EMPTY_SCHEMA: PrismaSchema = { tables: new Map(), relations: [], files: [] };
 
 /** True when the project has no Prisma schema at all. */
 export function isEmptyPrismaSchema(schema: PrismaSchema | undefined): boolean {
@@ -93,6 +115,10 @@ export function loadPrismaSchema(roots: readonly string[]): PrismaSchema {
   if (files.length === 0) return EMPTY_SCHEMA;
 
   const tables = new Map<string, string>();
+  /** Model name (as written) -> table name, for resolving relation targets. */
+  const byModel = new Map<string, string>();
+  const bodies: Array<[string, string]> = [];
+
   for (const path of files) {
     let text: string;
     try {
@@ -101,9 +127,70 @@ export function loadPrismaSchema(roots: readonly string[]): PrismaSchema {
       // A schema we cannot read is a gap, not a reason to fail the scan.
       continue;
     }
-    for (const [property, table] of readModels(text)) tables.set(property, table);
+    for (const { model, table, body } of readModels(text)) {
+      tables.set(clientProperty(model), table);
+      byModel.set(model, table);
+      bodies.push([model, body]);
+    }
   }
-  return { tables, files };
+
+  /**
+   * Relations in a second pass, once every model is known.
+   *
+   * A relation names another *model*, and the table it maps to may be declared
+   * in a later file — Prisma 5 allows a folder of schema files. Resolving as
+   * each model is read would silently drop every forward reference.
+   */
+  const relations: PrismaRelation[] = [];
+  for (const [model, body] of bodies) {
+    const from = byModel.get(model);
+    if (!from) continue;
+    for (const relation of readRelations(body, byModel)) relations.push({ ...relation, from });
+  }
+
+  return { tables, relations, files };
+}
+
+/**
+ * The `@relation(fields: [...])` links in one model body.
+ *
+ * Read line by line rather than with one big pattern: a field declaration is a
+ * line in Prisma's grammar, and matching across lines is how `references: [id]`
+ * on a wrapped attribute gets paired with the wrong field.
+ */
+function readRelations(
+  body: string,
+  byModel: ReadonlyMap<string, string>,
+): Array<Omit<PrismaRelation, 'from'>> {
+  const out: Array<Omit<PrismaRelation, 'from'>> = [];
+
+  for (const line of body.split('\n')) {
+    const text = line.trim();
+    if (text.startsWith('//') || text.startsWith('@@')) continue;
+
+    const declaration = /^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)(\[\])?\??/.exec(text);
+    if (!declaration) continue;
+    const [, name, type, list] = declaration;
+    if (!name || !type) continue;
+
+    const to = byModel.get(type);
+    // A field whose type is not a model is an ordinary column.
+    if (!to) continue;
+
+    /**
+     * The column holding the key, which is the field a reader can look for.
+     *
+     * Without `fields:` this is the back-reference side — the key lives on the
+     * other model, and that model records it. Skipped rather than guessed.
+     */
+    const fields = /@relation\([^)]*\bfields:\s*\[([^\]]*)\]/.exec(text);
+    const field = fields?.[1]?.split(',')[0]?.trim();
+    if (!field) continue;
+
+    out.push({ field, to, many: list === '[]' });
+  }
+
+  return out;
 }
 
 /**
@@ -113,8 +200,8 @@ export function loadPrismaSchema(roots: readonly string[]): PrismaSchema {
  * that is the default here too. Guessing a pluralisation (as Mongoose needs)
  * would name tables that do not exist.
  */
-function readModels(text: string): Array<[string, string]> {
-  const out: Array<[string, string]> = [];
+function readModels(text: string): Array<{ model: string; table: string; body: string }> {
+  const out: Array<{ model: string; table: string; body: string }> = [];
   const pattern = /^\s*model\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([\s\S]*?)^\s*\}/gm;
   for (const match of text.matchAll(pattern)) {
     const model = match[1];
@@ -122,7 +209,7 @@ function readModels(text: string): Array<[string, string]> {
     if (!model) continue;
     const mapped = /@@map\(\s*['"]([^'"]+)['"]\s*\)/.exec(body);
     const table = mapped?.[1] ?? model;
-    out.push([clientProperty(model), table]);
+    out.push({ model, table, body });
   }
   return out;
 }

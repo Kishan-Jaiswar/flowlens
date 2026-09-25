@@ -134,12 +134,12 @@ DATABASE
 flowlens serve
 ```
 
-A local dashboard on `http://127.0.0.1:4177`, which asks six questions about the
-feature you have open. Each tab carries its own headline number, so the worrying
-one is visible before you open it:
+A local dashboard on `http://127.0.0.1:4177`, which asks seven questions about
+the feature you have open. Each tab carries its own headline number, so the
+worrying one is visible before you open it:
 
 ```text
-Flow · 24   APIs · 1   Timing · no runs   Breaks · 2   Tests · none   Changed · 5
+Flow · 24   APIs · 1   Timing · no runs   Breaks · 2   Tests · none   Docs · 6 actions   Changed · 5
 ```
 
 | Tab         | The question                              | Where the answer comes from                                    |
@@ -149,6 +149,7 @@ Flow · 24   APIs · 1   Timing · no runs   Breaks · 2   Tests · none   Chang
 | **Timing**  | Where does the time go?                   | runtime spans only — no spans, no numbers, never an estimate   |
 | **Breaks**  | What else would a change here break?      | the graph walked backwards from every step                     |
 | **Tests**   | What would catch it if you broke it?      | which test files import the files this flow runs through       |
+| **Docs**    | What is this screen, in plain English?    | every action on the screen, written out with no jargon         |
 | **Changed** | What do my uncommitted edits put at risk? | `git status` crossed with the graph                            |
 
 **Breaks** is the one that changes how you work. A flow read on its own is
@@ -157,6 +158,19 @@ one screen needs a field is a five-minute change that breaks four other screens.
 Breaks splits the same steps into "shared with other features" and "only this
 one uses", and keeps infrastructure — a toast hook, a cache, an audit trail —
 out of the way so the real findings are not competing with wallpaper.
+
+**Docs** is the tab to send to somebody else. It drops the selected action and
+describes the whole screen: a table of every control with the requests and
+tables beside it, then each action start to finish, then every collection with
+its schema and fields, then how those collections link to each other — read
+from a Mongoose `ref`, a Prisma `@relation`, a `$lookup`, or the naming
+convention, which is labelled a guess wherever it appears. Generated from the
+graph by template, with no model in the loop, so it cannot invent a step;
+**Copy as Markdown** gives you the same text for a wiki or a handover note.
+
+Knowing the links is what lets it warn you that a screen deleting a customer
+leaves the orders naming that customer pointing at nothing — a finding that is
+invisible from the screen, from the code it runs, and from every other tab.
 
 **Changed** needs no instrumentation and no tests, so it works on the first run:
 
