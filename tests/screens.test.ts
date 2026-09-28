@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { dirname, resolve } from 'node:path';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   scan,
@@ -250,5 +252,38 @@ describe('flows carry a descriptive title', () => {
     for (const flow of flows()) {
       expect(flow.title).not.toMatch(/on(Click|Submit|Press)/);
     }
+  });
+});
+
+/**
+ * "Medicines · Delete" on the list and on the detail page: the screen phrase
+ * drops the `:id`, so both got the same title and the sidebar showed the same
+ * line twice with nothing to pick between them.
+ */
+describe('two actions that would share a title', () => {
+  const project = mkdtempSync(join(tmpdir(), 'flowlens-titles-'));
+  const page = (dir: string, component: string): void => {
+    mkdirSync(join(project, 'app', dir), { recursive: true });
+    writeFileSync(
+      join(project, 'app', dir, 'page.tsx'),
+      `export default function ${component}() {
+         const remove = async () => { await fetch('/api/medicines/1', { method: 'DELETE' }); };
+         return <button onClick={remove}>Delete</button>;
+       }`,
+      'utf8',
+    );
+  };
+  page('medicines', 'MedicinesView');
+  page(join('medicines', '[id]'), 'MedicineDetailPage');
+
+  it('names each by the component it lives in', () => {
+    const titles = resolveFlows(scan({ root: project }).graph)
+      .map((flow) => flow.title)
+      .filter((title) => title.includes('Delete'))
+      .sort();
+    expect(titles).toEqual([
+      'Medicines · Delete (Medicine detail page)',
+      'Medicines · Delete (Medicines view)',
+    ]);
   });
 });

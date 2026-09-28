@@ -12,6 +12,8 @@ import { analyzeServerModules } from './analyzer/servermodules.js';
 import { collectionAliasesOf } from './analyzer/dbaccess.js';
 import { isEmptyPrismaSchema, loadPrismaSchema } from './analyzer/prisma.js';
 import { detectProjects, loadProject, type ScanOptions } from './analyzer/project.js';
+import { collectImports, collectImportUses, moduleResolver } from './analyzer/imports.js';
+import { findUnused } from './analyzer/unused.js';
 import { linkCollectionRelations } from './analyzer/relations.js';
 import { linkDataLineage, linkFrontendToBackend, type SeamResult } from './analyzer/seam.js';
 
@@ -164,6 +166,7 @@ export function scan(options: ScanOptions & FlowslensConfig): ScanResult {
   };
   void DEFAULT_BACKEND_CONFIG;
 
+  const importUses = collectImportUses(loaded);
   const graph = new FlowGraph({
     root: loaded.root,
     filesAnalyzed: loaded.sourceFiles.length,
@@ -171,6 +174,8 @@ export function scan(options: ScanOptions & FlowslensConfig): ScanResult {
       loaded.roots.length > 1
         ? Object.fromEntries(loaded.roots.map((root) => [basename(root), root]))
         : detectProjects(loaded.root),
+    imports: collectImports(loaded, importUses),
+    unused: findUnused(loaded, importUses, moduleResolver(loaded)),
   });
 
   /**

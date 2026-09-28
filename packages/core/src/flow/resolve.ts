@@ -1,6 +1,7 @@
 import { DB_EFFECT_ORDER, type DbEffect } from '../analyzer/mongo.js';
 import type { FlowGraph } from '../graph/graph.js';
 import { ids, slug } from '../graph/ids.js';
+import { humanizeName } from '../analyzer/screens.js';
 import {
   LAYER_OF,
   type EdgeKind,
@@ -184,7 +185,77 @@ export function resolveFlows(graph: FlowGraph, options: ResolveOptions = {}): Fe
     flows.push(flow);
   }
 
-  return flows.sort((a, b) => b.risk.score - a.risk.score || a.title.localeCompare(b.title));
+  return distinctTitles(graph, withoutRuntimeEchoes(graph, flows)).sort(
+    (a, b) => b.risk.score - a.risk.score || a.title.localeCompare(b.title),
+  );
+}
+
+/**
+ * Tell apart two actions that would otherwise share a title.
+ *
+ * "Medicines · Delete" on the list and on the detail page are two actions
+ * with two different code paths, but the screen phrase drops the `:id` that
+ * separates their pages, and the sidebar showed the same line twice. The
+ * component each lives in is what a developer would call them by; the page
+ * route, the file and the line are the fallbacks when that is shared too.
+ */
+function distinctTitles(graph: FlowGraph, flows: FeatureFlow[]): FeatureFlow[] {
+  const byTitle = new Map<string, FeatureFlow[]>();
+  for (const flow of flows) {
+    const group = byTitle.get(flow.title);
+    if (group) group.push(flow);
+    else byTitle.set(flow.title, [flow]);
+  }
+
+  const hints: Array<(flow: FeatureFlow) => string | undefined> = [
+    (flow) => (flow.component ? humanizeName(flow.component) : undefined),
+    (flow) => {
+      const page = graph.node(flow.entryNodeId)?.meta?.['page'];
+      return typeof page === 'string' ? page : undefined;
+    },
+    (flow) => flow.source?.file,
+    // Two "Cancel" buttons in one form: only where they sit tells them apart.
+    (flow) => (flow.source ? `line ${flow.source.line}` : undefined),
+  ];
+  for (const group of byTitle.values()) {
+    if (group.length < 2) continue;
+    const hint = hints.find((read) => {
+      const values = group.map(read);
+      return values.every(Boolean) && new Set(values).size === group.length;
+    });
+    if (!hint) continue;
+    for (const flow of group) flow.title = `${flow.title} (${hint(flow)})`;
+  }
+  return flows;
+}
+
+/**
+ * Drop clicks seen only at runtime whose requests a declared action already makes.
+ *
+ * The browser tracer records every click on a button or link, including the
+ * ones no handler in the source is wired to by name: the "Yes, delete it" of a
+ * confirm dialog, a nav link, a table row. Each became an action of its own —
+ * titled with whatever text it had, a medicine's name included — repeating
+ * requests that already belong to a real action. Their timings and status
+ * codes are kept, because those live on the shared steps; only the duplicate
+ * entry in the list goes. A runtime click that reaches an endpoint no declared
+ * action reaches is still listed: that is something the source reading missed.
+ */
+function withoutRuntimeEchoes(graph: FlowGraph, flows: FeatureFlow[]): FeatureFlow[] {
+  const isRuntimeOnly = (flow: FeatureFlow): boolean =>
+    graph.node(flow.entryNodeId)?.meta?.['discoveredAtRuntime'] === true;
+
+  const declared = new Set<string>();
+  for (const flow of flows) {
+    if (isRuntimeOnly(flow)) continue;
+    for (const step of flow.steps) if (step.kind === 'api-call') declared.add(step.nodeId);
+  }
+
+  return flows.filter(
+    (flow) =>
+      !isRuntimeOnly(flow) ||
+      flow.steps.some((step) => step.kind === 'api-call' && !declared.has(step.nodeId)),
+  );
 }
 
 /** Resolve a single flow from a UI action (or any other entry node). */

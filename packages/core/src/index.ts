@@ -49,6 +49,19 @@ export {
   type ChangedReport,
 } from './impact/changed.js';
 export {
+  findUnused,
+  projectUnused,
+  type BrokenImport,
+  type ProjectUnused,
+  type UncalledEndpoint,
+  type UnusedDependency,
+  type UnusedExport,
+  type UnusedFile,
+  type UnusedFolder,
+  type UnusedReport,
+} from './analyzer/unused.js';
+export { diffGraphs, introducesAtLeast, type ActionRef, type GraphDiff } from './impact/diff.js';
+export {
   flowApis,
   type ApiCallDetail,
   type ApiDataAccess,
@@ -66,6 +79,13 @@ export {
   type ExplainActionOptions,
   type StageKey,
 } from './flow/action.js';
+export {
+  planTests,
+  testFileFor,
+  type PlannedTest,
+  type TestCaseKind,
+  type TestPlan,
+} from './flow/testplan.js';
 export {
   projectFindings,
   type Finding,

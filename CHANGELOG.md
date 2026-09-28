@@ -9,6 +9,41 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`flowlens unused` and an Unused tab — code nothing uses.** Files and
+  folders no entry point reaches (a dead helper only another dead helper
+  imports included), exports nothing imports — told apart from exports only
+  used in their own file — dependencies nothing imports, relative imports that
+  point at no file, and backend routes no frontend calls. Entry points are what
+  the app starts from: framework route files, what `package.json`, its
+  scripts, a Dockerfile or a README command runs, `scripts/`, config files and
+  tests. Read at scan time from the imports FlowLens already resolves, type
+  imports included; also the `find_unused` MCP tool. On the example app it
+  found that `main.ts` imported an `app.module` that did not exist, which made
+  the whole backend unreachable — the example now has one.
+
+- **`flowlens mcp` — ask your AI assistant, answered from the graph.** A Model
+  Context Protocol server on stdio with nine read-only tools: list and explain
+  actions, which actions run through a file or line, what a change to a symbol
+  breaks, issues, what the uncommitted changes reach, the tests to write, and
+  per-step and per-query timings. Nothing listens on a port and nothing leaves
+  the machine; the protocol is written by hand, so the CLI still depends only
+  on its own core. `claude mcp add flowlens -- npx -y @flowslens/cli mcp .`
+- **`flowlens diff --base main` — what a branch changes about the app.** Scans
+  the branch (uncommitted work included) and its fork point in a temporary git
+  worktree, and reports the actions it reaches and which have no test, issues
+  it introduces or fixes, collections that gained a writer, and endpoints
+  added or removed — as a pull request comment, or `--json`. `--fail-on high`
+  fails CI on a new high-severity issue. `docs/ci/flowlens-pr.yml` is a ready
+  GitHub Actions workflow that keeps one comment per PR up to date, with the
+  built-in token only.
+- **Next.js and the native MongoDB driver, traced by the package.**
+  `export { register } from '@flowslens/runtime/next'` in `instrumentation.ts`
+  traces App Router requests; `traceDb(client.db())` traces the raw driver.
+  Proven under Next 16 with Turbopack: the click, the request and the query
+  land in one trace. `flowlens instrument` writes those files for you — new
+  files only, printing the lines that belong in files you own — and knows
+  Express, Nest, Fastify, Mongoose and the package manager in use.
+
 - **Issues: bugs the code shows, each with the line to open.** A new tab and a
   `flowlens findings` command run six checks over the whole project — routes
   with no auth check, queries that forget the tenant, the tenant id taken from
@@ -28,8 +63,27 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Confirmation dialogs** (`confirm()`, SweetAlert, a `confirmDelete` helper)
   are their own step in the action document and the diagram, instead of being
   reported as frontend validation.
+- **Tests: the tests to write first.** On an action nothing tests, the tab
+  now lists the cases worth writing, read off the action's own document —
+  every response the route can send and why (401, 403, 422…), every write,
+  and what the user sees when it fails — ordered access, rejections, data,
+  success, screen, with an `it.todo` skeleton to copy and where to put it.
+  Where tests exist, the same list is a folded checklist to hold them against.
 
 ### Changed
+
+- **Docs: "At a glance" is the document.** Each stage is a line that opens in
+  place to its detail, all closed at first, instead of the whole document
+  repeated below the overview.
+- **Changed follows imports.** A changed file that declares no step of its own
+  — the database connection, a shared client — reaches every action whose
+  files import it, directly or further down, `@/` aliases included. It used to
+  be reported as reaching nothing.
+- **Two actions with the same title are told apart** by their component, then
+  page, file or line: "Medicines · Delete (Medicines view)" and "(Medicine
+  detail page)".
+- **Performance says how many runs a ranking rests on**, and warns when the
+  slowest step was measured fewer than three times.
 
 - **Six tabs, none repeating another:** Docs, Issues, Performance, Tests,
   Changed, Breaks. The Flow diagram is now Docs' _Diagram_ view; what only the
@@ -110,6 +164,26 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   page, which is exactly why nobody notices until they are.
 
 ### Fixed
+
+- **The trace context is one per process, not one per bundle.** Turbopack
+  compiles `instrumentation.ts` and the route handlers into separate module
+  graphs, so a module-scoped AsyncLocalStorage gave the request and database
+  tracers different stores and no query nested under its request. It is now
+  kept on `globalThis` under a registered symbol.
+- **"No handler catches a failure" on code that did.** Only `try/catch` counted
+  as handling an error, so `mutate(id, { onError })` — how React Query code is
+  written — and `.catch()` were reported as unhandled rejections on every save
+  in a real app. Setters and toasts inside them are now the failure path.
+- **A request with a real id became its own endpoint.** A browser span for
+  `/medicines/med_2bbed44f4aa4` only matched an api-call with that exact path,
+  so every record clicked minted a step, and the declared `/medicines/:param`
+  was listed as never having run. Runtime calls now match the declared
+  templates first, then the route's.
+- **Clicks the source does not name became actions.** A confirm dialog's "Yes,
+  delete it", a nav link, a table row titled with a medicine's name — each was
+  listed as an action repeating requests a real one makes. They are dropped
+  when every request they made is already declared; one that reaches an
+  endpoint nothing declares is still listed.
 
 - **A collection a trace discovered was reported as written to.** A db-op that
   only runtime had seen carried no effect, so every reader fell back to

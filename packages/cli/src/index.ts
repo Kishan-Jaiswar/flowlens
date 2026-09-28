@@ -5,13 +5,17 @@ import { parseArgs } from 'node:util';
 import { loadConfig } from '@flowslens/core';
 import { splitPositionals } from './args.js';
 import { runFlow, runFlows } from './commands/flows.js';
+import { runDiff } from './commands/diff.js';
 import { runFindings } from './commands/findings.js';
 import { runDoctor, runImpact } from './commands/impact.js';
 import { runInit } from './commands/init.js';
+import { runInstrument } from './commands/instrument.js';
+import { runMcp } from './commands/mcp.js';
 import { runScan } from './commands/scan.js';
 import { runServe } from './commands/serve.js';
 import { runStack } from './commands/stack.js';
 import { runTrace } from './commands/trace.js';
+import { runUnused } from './commands/unused.js';
 import { runWhere } from './commands/where.js';
 import { color } from './ui.js';
 
@@ -43,6 +47,8 @@ ${color.bold('USAGE')}
 
 ${color.bold('COMMANDS')}
   init [project]          Detect the layout and write flowlens.config.json
+  instrument [project]    Set up runtime tracing (Next.js, Express, MongoDB,
+                          Mongoose) — new files only, development only
   stack [project]         "What is this built with?" — frameworks and versions
   scan [project]          Read the source and build the flow graph
   flows [project]         List every user action that reaches the backend
@@ -53,7 +59,15 @@ ${color.bold('COMMANDS')}
   findings [project]      Bugs with the line to open: no auth, missing tenant
                           filter, mass assignment, N+1, sequential reads
   trace [project]         Merge recorded runtime spans into the graph
+  unused [project]        Files, folders, exports and dependencies nothing
+                          uses, imports that point at nothing, and endpoints
+                          no frontend calls (--all: exports used in-file too)
+  diff [project]          What this branch changes about the app, against
+                          --base (default main): actions reached, new issues,
+                          new collection writers — markdown for a PR comment
   serve [project]         Open the dashboard (default http://127.0.0.1:4177)
+  mcp [project]           Answer an AI assistant's questions from the graph
+                          (Model Context Protocol over stdio, read-only)
 
 ${color.bold('OPTIONS')}
   -p, --project <dir>     Project root (repeatable — scan siblings together)
@@ -74,8 +88,9 @@ ${color.bold('OPTIONS')}
       --max-files <n>     Cap on files parsed (default 20000)
       --ignore <dir>      Skip a directory (repeatable)
       --include-tests     Analyze test files too
-      --fail-on <level>   findings: exit 1 on a finding at this severity or
-                          above (high, medium, low) — for CI
+      --fail-on <level>   findings, diff: exit 1 on a (new) finding at this
+                          severity or above (high, medium, low) — for CI
+      --base <ref>        diff: the branch or commit to compare with (main)
       --port <n>          Dashboard port (serve, default 4177; the next free
                           port is used if it is busy)
       --host <h>          Dashboard host (serve, default 127.0.0.1)
@@ -128,6 +143,8 @@ ${color.gray('The one file it may write in your project is .gitignore, and only 
 ${color.gray('you moved an artifact into the repo yourself with -g, --trace or')}
 ${color.gray('$FLOWLENS_TRACE — so its output never shows up in your commits. It')}
 ${color.gray('touches only its own marked block, and --no-gitignore turns that off.')}
+${color.gray('The exception you ask for by name: "flowlens instrument" adds the')}
+${color.gray('tracing files, new files only, and prints the rest for you to paste.')}
 `;
 
 export function main(argv = process.argv.slice(2)): number {
@@ -154,6 +171,7 @@ export function main(argv = process.argv.slice(2)): number {
         'include-tests': { type: 'boolean', default: false },
         port: { type: 'string' },
         'fail-on': { type: 'string' },
+        base: { type: 'string' },
         host: { type: 'string' },
         token: { type: 'string' },
         open: { type: 'boolean' },
@@ -275,6 +293,9 @@ export function main(argv = process.argv.slice(2)): number {
       case 'stack':
         return runStack({ ...common, quiet: values.quiet });
 
+      case 'instrument':
+        return runInstrument({ root: common.root, print: values.print, quiet: values.quiet });
+
       case 'scan':
         return runScan({
           // Config file first, then anything given explicitly on the CLI.
@@ -361,6 +382,37 @@ export function main(argv = process.argv.slice(2)): number {
 
       case 'trace':
         return runTrace(common);
+
+      case 'diff': {
+        const failOn = values['fail-on'];
+        if (failOn && !['high', 'medium', 'low'].includes(failOn)) {
+          process.stderr.write(`${color.red('error')} --fail-on takes high, medium or low\n`);
+          return 1;
+        }
+        return runDiff({
+          root: common.root,
+          base: values.base ?? 'main',
+          json: values.json,
+          ...(values.out ? { out: values.out } : {}),
+          ...(failOn ? { failOn: failOn as 'high' | 'medium' | 'low' } : {}),
+        });
+      }
+
+      case 'unused':
+        return runUnused({
+          root: common.root,
+          ...(common.extraRoots ? { extraRoots: common.extraRoots } : {}),
+          json: values.json,
+          all: values.all,
+        });
+
+      case 'mcp':
+        return runMcp({
+          root: common.root,
+          ...(common.extraRoots ? { extraRoots: common.extraRoots } : {}),
+          ...(values.trace ? { trace: values.trace } : {}),
+          version: VERSION,
+        });
 
       case 'serve':
         return runServe({

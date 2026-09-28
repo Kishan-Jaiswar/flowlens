@@ -59,6 +59,14 @@ export interface FlowTiming {
   steps: StepTiming[];
   /** The single step to look at first. */
   slowest?: StepTiming;
+  /**
+   * How many times the slowest step was measured. Below `STEADY_RUNS` the
+   * ranking is one sample and says so, because a single run is often the
+   * slow one: a fresh database connection, a first compile in dev.
+   */
+  slowestRuns?: number;
+  /** True when the slowest step has too few runs to rank on. */
+  fewRuns?: boolean;
   /** Steps in the flow that no span has ever covered. */
   unobserved: Array<Pick<StepTiming, 'nodeId' | 'kind' | 'label' | 'layer'>>;
   /** Plain-language notes: what was measured, and what this cannot tell you. */
@@ -72,6 +80,9 @@ export interface FlowTiming {
  * `observed: false` rather than estimating, because an invented number in a
  * performance view is worse than no number — it gets quoted.
  */
+/** Runs of a step before its average is worth ranking on. */
+export const STEADY_RUNS = 3;
+
 export function flowTiming(flow: FeatureFlow): FlowTiming {
   const measured: StepTiming[] = [];
   const unobserved: FlowTiming['unobserved'] = [];
@@ -113,6 +124,15 @@ export function flowTiming(flow: FeatureFlow): FlowTiming {
   measured.sort((a, b) => (b.avgSelfMs ?? 0) - (a.avgSelfMs ?? 0));
 
   const notes: string[] = [];
+  const slowestRuns = measured[0]?.observations ?? 0;
+  const fewRuns = slowestRuns > 0 && slowestRuns < STEADY_RUNS;
+  if (fewRuns && measured[0]) {
+    notes.push(
+      `\`${measured[0].label}\` was measured ${slowestRuns === 1 ? 'once' : `${slowestRuns} times`}. ` +
+        'One run is often the slow one — a fresh database connection, a first compile ' +
+        'in dev — so do the action a few more times before trusting which step is slowest.',
+    );
+  }
   if (unobserved.length > 0) {
     notes.push(
       `${unobserved.length} step${unobserved.length > 1 ? 's' : ''} in this flow ` +
@@ -138,7 +158,7 @@ export function flowTiming(flow: FeatureFlow): FlowTiming {
     totalMs,
     accountedMs,
     steps: measured,
-    ...(measured[0] ? { slowest: measured[0] } : {}),
+    ...(measured[0] ? { slowest: measured[0], slowestRuns, fewRuns } : {}),
     unobserved,
     notes,
   };

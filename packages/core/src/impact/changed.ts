@@ -32,8 +32,16 @@ export interface AffectedFeature {
   /** Set when another affected feature has the same title. */
   subtitle?: string;
   risk: number;
+  /** False for an action that never calls the backend: a toggle, a filter. */
+  hitsBackend: boolean;
   /** The steps of this feature that live in the changed files. */
   touchedSteps: Array<{ label: string; kind: string; file: string; line?: number }>;
+  /**
+   * Changed files this feature reaches only through an import: none of its
+   * steps is declared in them, but a file it runs through imports one, directly
+   * or further down. `lib/db/mongo.ts` is the typical case.
+   */
+  through: string[];
   /** Test cases that import at least one file this feature runs through. */
   testCases: number;
   /** Share of the feature's files a test imports, 0–100. */
@@ -47,6 +55,8 @@ export interface ChangedReport {
     status?: ChangeStatus;
     /** How many graph nodes come from this file. */
     steps: number;
+    /** Scanned files that import this one, directly or further down. */
+    importedBy: number;
   }>;
   /** Features that run through at least one changed file, most-touched first. */
   features: AffectedFeature[];
@@ -58,7 +68,7 @@ export interface ChangedReport {
    */
   untested: AffectedFeature[];
   /**
-   * Changed files with no node in the graph.
+   * Changed files with no node in the graph and no scanned file importing them.
    *
    * Said out loud because it is the honest limit of this view: a change to a
    * config file, a stylesheet, or a stack Flowslens does not read yet can break
@@ -96,10 +106,14 @@ export function analyzeChanged(
     nodesByFile.set(file, (nodesByFile.get(file) ?? 0) + 1);
   }
 
+  /** changed file -> every scanned file that imports it, however indirectly. */
+  const reachedBy = importersOf(graph.meta.imports ?? {}, [...wanted.keys()]);
+
   const files = changed.map((entry) => ({
     file: entry.file,
     ...(entry.status ? { status: entry.status } : {}),
     steps: nodesByFile.get(entry.file) ?? 0,
+    importedBy: reachedBy.get(entry.file)?.size ?? 0,
   }));
 
   const flows = resolveFlows(graph, { includeLocalOnly: true });
@@ -116,21 +130,34 @@ export function analyzeChanged(
         file: step.file!,
         ...(step.line !== undefined ? { line: step.line } : {}),
       }));
-    if (touchedSteps.length === 0) continue;
+    const stepFiles = new Set(flow.steps.flatMap((step) => (step.file ? [step.file] : [])));
+    const direct = new Set(touchedSteps.map((step) => step.file));
+    const through = [...reachedBy]
+      .filter(
+        ([file, importers]) => !direct.has(file) && [...importers].some((f) => stepFiles.has(f)),
+      )
+      .map(([file]) => file)
+      .sort();
+    if (touchedSteps.length === 0 && through.length === 0) continue;
 
     const coverage = testsForFlow(tests, flow);
     affected.push({
       id: flow.id,
       title: flow.title,
       risk: flow.risk.score,
+      hitsBackend: flow.hitsBackend,
       touchedSteps,
+      through,
       testCases: coverage.totalCases,
       coveragePct: coverage.coveragePct,
     });
   }
 
   const features = disambiguate(affected, flows).sort(
-    (a, b) => b.touchedSteps.length - a.touchedSteps.length || b.risk - a.risk,
+    (a, b) =>
+      b.touchedSteps.length - a.touchedSteps.length ||
+      b.through.length - a.through.length ||
+      b.risk - a.risk,
   );
   const untested = features.filter((feature) => feature.testCases === 0);
 
@@ -143,7 +170,9 @@ export function analyzeChanged(
     ),
   ].sort();
 
-  const unmodelled = files.filter((entry) => entry.steps === 0).map((entry) => entry.file);
+  const unmodelled = files
+    .filter((entry) => entry.steps === 0 && entry.importedBy === 0)
+    .map((entry) => entry.file);
 
   const level: ChangedReport['level'] =
     untested.length >= 3 || features.length >= 8
@@ -182,21 +211,56 @@ function noteOn(featureCount: number, unmodelled: readonly string[], tests: Test
   if (unmodelled.length > 0) {
     notes.push(
       `${unmodelled.length} changed file${unmodelled.length > 1 ? 's have' : ' has'} no ` +
-        'step in the graph — a config, a stylesheet, or a stack Flowslens does not ' +
-        'read yet. This view cannot tell you what those reach.',
+        'step in the graph and no scanned file imports ' +
+        (unmodelled.length > 1 ? 'them' : 'it') +
+        ' — a config, a stylesheet, or a stack Flowslens does not read yet. This ' +
+        'view cannot tell you what those reach.',
     );
   }
   if (featureCount > 0) {
     notes.push(
-      'A feature is listed if any file it runs through changed at all. That over- ' +
-        'estimates on purpose: narrowing it to changed lines would trade a false ' +
-        'alarm for a false negative.',
+      'A feature is listed if any file it runs through changed at all, or imports ' +
+        'a changed file. That over-estimates on purpose: narrowing it to changed ' +
+        'lines would trade a false alarm for a false negative.',
     );
   }
   if (tests.files.length === 0) {
     notes.push('No test files were found, so every affected feature counts as untested.');
   }
   return notes;
+}
+
+/**
+ * For each changed file, every scanned file that imports it — directly, or
+ * through a chain of imports. Walked breadth-first over the reversed import
+ * map, so a cycle ends the walk instead of looping.
+ */
+function importersOf(
+  imports: Readonly<Record<string, readonly string[]>>,
+  changed: readonly string[],
+): Map<string, Set<string>> {
+  const reverse = new Map<string, string[]>();
+  for (const [from, targets] of Object.entries(imports)) {
+    for (const target of targets) {
+      const list = reverse.get(target);
+      if (list) list.push(from);
+      else reverse.set(target, [from]);
+    }
+  }
+
+  const result = new Map<string, Set<string>>();
+  for (const file of changed) {
+    const seen = new Set<string>();
+    const queue = [...(reverse.get(file) ?? [])];
+    while (queue.length > 0) {
+      const next = queue.shift()!;
+      if (next === file || seen.has(next)) continue;
+      seen.add(next);
+      queue.push(...(reverse.get(next) ?? []));
+    }
+    if (seen.size > 0) result.set(file, seen);
+  }
+  return result;
 }
 
 /** Give colliding titles a distinguishing suffix; leave unique ones alone. */

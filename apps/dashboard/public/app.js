@@ -61,6 +61,8 @@ const state = {
   /** The diff-scoped report, which is project-wide rather than per feature. */
   changed: null,
   changedLoading: false,
+  /** `/api/unused`: code nothing uses, for the whole project. */
+  unused: null,
   /** The Docs tab's document for the selected action, and which action it is for. */
   actionDoc: null,
   actionDocFor: null,
@@ -99,6 +101,7 @@ const TABS = [
   ['tests', 'Tests', 'What would catch it if you broke it'],
   ['changed', 'Changed', 'Which actions your uncommitted changes reach'],
   ['impact', 'Breaks', 'What else a change here would break'],
+  ['unused', 'Unused', 'Files, folders, exports and dependencies nothing uses'],
 ];
 
 /** Tabs that were merged into others, for links pasted before the merge. */
@@ -110,7 +113,7 @@ const LEGACY_TABS = {
 };
 
 /** Tabs that ignore the selected feature. */
-const PROJECT_TABS = new Set(['changed']);
+const PROJECT_TABS = new Set(['changed', 'unused']);
 
 const el = {
   subtitle: document.getElementById('subtitle'),
@@ -131,6 +134,7 @@ const el = {
     impact: document.getElementById('panel-impact'),
     tests: document.getElementById('panel-tests'),
     changed: document.getElementById('panel-changed'),
+    unused: document.getElementById('panel-unused'),
   },
 };
 
@@ -177,6 +181,7 @@ async function load() {
     renderFindings(doctor);
     void loadChanged();
     void loadIssues();
+    void loadUnused();
 
     // `#tab=apis&flow=<id>` (or the older `#docs=<id>`) opens straight onto
     // that tab and action, so a link pasted into a ticket lands where it was
@@ -406,6 +411,17 @@ function tabBadge(id) {
     };
   }
 
+  if (id === 'unused') {
+    const unused = state.unused;
+    if (!unused || unused.error) return undefined;
+    const count =
+      unused.files.length +
+      unused.broken.length +
+      unused.dependencies.length +
+      unused.exports.filter((entry) => !entry.usedInFile).length;
+    return count === 0 ? { text: 'clean', tone: 'muted' } : { text: String(count), tone: 'warn' };
+  }
+
   if (id === 'docs') {
     if (state.actionDocLoading) return { text: '…', tone: 'neutral' };
     const doc = state.actionDoc;
@@ -497,6 +513,7 @@ function showTab(id) {
   if (state.tab === 'tests') renderTests();
   if (state.tab === 'perf') openPerfForSelection();
   if (state.tab === 'changed') renderChanged();
+  if (state.tab === 'unused') renderUnused();
   if (state.tab === 'docs') {
     openDocsForSelection();
     // The diagram draws the confirmation and the way back from the document.
@@ -546,6 +563,178 @@ async function loadChanged() {
     renderTabs();
     if (state.tab === 'changed') renderChanged();
   }
+}
+
+/** Fetch the unused-code report — read at scan time, so this is only a lookup. */
+async function loadUnused() {
+  try {
+    state.unused = await getJson('/api/unused');
+  } catch (error) {
+    state.unused = { error: String(error.message ?? error) };
+  }
+  renderTabs();
+  if (state.tab === 'unused') renderUnused();
+}
+
+/**
+ * Code nothing uses, whole-project like Changed: the imports that point at
+ * nothing first (missing code, and the reason a whole folder can look dead),
+ * then what could be deleted, biggest first — folders, files, dependencies —
+ * then exports, and the endpoints no frontend calls, which need a human
+ * because another app may call them.
+ */
+function renderUnused() {
+  const panel = el.panels.unused;
+  if (!panel) return;
+  if (!state.unused) return panelLoading(panel, 'what nothing uses');
+  const unused = state.unused;
+  if (unused.error) {
+    panel.innerHTML = `<p class="error">Could not load this view: ${escapeHtml(unused.error)}</p>`;
+    return;
+  }
+
+  const intro = panelIntro(
+    'Code no user action, request, job or test can reach, read from the imports. ' +
+      'It is about the whole project, not the selected action. Nothing here is deleted for you.',
+  );
+  const dead = unused.exports.filter((entry) => !entry.usedInFile);
+  const internal = unused.exports.filter((entry) => entry.usedInFile);
+  const lines = unused.files.reduce((sum, entry) => sum + entry.lines, 0);
+  const inFolder = (file) => unused.folders.some((entry) => file.startsWith(`${entry.folder}/`));
+  const loose = unused.files.filter((entry) => !inFolder(entry.file));
+  const total = unused.files.length + dead.length + unused.dependencies.length;
+
+  const summary =
+    total === 0 && unused.broken.length === 0
+      ? answer(
+          'ok',
+          'Nothing unused',
+          `Every one of the ${unused.checked.files} files is reached from the ${unused.checked.entries} entry points.` +
+            (internal.length
+              ? ` ${internal.length} export${internal.length === 1 ? ' is' : 's are'} only used inside ${internal.length === 1 ? 'its' : 'their'} own file — see below.`
+              : ''),
+        )
+      : answer(
+          unused.broken.length ? 'danger' : 'warn',
+          [
+            unused.broken.length
+              ? `${unused.broken.length} import${unused.broken.length === 1 ? '' : 's'} pointing at nothing`
+              : '',
+            unused.files.length
+              ? `${unused.files.length} unused file${unused.files.length === 1 ? '' : 's'} (${lines} lines)`
+              : '',
+            dead.length ? `${dead.length} dead export${dead.length === 1 ? '' : 's'}` : '',
+            unused.dependencies.length
+              ? `${unused.dependencies.length} unused dependenc${unused.dependencies.length === 1 ? 'y' : 'ies'}`
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          `Checked ${unused.checked.files} files from ${unused.checked.entries} entry points.`,
+        );
+
+  const parts = [intro, summary];
+  if (unused.broken.length) {
+    parts.push(
+      heading(
+        'Imports that point at nothing',
+        'Missing code — the import names a file that is not there.',
+      ),
+      renderDocTable({
+        columns: ['File', 'Imports'],
+        rows: unused.broken.map((entry) => ({
+          cells: [{ html: fileLink(entry.file) }, `\`${entry.specifier}\``],
+          tone: 'error',
+        })),
+      }),
+    );
+  }
+  if (unused.folders.length) {
+    parts.push(
+      heading('Folders nothing uses', 'Every file inside is unreachable.'),
+      renderDocTable({
+        columns: ['Folder', 'Files', 'Lines'],
+        rows: unused.folders.map((entry) => ({
+          cells: [`\`${entry.folder}/\``, String(entry.files), String(entry.lines)],
+          tone: 'warn',
+        })),
+      }),
+    );
+  }
+  if (loose.length) {
+    parts.push(
+      heading('Files nothing uses', 'No entry point reaches them, not even through another file.'),
+      renderDocTable({
+        columns: ['File', 'Lines'],
+        rows: loose.map((entry) => ({
+          cells: [{ html: fileLink(entry.file) }, String(entry.lines)],
+          tone: 'warn',
+        })),
+      }),
+    );
+  }
+  if (unused.dependencies.length) {
+    parts.push(
+      heading(
+        'Dependencies nothing imports',
+        'Not imported, not run by a script, not named in a config file.',
+      ),
+      renderDocTable({
+        columns: ['Package', 'Version', 'Declared in'],
+        rows: unused.dependencies.map((entry) => ({
+          cells: [`\`${entry.name}\``, entry.version, `\`${entry.manifest}\``],
+        })),
+      }),
+    );
+  }
+  if (dead.length) {
+    parts.push(
+      heading(
+        'Exports nothing uses',
+        'Not imported anywhere and not used in their own file: dead code.',
+      ),
+      renderDocTable({
+        columns: ['Export', 'Kind'],
+        rows: dead.map((entry) => ({
+          cells: [`\`${entry.name}\``, entry.kind],
+          at: { file: entry.file, line: entry.line },
+          tone: 'warn',
+        })),
+      }),
+    );
+  }
+  if (internal.length) {
+    parts.push(
+      `<details class="more"><summary>Exported but only used inside their own file — ${internal.length}</summary>` +
+        `<p class="tab-note">The code is used; the <code>export</code> keyword is not, and can go.</p>` +
+        renderDocTable({
+          columns: ['Export', 'Kind'],
+          rows: internal.map((entry) => ({
+            cells: [`\`${entry.name}\``, entry.kind],
+            at: { file: entry.file, line: entry.line },
+          })),
+        }) +
+        '</details>',
+    );
+  }
+  if (unused.endpoints.length) {
+    parts.push(
+      heading(
+        'Endpoints no frontend calls',
+        'The route file is loaded, but nothing in this app calls it. Another app, a webhook or a mobile client may — check before removing.',
+      ),
+      renderDocTable({
+        columns: ['Route'],
+        rows: unused.endpoints.map((entry) => ({
+          cells: [`\`${entry.label}\``],
+          ...(entry.file ? { at: { file: entry.file, line: entry.line } } : {}),
+        })),
+      }),
+    );
+  }
+  parts.push(notesList(unused.notes));
+  panel.innerHTML = parts.join('');
+  bindTableFolds(panel);
 }
 
 function renderFlowHeader(flow) {
@@ -1448,7 +1637,6 @@ function renderDocs() {
        </header>
        ${renderGlance(phases)}
        ${renderAbsent(absent)}
-       ${phases.map(renderPhase).join('')}
        ${
          doc.limits.length === 0
            ? ''
@@ -1468,18 +1656,6 @@ function renderDocs() {
   bindTableFolds(panel);
   bindCopy(panel);
   bindFlowJumps(panel);
-  for (const link of panel.querySelectorAll('[data-stage-jump]')) {
-    link.addEventListener('click', (event) => {
-      event.preventDefault();
-      const target = panel.querySelector(`#adoc-stage-${link.dataset.stageJump}`);
-      if (!target) return;
-      target.classList.remove('is-collapsed');
-      target.querySelector('.adoc-head')?.setAttribute('aria-expanded', 'true');
-      target.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
-      target.classList.add('is-flash');
-      setTimeout(() => target.classList.remove('is-flash'), 1200);
-    });
-  }
 }
 
 /** The "Show all N rows" buttons under long tables. */
@@ -1503,8 +1679,9 @@ const PHASE_TITLES = {
 
 /**
  * The whole action on one screen: one line per stage, grouped by where it
- * happens. The part a developer reads first, and often the only part they need;
- * every line jumps to its stage below.
+ * happens. Every line is an accordion that starts closed, so the round trip
+ * reads at a glance and a stage's detail is one click away rather than a long
+ * scroll below.
  */
 function renderGlance(phases) {
   return `<section class="adoc-glance" aria-label="At a glance">
@@ -1513,17 +1690,7 @@ function renderGlance(phases) {
         .map(
           ({ phase, stages }) => `<div class="glance-phase phase-${escapeHtml(phase)}">
             <div class="glance-phase-title">${escapeHtml(PHASE_TITLES[phase] ?? phase)}</div>
-            <ol class="glance-steps">${stages
-              .map(
-                (stage) => `<li class="${stage.groups.length === 0 ? 'is-empty' : ''}">
-                  <a href="#adoc-stage-${stage.n}" data-stage-jump="${stage.n}">
-                    <span class="glance-num">${stage.n}</span>
-                    <span class="glance-title">${escapeHtml(stage.title)}</span>
-                    <span class="glance-summary">${richText(stage.summary || '—')}</span>
-                  </a>
-                </li>`,
-              )
-              .join('')}</ol>
+            <ol class="glance-steps">${stages.map(renderStage).join('')}</ol>
           </div>`,
         )
         .join('<div class="glance-arrow" aria-hidden="true">↓</div>')}
@@ -1544,21 +1711,12 @@ function renderAbsent(stages) {
     </section>`;
 }
 
-function renderPhase({ phase, stages }) {
-  return `<section class="adoc-phase phase-${escapeHtml(phase)}">
-      <h3 class="adoc-phase-title">${escapeHtml(PHASE_TITLES[phase] ?? phase)}</h3>
-      <ol class="adoc-stages">${stages.map(renderStage).join('')}</ol>
-    </section>`;
-}
-
 function renderStage(stage) {
-  return `<li id="adoc-stage-${stage.n}" class="adoc-stage${stage.groups.length === 0 ? ' is-empty' : ''}" data-stage="${escapeHtml(stage.key)}">
-      <button class="adoc-head" aria-expanded="true">
-        <span class="adoc-num">${stage.n}</span>
-        <span class="adoc-heading">
-          <span class="adoc-title">${escapeHtml(stage.title)}</span>
-          ${stage.summary ? `<span class="adoc-summary">${richText(stage.summary)}</span>` : ''}
-        </span>
+  return `<li id="adoc-stage-${stage.n}" class="adoc-stage is-collapsed${stage.groups.length === 0 ? ' is-empty' : ''}" data-stage="${escapeHtml(stage.key)}">
+      <button class="adoc-head" aria-expanded="false">
+        <span class="glance-num">${stage.n}</span>
+        <span class="glance-title">${escapeHtml(stage.title)}</span>
+        <span class="glance-summary">${richText(stage.summary || '—')}</span>
       </button>
       <div class="adoc-body">
         ${
@@ -1812,7 +1970,7 @@ function docBar(flow) {
   return `<div class="doc-bar">
       <div class="doc-picker">${viewSwitch()}<span>How this action works, end to end</span></div>
       <div class="doc-bar-actions">
-        <button class="button ghost" id="doc-toggle">Collapse all</button>
+        <button class="button ghost" id="doc-toggle">Expand all</button>
         <button class="button ghost" id="doc-copy">Copy as Markdown</button>
         <a class="button ghost" href="${markdown}" target="_blank" rel="noreferrer">Open Markdown</a>
       </div>
@@ -2089,8 +2247,10 @@ function renderTests() {
         'No test covers this action',
         `No test file imports any of the ${byFile.size} files it runs through, so breaking it would not fail the suite. Read the **Breaks** tab before editing.`,
       ) +
+      renderTestPlan(state.insight.testPlan, { folded: false }) +
       fileTable +
       notesList(tests.notes);
+    bindCopy(panel);
     bindTableFolds(panel);
     return;
   }
@@ -2124,10 +2284,54 @@ function renderTests() {
     fileTable +
     cases +
     runCommand(tests) +
+    renderTestPlan(state.insight.testPlan, { folded: true }) +
     notesList(tests.notes);
 
   bindCopy(panel);
   bindTableFolds(panel);
+}
+
+const TEST_KIND_LABEL = {
+  access: 'Who may call it',
+  rejects: 'What it turns away',
+  data: 'What it changes',
+  answers: 'What it answers',
+  screen: 'What the user sees',
+};
+
+/**
+ * The tests worth writing for this action, read off its document: every
+ * response the route can send, every write, every failure the user sees. Open
+ * when nothing tests the action — it is then the useful half of the tab —
+ * folded when tests exist, as a checklist to hold them against.
+ */
+function renderTestPlan(plan, { folded }) {
+  if (!plan?.cases?.length) return '';
+  const where = [
+    plan.file ? `request tests in \`${plan.file}\`` : '',
+    plan.screenFile ? `screen tests in \`${plan.screenFile}\`` : '',
+  ].filter(Boolean);
+  const body =
+    renderDocTable({
+      columns: ['Test to write', 'Covers'],
+      rows: plan.cases.map((entry) => ({
+        cells: [{ html: escapeHtml(entry.title) }, TEST_KIND_LABEL[entry.kind] ?? entry.kind],
+        ...(entry.at ? { at: entry.at } : {}),
+        tone: entry.kind === 'access' || entry.kind === 'data' ? 'warn' : undefined,
+      })),
+    }) +
+    `<div class="command skeleton">
+      <pre><code>${escapeHtml(plan.skeleton)}</code></pre>
+      <button class="button ghost small" data-copy="${escapeHtml(plan.skeleton)}">Copy</button>
+    </div>`;
+  const note = where.length
+    ? `Most important first. Put the ${where.join(' and the ')}.`
+    : 'Most important first.';
+  if (folded) {
+    return `<details class="more test-plan"><summary>What a complete suite would check — ${plan.cases.length} case${plan.cases.length === 1 ? '' : 's'}</summary>
+        <p class="tab-note">${richText(note)}</p>${body}</details>`;
+  }
+  return heading(`Tests to write first — ${plan.cases.length}`, note) + body;
 }
 
 /**
@@ -2598,7 +2802,10 @@ function renderPerf() {
     const facts = [];
     if (timing.slowest)
       facts.push(
-        `Slowest step: \`${timing.slowest.label}\` (${formatMs(timing.slowest.avgSelfMs)} of its own).`,
+        `Slowest step: \`${timing.slowest.label}\` (${formatMs(timing.slowest.avgSelfMs)} of its own` +
+          (timing.fewRuns
+            ? `, from **${timing.slowestRuns === 1 ? 'one run' : `${timing.slowestRuns} runs`}** — do the action a few more times before trusting it).`
+            : `, over ${timing.slowestRuns} runs).`),
       );
     if (slowestQuery)
       facts.push(
@@ -2807,9 +3014,13 @@ function renderChanged() {
       cells: [
         { html: fileLink(entry.file) },
         entry.status ?? 'modified',
-        entry.steps === 0 ? '_none — config, styles, or not analysed_' : `**${entry.steps}**`,
+        entry.steps > 0
+          ? `**${entry.steps}**`
+          : entry.importedBy > 0
+            ? `none of its own — imported by **${entry.importedBy}** file${entry.importedBy === 1 ? '' : 's'}`
+            : '_none — config, styles, or not analysed_',
       ],
-      tone: entry.steps === 0 ? 'muted' : 'warn',
+      tone: entry.steps === 0 && !entry.importedBy ? 'muted' : 'warn',
     })),
   });
 
@@ -2849,7 +3060,14 @@ function renderChanged() {
             feature.id,
             feature.title + (feature.subtitle ? ` · ${feature.subtitle}` : ''),
           ),
-          feature.touchedSteps.map((step) => `\`${step.label}\``).join(', '),
+          [
+            feature.touchedSteps.map((step) => `\`${step.label}\``).join(', '),
+            (feature.through ?? []).length
+              ? `through an import of ${feature.through.map((file) => `\`${file}\``).join(', ')}`
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' · '),
           feature.testCases === 0 ? '**none**' : `${feature.testCases}`,
         ],
         tone: feature.testCases === 0 ? 'error' : 'ok',

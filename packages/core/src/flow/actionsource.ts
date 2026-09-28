@@ -220,7 +220,7 @@ export class SourceReader {
 }
 
 /** `compilerOptions.paths` from the root's tsconfig/jsconfig, plus the common defaults. */
-function readAliases(root: string): Root['aliases'] {
+export function readAliases(root: string): Root['aliases'] {
   const aliases: Root['aliases'] = [];
   for (const name of ['tsconfig.json', 'jsconfig.json']) {
     const path = join(root, name);

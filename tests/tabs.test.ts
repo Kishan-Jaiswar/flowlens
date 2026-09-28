@@ -203,6 +203,55 @@ describe('what my changes put at risk', () => {
     expect(report.notes.join(' ')).toMatch(/every affected feature counts as untested/);
   });
 
+  /**
+   * A file that declares no step — the database connection, a shared client —
+   * used to be reported as reaching nothing, when a change to it reaches every
+   * feature built on top. Imports are followed backwards, `@/` aliases included.
+   */
+  it('reaches features through a changed file they only import', () => {
+    const project = mkdtempSync(join(tmpdir(), 'flowlens-imports-'));
+    mkdirSync(join(project, 'web'), { recursive: true });
+    mkdirSync(join(project, 'lib'), { recursive: true });
+    writeFileSync(join(project, 'lib', 'config.ts'), 'export const BASE = "/api";', 'utf8');
+    writeFileSync(
+      join(project, 'lib', 'api.ts'),
+      `import { BASE } from '@/lib/config';
+       export default { post: (u, b) => fetch(BASE + u, { method: 'POST' }) };`,
+      'utf8',
+    );
+    writeFileSync(
+      join(project, 'web', 'Save.tsx'),
+      `import React from 'react';
+       import api from '../lib/api';
+       export function Save() {
+         const save = async () => { await api.post('/api/medicines', {}); };
+         return <button onClick={save}>Save</button>;
+       }`,
+      'utf8',
+    );
+    // A type-only import runs nothing, so it must not carry the change along.
+    writeFileSync(
+      join(project, 'web', 'Types.tsx'),
+      `import React from 'react';
+       import type { Config } from '../lib/config';
+       import { type Other } from '../lib/config';
+       export function Types() {
+         const pick = () => { console.log('picked'); };
+         return <button onClick={pick}>Pick</button>;
+       }`,
+      'utf8',
+    );
+    const own = scan({ root: project });
+    const report = analyzeChanged(own.graph, [{ file: 'lib/config.ts' }]);
+    expect(report.features.some((feature) => feature.title.includes('Pick'))).toBe(false);
+
+    expect(report.files).toEqual([{ file: 'lib/config.ts', steps: 0, importedBy: 2 }]);
+    expect(report.unmodelled).toEqual([]);
+    const save = report.features.find((feature) => feature.title.includes('Save'));
+    expect(save?.touchedSteps).toEqual([]);
+    expect(save?.through).toEqual(['lib/config.ts']);
+  });
+
   it('names the collections the changed code can reach', () => {
     const report = analyzeChanged(scanned.graph, [
       { file: 'api/src/customers/customers.service.ts' },
@@ -598,7 +647,7 @@ describe('what happens after the response', () => {
   );
   writeFileSync(
     join(project, 'web', 'List.tsx'),
-    `import React from 'react';
+    `import React, { useState } from 'react';
      import { useRouter } from 'next/navigation';
      import { useQueryClient } from '@tanstack/react-query';
      import toast from 'react-hot-toast';
@@ -606,7 +655,13 @@ describe('what happens after the response', () => {
      export function List() {
        const router = useRouter();
        const queryClient = useQueryClient();
+       const [error, setError] = useState('');
        const load = async () => { await api.get('/api/medicines'); };
+       const remove = () => {
+         api.post('/api/medicines/remove', {}).then(() => toast('Removed'), undefined);
+         removeLater({ onError: (e) => setError(String(e)) });
+       };
+       const retry = () => { api.post('/api/medicines/retry', {}).catch(() => setError('Retry failed')); };
        const save = async () => {
          try {
            await api.post('/api/medicines', { name: 'x' });
@@ -617,7 +672,8 @@ describe('what happens after the response', () => {
            toast.error('Could not save');
          }
        };
-       return <><button onClick={load}>Load</button><button onClick={save}>Save</button></>;
+       return <><button onClick={load}>Load</button><button onClick={save}>Save</button>
+         <button onClick={remove}>Remove</button><button onClick={retry}>Retry</button><p>{error}</p></>;
      }`,
     'utf8',
   );
@@ -642,6 +698,21 @@ describe('what happens after the response', () => {
     expect(after.notifies).toContain('toast: Saved');
     expect(after.notifies).toContain('toast: Could not save');
     expect(after.handlesErrors).toBe(true);
+  });
+
+  /**
+   * React Query code handles failures where the mutation is called —
+   * `mutate(id, { onError })` — not in a try/catch. Counting only `catch`
+   * blocks told a real app that none of its saves handled an error.
+   */
+  it('counts onError callbacks and .catch() as handling the failure', () => {
+    for (const label of ['Remove', 'Retry']) {
+      const flow = flows.find((candidate) => candidate.label === label)!;
+      const report = flowApis(result.graph, flow).aftermath;
+      expect(report.handlesErrors).toBe(true);
+      expect(report.errorStates).toEqual(['error']);
+      expect(report.notes.join(' ')).not.toMatch(/unhandled rejection/);
+    }
   });
 
   it('warns when a feature never catches a failure', () => {

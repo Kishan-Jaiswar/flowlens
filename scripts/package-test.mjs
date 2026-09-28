@@ -128,6 +128,8 @@ if (install.status === 0) {
     join(root, 'examples', 'crud'),
   ]);
   await checkDashboard();
+  checkMcp();
+  checkRuntime();
 }
 
 rmSync(temp, { recursive: true, force: true });
@@ -195,4 +197,72 @@ async function checkDashboard() {
   }
 
   server.kill();
+}
+
+/** `flowlens mcp` from an install: a handshake and one tool call, over stdio. */
+function checkMcp() {
+  const lines = [
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } },
+    {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'list_actions', arguments: {} },
+    },
+  ];
+  const result = spawnSync(process.execPath, [installed, 'mcp', join(root, 'examples', 'crud')], {
+    cwd: project,
+    encoding: 'utf8',
+    input: lines.map((line) => JSON.stringify(line)).join('\n') + '\n',
+    env: { ...process.env, FLOWLENS_CACHE: join(temp, 'cache'), NO_COLOR: '1' },
+  });
+  try {
+    const answers = result.stdout
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const listed = answers.find((answer) => answer.id === 2)?.result?.content?.[0]?.text ?? '';
+    if (answers[0]?.result?.serverInfo?.name === 'flowlens' && listed.includes('orderform')) {
+      ok('the MCP server answers from an install');
+    } else {
+      bad('the MCP server answers from an install', result.stdout + result.stderr);
+    }
+  } catch (error) {
+    bad(
+      'the MCP server answers from an install',
+      `${error.message}\n${result.stdout}${result.stderr}`,
+    );
+  }
+}
+
+/**
+ * `@flowslens/runtime` the way an app installs it: the Next.js entry and the
+ * MongoDB driver tracer must resolve through the package's own `exports`.
+ */
+function checkRuntime() {
+  const app = join(temp, 'runtime-app');
+  mkdirSync(app, { recursive: true });
+  run('create an app that installs the runtime', npm, ['init', '-y'], { cwd: app });
+  const installed = run('install @flowslens/runtime', npm, ['install', tarball('runtime')], {
+    cwd: app,
+  });
+  if (installed.status !== 0) return;
+  run(
+    'the runtime exports register, traceDb and the browser tracer',
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      [
+        "const next = await import('@flowslens/runtime/next');",
+        "const runtime = await import('@flowslens/runtime');",
+        "const browser = await import('@flowslens/runtime/browser');",
+        "if (typeof next.register !== 'function') throw new Error('no register');",
+        "if (typeof runtime.traceDb !== 'function') throw new Error('no traceDb');",
+        "if (typeof runtime.installServerTracing !== 'function') throw new Error('no installServerTracing');",
+        "if (typeof browser.installBrowserTracer !== 'function') throw new Error('no browser tracer');",
+      ].join(' '),
+    ],
+    { cwd: app },
+  );
 }

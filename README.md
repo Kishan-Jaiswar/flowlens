@@ -464,6 +464,10 @@ scanned in 10.7s      339 URL constants resolved
 | `flowlens doctor [project]`     | Broken API calls, dead endpoints, shared writes.    |
 | `flowlens trace [project]`      | Merge recorded runtime spans into the graph.        |
 | `flowlens serve [project]`      | The dashboard.                                      |
+| `flowlens instrument [project]` | Set up runtime tracing: new files only, dev only.   |
+| `flowlens diff --base main`     | What this branch changes about the app — for a PR.  |
+| `flowlens unused [project]`     | Files, folders, exports and deps nothing uses.      |
+| `flowlens mcp [project]`        | The graph as tools for an AI assistant (MCP).       |
 
 Add `--json` to any command to get machine-readable output.
 
@@ -471,6 +475,80 @@ Add `--json` to any command to get machine-readable output.
 is piped or scripted (`--open` and `--no-open` override that). If port 4177 is
 busy it moves to the next free one and tells you — unless you asked for a
 specific `--port`, in which case a busy port is an error rather than a surprise.
+
+### Ask your AI assistant, answered from the graph
+
+`flowlens mcp` serves the graph to an AI coding assistant over the
+[Model Context Protocol](https://modelcontextprotocol.io) — a child process on
+stdio, read-only, nothing on a port and nothing sent anywhere. Asked "what
+breaks if I change `deleteMedicine`?", the assistant calls `impact_of_change`
+instead of grepping and guessing, and cites the file and line.
+
+| Tool                 | Answers                                                        |
+| -------------------- | -------------------------------------------------------------- |
+| `list_actions`       | Every user action, riskiest first.                             |
+| `explain_action`     | One action end to end — the Docs tab, as Markdown.             |
+| `where_is_code_used` | Which actions run through a file or line.                      |
+| `impact_of_change`   | What depends on a function, route or collection.               |
+| `find_issues`        | Missing auth, tenant leaks, mass assignment, N+1, slow awaits. |
+| `changes_impact`     | What the uncommitted changes (or a branch) reach.              |
+| `tests_for_action`   | What covers an action, and the tests to write, as `it.todo`s.  |
+| `action_performance` | Time per step and per query, from real spans.                  |
+| `find_unused`        | Files, folders, exports and dependencies nothing uses.         |
+| `rescan`             | Read the source again after an edit.                           |
+
+```bash
+# Claude Code
+claude mcp add flowlens -- npx -y @flowslens/cli mcp /path/to/app
+```
+
+```jsonc
+// Cursor: .cursor/mcp.json · VS Code: .vscode/mcp.json uses "servers" instead of "mcpServers"
+{
+  "mcpServers": {
+    "flowlens": {
+      "command": "npx",
+      "args": ["-y", "@flowslens/cli", "mcp", "."],
+    },
+  },
+}
+```
+
+It costs nothing: the server runs on your machine, and the assistant is the one
+you already use.
+
+### What nothing uses
+
+```bash
+flowlens unused
+```
+
+Files and folders no entry point reaches, exports nothing imports,
+dependencies nothing imports, relative imports that point at no file — and
+backend routes no frontend calls, which is the part a file-level tool cannot
+see. A file is used when something the app starts from reaches it through
+imports: a route or page the framework loads, a file `package.json`, a script,
+a Dockerfile or a README command runs, `scripts/` and `bin/`, a config file,
+or a test. A helper only another dead helper imports is reported too. Nothing
+is deleted; the Unused tab in the dashboard shows the same report.
+
+### What a pull request does to the app
+
+```bash
+flowlens diff --base main
+```
+
+Scans the branch — uncommitted work included — and the commit it forked from,
+and reports what `git diff` cannot: the user actions the change reaches and
+which of them nothing tests, issues it introduces or fixes (a new route with no
+auth check is the one it exists to catch), collections that gained a writer,
+and endpoints added or removed. Markdown, for a PR comment; `--json` for
+anything else; `--fail-on high` to fail CI on a new high-severity issue.
+
+[`docs/ci/flowlens-pr.yml`](docs/ci/flowlens-pr.yml) is a ready GitHub Actions
+workflow: one comment per pull request, updated on every push, using only the
+built-in token. Free on public repositories and within the free minutes on
+private ones.
 
 ### What is this code for?
 
@@ -642,7 +720,23 @@ Flowslens keeps both and labels every node accordingly:
 The gaps are the most valuable output. A `static`-only endpoint may be dead
 code; a `runtime`-only query is something your source reading would have missed.
 
-Tracing is **opt-in** and lives in your app, not in Flowslens:
+Tracing is **opt-in** and lives in your app, not in Flowslens. On a Next.js
+App Router app, let the CLI write it — two new files, and the lines for files
+you own printed rather than edited in:
+
+```bash
+flowlens instrument ./my-app
+```
+
+```ts
+// instrumentation.ts — requests, and the queries they run
+export { register } from '@flowslens/runtime/next';
+
+// the native MongoDB driver — a pass-through in production
+const db = traceDb(client.db('app'));
+```
+
+Anywhere else:
 
 ```ts
 // NestJS / Express — development only

@@ -1,0 +1,61 @@
+# FlowLens on every pull request — copy to .github/workflows/flowlens.yml
+#
+# Posts one comment per pull request (updated on every push) saying what the
+# change does to the app: the user actions it reaches and which have no test,
+# issues it introduces or fixes, collections that gained a writer, endpoints
+# added or removed. Fails the check on a new high-severity issue.
+#
+# Free: GitHub Actions minutes are free for public repositories and within the
+# monthly allowance for private ones; a FlowLens run takes seconds. It uses only
+# the built-in GITHUB_TOKEN — no account, no secret, no third-party action, and
+# the source never leaves the runner.
+name: FlowLens
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  flowlens:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The fork point with the base branch has to be in the clone.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: What this change does to the app
+        id: report
+        continue-on-error: true
+        run: >
+          npx --yes @flowslens/cli@latest diff .
+          --base "origin/${{ github.base_ref }}"
+          --out flowlens-report.md
+          --fail-on high
+
+      - name: Show it on the run page
+        if: always()
+        run: '[ -f flowlens-report.md ] && cat flowlens-report.md >> "$GITHUB_STEP_SUMMARY" || true'
+
+      # Pull requests from forks get a read-only token, so they keep the run
+      # summary above and skip the comment.
+      - name: Comment on the pull request
+        if: always() && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          [ -f flowlens-report.md ] || exit 0
+          gh pr comment "$PR" --body-file flowlens-report.md --edit-last --create-if-none \
+            || gh pr comment "$PR" --body-file flowlens-report.md
+
+      - name: Fail on a new high-severity issue
+        if: steps.report.outcome == 'failure'
+        run: exit 1

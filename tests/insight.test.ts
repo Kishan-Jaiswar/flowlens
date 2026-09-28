@@ -117,6 +117,49 @@ describe('flowTiming', () => {
   });
 });
 
+/**
+ * One click is one sample, and the first is often the slow one — a fresh
+ * database connection, a first compile in dev. Ranking on it without saying so
+ * sends someone to optimise the wrong step.
+ */
+describe('how many runs a timing rests on', () => {
+  const timedDelete = (runs: number) => {
+    const own = scan({ root: EXAMPLE_ROOT });
+    const route = own.graph
+      .nodesOfKind('route')
+      .find((node) => node.meta?.['httpMethod'] === 'DELETE')!;
+    const events: TraceEvent[] = Array.from({ length: runs }, (_, run) => ({
+      v: 1 as const,
+      traceId: `trace-${run}`,
+      spanId: 'server',
+      kind: 'http-server' as const,
+      name: String(route.label),
+      startedAt: 1_735_000_000_000 + run * 1000,
+      durationMs: 120,
+      attrs: { httpMethod: route.meta?.['httpMethod'], path: route.meta?.['path'] },
+    }));
+    mergeRuntimeTrace(own.graph, events);
+    const flow = resolveFlows(own.graph, { includeLocalOnly: true }).find(
+      (candidate) => candidate.id === 'customerspage-delete',
+    )!;
+    return flowTiming(flow);
+  };
+
+  it('says the slowest step was measured once', () => {
+    const timing = timedDelete(1);
+    expect(timing.slowestRuns).toBe(1);
+    expect(timing.fewRuns).toBe(true);
+    expect(timing.notes.join(' ')).toMatch(/measured once/);
+  });
+
+  it('stops warning once there are enough runs', () => {
+    const timing = timedDelete(3);
+    expect(timing.slowestRuns).toBe(3);
+    expect(timing.fewRuns).toBe(false);
+    expect(timing.notes.join(' ')).not.toMatch(/measured/);
+  });
+});
+
 describe('analyzeFlowImpact', () => {
   const impact = analyzeFlowImpact(scanned.graph, deleteFlow);
 

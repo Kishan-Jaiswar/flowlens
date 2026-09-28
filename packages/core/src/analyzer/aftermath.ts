@@ -47,7 +47,11 @@ export interface Aftermath {
   errorStates: string[];
   /** Toast or notification calls, with their message when it is a literal. */
   notifies: string[];
-  /** True when the handler has a `catch` at all. */
+  /**
+   * True when the handler deals with a failure at all: a `catch` block, a
+   * `.catch()` on a promise, or an `onError` callback — the last being how
+   * React Query and SWR code is written, `mutate(id, { onError })`.
+   */
   handlesErrors: boolean;
 }
 
@@ -95,16 +99,16 @@ export function aftermathOf(fn: Node): Aftermath {
       continue;
     }
 
-    // A setter called inside a catch is the error the user will see.
-    if (/^set[A-Z]/.test(bare) && insideCatch(call)) {
+    // A setter called on the failure path is the error the user will see.
+    if (/^set[A-Z]/.test(bare) && onErrorPath(call)) {
       errorStates.add(bare.slice(3).charAt(0).toLowerCase() + bare.slice(4));
     }
+
+    if (member === 'catch') handlesErrors = true;
   }
 
-  for (const _ of fn.getDescendantsOfKind(SyntaxKind.CatchClause)) {
-    handlesErrors = true;
-    break;
-  }
+  if (fn.getDescendantsOfKind(SyntaxKind.CatchClause).length > 0) handlesErrors = true;
+  if (fn.getDescendants().some(isOnErrorCallback)) handlesErrors = true;
 
   if (
     navigatesTo.size === 0 &&
@@ -204,9 +208,24 @@ function readLiteral(node: Node): string | undefined {
   return undefined;
 }
 
-function insideCatch(node: Node): boolean {
+/** `onError: (e) => …`, `onError(e) { … }` or a shorthand `{ onError }`. */
+function isOnErrorCallback(node: Node): boolean {
+  return (
+    (Node.isPropertyAssignment(node) ||
+      Node.isMethodDeclaration(node) ||
+      Node.isShorthandPropertyAssignment(node)) &&
+    node.getName() === 'onError'
+  );
+}
+
+/** Inside a `catch` block, an `onError` callback, or a `.catch()` handler. */
+function onErrorPath(node: Node): boolean {
   for (let current: Node | undefined = node.getParent(); current; current = current.getParent()) {
-    if (Node.isCatchClause(current)) return true;
+    if (Node.isCatchClause(current) || isOnErrorCallback(current)) return true;
+    if (Node.isCallExpression(current)) {
+      const callee = current.getExpression();
+      if (Node.isPropertyAccessExpression(callee) && callee.getName() === 'catch') return true;
+    }
   }
   return false;
 }

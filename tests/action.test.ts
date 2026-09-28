@@ -4,13 +4,14 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   explainAction,
+  planTests,
   renderActionDocument,
   resolveFlows,
   scan,
   type ActionDoc,
   type ActionStage,
 } from '@flowslens/core';
-import { exampleScan } from './helpers.js';
+import { EXAMPLE_ROOT, exampleScan } from './helpers.js';
 
 /**
  * The Docs tab: one action, documented from the page to the database and back.
@@ -526,5 +527,50 @@ describe('an action document for a NestJS backend', () => {
   it('follows each payload field back to the state it came from', () => {
     const payload = rows(stage(doc, 'payload'));
     expect(payload.find((row) => row.startsWith('`name`'))).toContain('`name` _(state)_');
+  });
+});
+
+/**
+ * On a project with no tests the Tests tab was a page of zeros. The plan turns
+ * what the document already knows into the cases worth writing, in the order a
+ * reviewer would ask for them.
+ */
+describe('the tests to write for an action', () => {
+  const graph = scan({ root: EXAMPLE_ROOT }).graph;
+  const all = resolveFlows(graph);
+  const submit = all.find((flow) => flow.id === 'orderform-submit-order')!;
+  const plan = planTests(explainAction(graph, submit), submit);
+
+  it('turns every rejection the route can send into a case, with its reason', () => {
+    const titles = plan.cases.map((entry) => entry.title);
+    expect(titles).toContain(
+      'POST /orders answers 404 "customer not found" when !customer (CustomersService.findById)',
+    );
+    expect(titles.some((title) => /answers 201 .* for a valid request/.test(title))).toBe(true);
+  });
+
+  it('lists each write the action makes', () => {
+    const data = plan.cases.filter((entry) => entry.kind === 'data').map((entry) => entry.title);
+    expect(data).toContain('adds a record to orders (create in OrdersService.create)');
+  });
+
+  it('orders access and rejections before the happy path', () => {
+    const kinds = plan.cases.map((entry) => entry.kind);
+    const rank = ['access', 'rejects', 'data', 'answers', 'screen'];
+    expect(kinds.map((kind) => rank.indexOf(kind))).toEqual(
+      [...kinds.map((kind) => rank.indexOf(kind))].sort((a, b) => a - b),
+    );
+  });
+
+  it('asks for the missing error message rather than pinning its absence', () => {
+    const screen = plan.cases.find((entry) => entry.kind === 'screen');
+    expect(screen?.title).toMatch(/tells the user it did not work/);
+  });
+
+  it('writes a skeleton next to the route, valid in Vitest and Jest', () => {
+    expect(plan.file).toBe('api/src/orders/orders.controller.test.ts');
+    expect(plan.skeleton).toMatch(/^\/\/ POST \/orders\ndescribe\('/);
+    expect(plan.skeleton).toContain("it.todo('answers 404");
+    expect(plan.skeleton.trimEnd().endsWith('});')).toBe(true);
   });
 });
