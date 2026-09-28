@@ -115,9 +115,10 @@ _already been built_, and they are worth more than any new feature.
 - [ ] **Watch mode.** `flowlens serve --watch` re-scans changed files instead of
       the whole project.
 - [ ] **Incremental scan cache.** Per-file analyzer results keyed by mtime.
-- [ ] **`flowlens diff`.** Compare two graphs: which flows changed, which
-      endpoints appeared, which collection gained a writer. This is the CI story
-      — fail a PR that silently adds a second writer to a collection.
+- [x] **`flowlens diff`.** Compare two graphs: which flows changed, which
+      endpoints appeared, which collection gained a writer, which issues a
+      branch introduces. `--fail-on` and a GitHub Actions workflow
+      (`docs/ci/flowlens-pr.yml`) make it the CI story.
 
 ## v1.2 — more of the stack
 
@@ -171,6 +172,11 @@ panel is a thin client over both — "I just clicked this, show me what happened
 live.
 
 ## Later — AI
+
+- [x] **`flowlens mcp`** — the graph as read-only tools for the assistant a
+      developer already uses (Claude Code, Cursor, VS Code). No model inside
+      Flowslens, no key, no cost: the assistant asks, the graph answers with
+      file and line.
 
 An explanation layer over a verified graph:
 

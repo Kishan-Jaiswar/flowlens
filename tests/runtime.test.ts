@@ -247,6 +247,59 @@ describe('mergeRuntimeTrace', () => {
     expect(node?.timing?.avgMs).toBe(82);
   });
 
+  /**
+   * A confirm dialog's "Yes, delete it" is a click no handler is named after,
+   * and the request it sends carries a real id. Both used to leak into the
+   * action list: a new "endpoint" per record, and an action per dialog button.
+   */
+  describe('clicks the source does not name', () => {
+    const t = 1_735_000_000_000;
+    const click = (traceId: string, name: string, method: string, path: string): TraceEvent[] => [
+      { v: 1, traceId, spanId: 'ui', kind: 'ui-action', name, startedAt: t, durationMs: 0 },
+      {
+        v: 1,
+        traceId,
+        spanId: 'client',
+        parentSpanId: 'ui',
+        kind: 'http-client',
+        name: `${method} ${path}`,
+        startedAt: t + 1,
+        durationMs: 30,
+        attrs: { httpMethod: method, path, statusCode: 200 },
+      },
+    ];
+
+    it('credits a request with a real id to the call the source declares', () => {
+      const result = scan({ root: EXAMPLE_ROOT });
+      mergeRuntimeTrace(
+        result.graph,
+        click('t1', 'Yes, delete it', 'DELETE', '/api/customers/c_91f2a'),
+      );
+      const calls = result.graph.nodesOfKind('api-call');
+      expect(calls.some((node) => node.label.includes('c_91f2a'))).toBe(false);
+      const declared = calls.find((node) => node.label === 'DELETE /customers/:param');
+      expect(declared?.observations).toBe(1);
+      expect(declared?.evidence).toBe('confirmed');
+    });
+
+    it('lists no action for a click whose requests a declared action already makes', () => {
+      const result = scan({ root: EXAMPLE_ROOT });
+      mergeRuntimeTrace(
+        result.graph,
+        click('t1', 'Yes, delete it', 'DELETE', '/api/customers/c_91f2a'),
+      );
+      const titles = resolveFlows(result.graph, { includeLocalOnly: true }).map((f) => f.label);
+      expect(titles).not.toContain('Yes, delete it');
+    });
+
+    it('still lists one that reaches an endpoint nothing declares', () => {
+      const result = scan({ root: EXAMPLE_ROOT });
+      mergeRuntimeTrace(result.graph, click('t2', 'Export', 'GET', '/api/reports/export'));
+      const titles = resolveFlows(result.graph).map((flow) => flow.label);
+      expect(titles).toContain('Export');
+    });
+  });
+
   it('is idempotent in structure when merged twice', () => {
     const result = scan({ root: EXAMPLE_ROOT });
     mergeRuntimeTrace(result.graph, submitOrderTrace());

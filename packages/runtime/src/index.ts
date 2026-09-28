@@ -7,9 +7,15 @@
  *
  * Wire it up in development only:
  *
- *   import { flowlensHttp, flowlensMongoose } from '@flowslens/runtime';
- *   app.use(flowlensHttp());
- *   mongoose.plugin(flowlensMongoose());
+ *   import { flowlensHttp, flowlensMongoose, traceDb } from '@flowslens/runtime';
+ *   app.use(flowlensHttp());                 // Express / Nest
+ *   mongoose.plugin(flowlensMongoose());     // Mongoose
+ *   const db = traceDb(client.db('app'));    // the native MongoDB driver
+ *
+ * Next.js App Router, which has no middleware chain to join:
+ *
+ *   // instrumentation.ts
+ *   export { register } from '@flowslens/runtime/next';
  */
 
 export {
@@ -44,3 +50,7 @@ export {
   type MongooseLikeSchema,
   type MongoosePluginOptions,
 } from './mongoose.js';
+
+export { traceCollection, traceDb, type MongoTracingOptions } from './mongodb.js';
+
+export { installServerTracing, type ServerTracingOptions } from './server.js';

@@ -50,6 +50,22 @@ export function mergeRuntimeTrace(
     method: String(node.meta?.['httpMethod'] ?? ''),
     path: String(node.meta?.['path'] ?? ''),
   }));
+  /**
+   * The calls the source declares, as templates.
+   *
+   * A browser request carries the real id — `/medicines/med_2bbed44f4aa4` —
+   * and the source says `/medicines/:param`. Matched by exact id only, every
+   * click on a row minted a new "endpoint" per record and the declared call
+   * was reported as never having run.
+   */
+  const apiCalls = graph
+    .nodesOfKind('api-call')
+    .filter((node) => !node.meta?.['discoveredAtRuntime'])
+    .map((node) => ({
+      id: node.id,
+      method: String(node.meta?.['httpMethod'] ?? ''),
+      path: String(node.meta?.['path'] ?? ''),
+    }));
 
   for (const spans of traces.values()) {
     /** spanId -> resolved graph node id, so children can link to parents. */
@@ -57,7 +73,7 @@ export function mergeRuntimeTrace(
     const selfTimes = selfTimeOf(spans);
 
     for (const span of spans) {
-      const match = resolveSpan(graph, span, routes, apiPrefixes);
+      const match = resolveSpan(graph, span, routes, apiCalls, apiPrefixes);
       if (!match) continue;
       if (match.discovered) result.discovered += 1;
       else result.matched += 1;
@@ -95,6 +111,7 @@ function resolveSpan(
   graph: FlowGraph,
   span: TraceEvent,
   routes: Array<{ id: string; method: string; path: string }>,
+  apiCalls: Array<{ id: string; method: string; path: string }>,
   apiPrefixes: string[],
 ): SpanMatch | undefined {
   const attrs = span.attrs ?? {};
@@ -131,7 +148,12 @@ function resolveSpan(
 
     case 'http-client': {
       const method = (attrs.httpMethod ?? 'GET').toUpperCase();
-      const path = normalizePath(attrs.path ?? span.name, apiPrefixes);
+      const raw = normalizePath(attrs.path ?? span.name, apiPrefixes);
+      const declared = bestRouteMatch({ method, path: raw }, apiCalls);
+      if (declared) return { nodeId: declared.id, discovered: false };
+      // Not a call the source declares: name it by the route's template if one
+      // answers it, so one endpoint is still one step whichever record was hit.
+      const path = bestRouteMatch({ method, path: raw }, routes)?.path || raw;
       const id = ids.apiCall(method, path);
       const discovered = !graph.hasNode(id);
       graph.addNode({

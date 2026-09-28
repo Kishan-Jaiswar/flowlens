@@ -52,6 +52,8 @@ export class FlowGraph {
       filesAnalyzed: meta?.filesAnalyzed ?? 0,
       version: meta?.version ?? 1,
       ...(meta?.projects ? { projects: meta.projects } : {}),
+      ...(meta?.imports ? { imports: meta.imports } : {}),
+      ...(meta?.unused ? { unused: meta.unused } : {}),
     };
   }
 
@@ -286,6 +288,7 @@ export class FlowGraph {
     for (const node of other.allNodes()) this.addNode(node);
     for (const edge of other.allEdges()) this.addEdge(edge);
     this.meta.filesAnalyzed += other.meta.filesAnalyzed;
+    if (other.meta.imports) this.meta.imports = { ...this.meta.imports, ...other.meta.imports };
     return this;
   }
 }

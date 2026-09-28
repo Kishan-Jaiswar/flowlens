@@ -28,6 +28,8 @@ import {
   scan,
   SourceReader,
   testsForFlow,
+  planTests,
+  projectUnused,
   type FlowGraph,
   type TestIndex,
 } from '@flowslens/core';
@@ -377,11 +379,14 @@ export function runServe(args: ServeArgs): number {
         sendJson(response, { error: 'unknown flow' }, 404);
         return;
       }
+      reader ??= new SourceReader(graph);
       sendJson(response, {
         flowId: flow.id,
         timing: flowTiming(flow),
         impact: analyzeFlowImpact(graph, flow),
         tests: testsForFlow(tests, flow),
+        // What to write, read off the same document the Docs tab shows.
+        testPlan: planTests(explainAction(graph, flow, { reader }), flow),
         // The contract check rides along inside each call, where it belongs:
         // agreeing about a payload is a fact about an endpoint.
         apis: flowApis(graph, flow),
@@ -396,6 +401,12 @@ export function runServe(args: ServeArgs): number {
      * flow and because it shells out to git: a developer switching between
      * features should not pay for a `git status` they did not ask about.
      */
+    /** Code nothing uses — read at scan time, so this is a lookup. */
+    if (path === '/api/unused') {
+      sendJson(response, projectUnused(graph));
+      return;
+    }
+
     if (path === '/api/changed') {
       const base = url.searchParams.get('base') ?? undefined;
       const found = changedFiles(root, base);

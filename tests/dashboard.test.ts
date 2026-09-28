@@ -12,6 +12,8 @@ import {
   flowApis,
   flowTiming,
   indexTests,
+  planTests,
+  projectUnused,
   renderActionDocument,
   resolveFlows,
   scan,
@@ -63,6 +65,7 @@ function apiResponse(path: string): unknown {
     };
   }
   if (path.startsWith('/api/findings')) return projectFindings(scanned.graph);
+  if (path.startsWith('/api/unused')) return projectUnused(scanned.graph);
   if (path.startsWith('/api/queries')) {
     const flow = flows.find(
       (candidate) => candidate.id === new URL(path, 'http://x').searchParams.get('flow'),
@@ -87,6 +90,7 @@ function apiResponse(path: string): unknown {
       timing: flowTiming(flow),
       impact: analyzeFlowImpact(scanned.graph, flow),
       tests: testsForFlow(indexTests([EXAMPLE_ROOT]), flow),
+      testPlan: planTests(explainAction(scanned.graph, flow), flow),
       apis: flowApis(scanned.graph, flow),
     };
   }
@@ -118,7 +122,7 @@ async function loadDashboard(): Promise<void> {
   // insight the tabs need.
   await vi.waitFor(() => {
     expect(document.getElementById('graph')?.textContent).not.toBe('');
-    expect(document.querySelectorAll('#tabs .tab').length).toBe(6);
+    expect(document.querySelectorAll('#tabs .tab').length).toBe(7);
     expect(document.querySelector('#tab-impact .tab-badge')).not.toBeNull();
   });
 }
@@ -240,11 +244,19 @@ async function openTab(id: string): Promise<HTMLElement> {
 }
 
 describe('the tabs', () => {
-  it('offers the six tabs in the agreed order, with Docs open first', async () => {
+  it('offers the seven tabs in the agreed order, with Docs open first', async () => {
     const labels = [...document.querySelectorAll('#tabs .tab-label')].map(
       (node) => node.textContent,
     );
-    expect(labels).toEqual(['Docs', 'Issues', 'Performance', 'Tests', 'Changed', 'Breaks']);
+    expect(labels).toEqual([
+      'Docs',
+      'Issues',
+      'Performance',
+      'Tests',
+      'Changed',
+      'Breaks',
+      'Unused',
+    ]);
     expect(document.getElementById('tab-docs')?.getAttribute('aria-selected')).toBe('true');
     expect(document.getElementById('panel-docs')?.hidden).toBe(false);
   });
@@ -437,6 +449,21 @@ describe('the Breaks tab', () => {
   });
 });
 
+describe('the Unused tab', () => {
+  it('lists what nothing uses, for the whole project, with the endpoints nothing calls', async () => {
+    const panel = await openTab('unused');
+    await vi.waitFor(() => {
+      expect(panel.textContent).toContain('Endpoints no frontend calls');
+    });
+    const text = panel.textContent ?? '';
+    // The example's archive route is called with PUT but served as PATCH.
+    expect(text).toContain('PATCH /customers/:param/archive');
+    // The schemas Nest never registers are exports nothing imports.
+    expect(text).toContain('CustomerSchema');
+    expect(document.getElementById('tab-unused')?.textContent).toMatch(/\d|clean/);
+  });
+});
+
 describe('the Tests tab', () => {
   it('says plainly when nothing guards the feature', async () => {
     const panel = await openTab('tests');
@@ -445,6 +472,19 @@ describe('the Tests tab', () => {
     expect(text).toContain('would not fail the suite');
     // …and says what a test would have to reach.
     expect(panel.querySelectorAll('.adoc-table tbody tr').length).toBeGreaterThan(0);
+  });
+
+  it('lists the tests to write first, with a skeleton to copy', async () => {
+    const panel = await openTab('tests');
+    await vi.waitFor(() => {
+      expect(panel.textContent).toContain('Tests to write first');
+    });
+    const skeleton = panel.querySelector('.command.skeleton code')?.textContent ?? '';
+    expect(skeleton).toContain('describe(');
+    expect(skeleton).toContain('it.todo(');
+    expect(panel.querySelector('.command.skeleton [data-copy]')?.getAttribute('data-copy')).toBe(
+      skeleton,
+    );
   });
 });
 
@@ -489,11 +529,11 @@ describe('the Docs tab', () => {
       expect(panel.querySelectorAll('.adoc-stage').length).toBeGreaterThan(0);
     });
     const drawn = panel.querySelectorAll('.adoc-stage').length;
-    const numbers = [...panel.querySelectorAll('.adoc-num')].map((node) => node.textContent);
+    const numbers = [...panel.querySelectorAll('.glance-num')].map((node) => node.textContent);
     expect(numbers).toEqual(Array.from({ length: drawn }, (_, i) => String(i + 1)));
     // Every one of the nineteen is either drawn or listed as not in this action.
     expect(drawn + panel.querySelectorAll('.adoc-absent li').length).toBe(19);
-    expect(panel.querySelector('.adoc-stage .adoc-title')?.textContent).toBe('User opens page');
+    expect(panel.querySelector('.adoc-stage .glance-title')?.textContent).toBe('User opens page');
   });
 
   it('writes styled text, not markup', async () => {
@@ -510,22 +550,26 @@ describe('the Docs tab', () => {
   it('opens with the whole action at a glance, grouped by where it happens', async () => {
     const panel = await openTab('docs');
     await vi.waitFor(() => {
-      expect(panel.querySelectorAll('.glance-steps li')).toHaveLength(
+      expect(panel.querySelectorAll('.glance-steps > li')).toHaveLength(
         panel.querySelectorAll('.adoc-stage').length,
       );
-      expect(panel.querySelectorAll('.glance-steps li').length).toBeGreaterThan(0);
+      expect(panel.querySelectorAll('.glance-steps > li').length).toBeGreaterThan(0);
     });
     const phases = [...panel.querySelectorAll('.glance-phase-title')].map(
       (node) => node.textContent,
     );
     expect(phases[0]).toContain('In the browser');
     expect(phases.at(-1)).toContain('The way back');
-    // The overview comes before the detail it summarises.
+    // Every stage's detail lives inside its line, closed until asked for.
     const glance = panel.querySelector('.adoc-glance')!;
-    const firstStage = panel.querySelector('.adoc-stage')!;
-    expect(
-      glance.compareDocumentPosition(firstStage) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    const stages = panel.querySelectorAll('.adoc-stage');
+    expect(glance.querySelectorAll('.adoc-stage')).toHaveLength(stages.length);
+    expect(panel.querySelectorAll('.adoc-stage.is-collapsed')).toHaveLength(stages.length);
+
+    const first = stages[0]!;
+    first.querySelector<HTMLButtonElement>('.adoc-head')!.click();
+    expect(first.classList.contains('is-collapsed')).toBe(false);
+    expect(first.querySelector('.adoc-head')?.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('shows facts of the same shape as tables', async () => {
@@ -562,10 +606,11 @@ describe('the Docs tab', () => {
       expect(panel.querySelectorAll('.adoc-stage').length).toBeGreaterThan(0);
     });
     const drawn = panel.querySelectorAll('.adoc-stage').length;
-    panel.querySelector<HTMLButtonElement>('#doc-toggle')!.click();
     expect(panel.querySelectorAll('.adoc-stage.is-collapsed')).toHaveLength(drawn);
     panel.querySelector<HTMLButtonElement>('#doc-toggle')!.click();
     expect(panel.querySelectorAll('.adoc-stage.is-collapsed')).toHaveLength(0);
+    panel.querySelector<HTMLButtonElement>('#doc-toggle')!.click();
+    expect(panel.querySelectorAll('.adoc-stage.is-collapsed')).toHaveLength(drawn);
   });
 
   it('opens straight onto an action from a #docs= link', async () => {

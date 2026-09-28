@@ -120,6 +120,38 @@ void bootstrap();
 Register the Mongoose plugin **before** your models are compiled — in
 `bootstrap()`, above `app.listen()` — or the hooks never attach.
 
+### Next.js App Router — let the CLI write it
+
+```bash
+npx @flowslens/cli instrument .
+```
+
+It writes two new files and prints the rest — it never edits a file you
+already have:
+
+```ts
+// instrumentation.ts — requests, and every query they run
+export { register } from '@flowslens/runtime/next';
+```
+
+and `app/flowlens-tracer.tsx`, a client component that loads the click tracer
+only while `NEXT_PUBLIC_FLOWLENS_SPANS` is set. Render `<FlowlensTracer />`
+once, in the layout or a providers component. `register()` does nothing in
+production or on the Edge runtime, and the request, the database call and the
+click all share one trace even though Turbopack bundles them separately.
+
+### The native MongoDB driver
+
+```ts
+import { traceDb } from '@flowslens/runtime';
+
+const db = traceDb(client.db('app')); // a plain pass-through in production
+```
+
+One span per operation — `find` and `aggregate` when the cursor is drained —
+written only while a request is being traced, so start-up index creation and
+background workers stay out of the recording.
+
 ### Next.js / React — link a click to the requests it caused
 
 This is what lets Flowslens say "this button caused these three queries" instead
@@ -263,14 +295,17 @@ leave in place.
 | --------------------------------- | ------------------------------------------------- |
 | `flowlensHttp()`                  | Express/NestJS middleware — one span per request. |
 | `flowlensMongoose()`              | Mongoose plugin — one span per query.             |
+| `traceDb(db)`, `traceCollection`  | Native MongoDB driver — one span per operation.   |
+| `installServerTracing()`          | Any `node:http` server with no middleware chain.  |
+| `register()`                      | `@flowslens/runtime/next` — Next.js in one line.  |
 | `traceMethod(class, method, fn)`  | Time one call as its own span.                    |
 | `installBrowserTracer(options)`   | Browser: correlate a click with its requests.     |
 | `TraceSink`, `getSink`, `setSink` | Where spans are written.                          |
 | `withContext`, `currentContext`   | The active trace context.                         |
 | `TRACE_HEADER`, `SPAN_HEADER`     | Header names carrying correlation ids.            |
 
-`installBrowserTracer` comes from `@flowslens/runtime/browser`; everything else
-from `@flowslens/runtime`.
+`installBrowserTracer` comes from `@flowslens/runtime/browser`, `register` from
+`@flowslens/runtime/next`; everything else from `@flowslens/runtime`.
 
 ---
 

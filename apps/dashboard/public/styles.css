@@ -1380,6 +1380,27 @@ code {
   white-space: nowrap;
 }
 
+/* The it.todo skeleton on the Tests tab: several lines, so it wraps as code does. */
+.command.skeleton {
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-top: 10px;
+}
+
+.command.skeleton pre {
+  margin: 0;
+}
+
+.command.skeleton code {
+  white-space: pre;
+}
+
+.test-plan > summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin: 18px 0 8px;
+}
+
 .button.small {
   padding: 3px 9px;
   font-size: 11px;
@@ -1741,9 +1762,9 @@ ul.plain.small {
  * The Docs tab.
  *
  * One action, read in two passes. First "At a glance": one line per stage,
- * grouped by where it happens, so the whole round trip fits on a screen. Then
- * the same stages in detail, each a card whose facts are tables — the columns
- * do the parsing a reader would otherwise do in their head. Colour means one
+ * grouped by where it happens, so the whole round trip fits on a screen. Each
+ * line opens in place to its detail, a card whose facts are tables — the
+ * columns do the parsing a reader would otherwise do in their head. Colour means one
  * thing throughout: where in the round trip you are (browser, network, server,
  * database, back), and green / red for the success and failure paths.
  * ------------------------------------------------------------------------ */
@@ -1906,19 +1927,34 @@ ul.plain.small {
   padding: 0;
 }
 
-.glance-steps a {
+.glance-steps .adoc-head {
   display: grid;
-  grid-template-columns: 26px minmax(170px, 210px) 1fr;
+  grid-template-columns: 26px minmax(170px, 210px) 1fr 14px;
   align-items: baseline;
   gap: 10px;
+  width: 100%;
   padding: 4px 6px;
+  border: 0;
   border-radius: 6px;
+  background: none;
   color: inherit;
-  text-decoration: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-.glance-steps a:hover {
+.glance-steps .adoc-head:hover {
   background: var(--surface-2);
+}
+
+.adoc-head::after {
+  content: '▾';
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.adoc-stage.is-collapsed .adoc-head::after {
+  content: '▸';
 }
 
 .glance-num {
@@ -1931,6 +1967,11 @@ ul.plain.small {
   color: var(--phase);
   font-size: 11px;
   font-weight: 700;
+}
+
+.adoc-stage:not(.is-collapsed) .glance-num {
+  background: var(--phase);
+  color: #fff;
 }
 
 .glance-title {
@@ -1951,128 +1992,18 @@ ul.plain.small {
   opacity: 0.6;
 }
 
-/* ----- Detail ----- */
+/* ----- A stage, opened ----- */
 
-.adoc-phase {
-  margin-bottom: 8px;
-}
-
-.adoc-phase-title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 18px 0 10px;
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--phase);
-}
-
-.adoc-phase-title::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: var(--border);
-}
-
-.adoc-stages {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-/* The line joining the stages of a phase. */
 .adoc-stage {
-  position: relative;
-  padding: 0 0 14px 42px;
   scroll-margin-top: 12px;
-}
-
-.adoc-stage::before {
-  content: '';
-  position: absolute;
-  left: 13px;
-  top: 28px;
-  bottom: 0;
-  width: 2px;
-  background: var(--border);
-}
-
-.adoc-stage:last-child::before {
-  display: none;
-}
-
-.adoc-head {
-  position: relative;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  width: 100%;
-  padding: 2px 0 8px;
-  border: 0;
-  background: none;
-  color: var(--text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.adoc-num {
-  position: absolute;
-  left: -42px;
-  top: 0;
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: var(--phase);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.adoc-stage.is-empty .adoc-num {
-  background: var(--surface);
-  border: 2px dashed var(--phase);
-  color: var(--phase);
-}
-
-.adoc-heading {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.adoc-title {
-  font-weight: 700;
-  font-size: 15px;
-}
-
-.adoc-summary {
-  color: var(--text-muted);
-}
-
-.adoc-head::after {
-  content: '▾';
-  margin-left: auto;
-  padding-left: 8px;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.adoc-stage.is-collapsed .adoc-head::after {
-  content: '▸';
 }
 
 .adoc-stage.is-collapsed .adoc-body {
   display: none;
 }
 
-.adoc-stage.is-flash .adoc-body {
-  box-shadow: 0 0 0 2px var(--phase);
+.adoc-stage .adoc-body {
+  margin: 4px 0 10px 42px;
 }
 
 .adoc-body {
@@ -2083,7 +2014,6 @@ ul.plain.small {
   border-left: 3px solid var(--phase);
   border-radius: var(--radius);
   background: var(--surface);
-  transition: box-shadow 0.3s;
 }
 
 .adoc-stage.is-empty .adoc-body {

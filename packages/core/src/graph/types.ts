@@ -1,3 +1,4 @@
+import type { UnusedReport } from '../analyzer/unused.js';
 /**
  * The Flowslens graph vocabulary.
  *
@@ -215,6 +216,13 @@ export interface GraphMeta {
   version: number;
   /** Detected sub-projects, e.g. { web: "web", api: "api" }. */
   projects?: Record<string, string>;
+  /**
+   * File -> the scanned files it imports, relative to the root. How the
+   * Changed view reaches features through a file that declares no step.
+   */
+  imports?: Record<string, string[]>;
+  /** Files, exports, folders and dependencies nothing reaches (see analyzer/unused). */
+  unused?: UnusedReport;
 }
 
 export interface SerializedGraph {
