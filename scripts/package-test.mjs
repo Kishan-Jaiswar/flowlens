@@ -17,7 +17,7 @@
  * takes tens of seconds, and `smoke` is meant to stay fast enough to run often.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -247,22 +247,23 @@ function checkRuntime() {
     cwd: app,
   });
   if (installed.status !== 0) return;
-  run(
-    'the runtime exports register, traceDb and the browser tracer',
-    process.execPath,
+  // A file, not `node -e`: on Windows `run` goes through the shell, and cmd
+  // mangles a quoted script on the command line.
+  const check = join(app, 'check.mjs');
+  writeFileSync(
+    check,
     [
-      '--input-type=module',
-      '-e',
-      [
-        "const next = await import('@flowslens/runtime/next');",
-        "const runtime = await import('@flowslens/runtime');",
-        "const browser = await import('@flowslens/runtime/browser');",
-        "if (typeof next.register !== 'function') throw new Error('no register');",
-        "if (typeof runtime.traceDb !== 'function') throw new Error('no traceDb');",
-        "if (typeof runtime.installServerTracing !== 'function') throw new Error('no installServerTracing');",
-        "if (typeof browser.installBrowserTracer !== 'function') throw new Error('no browser tracer');",
-      ].join(' '),
-    ],
-    { cwd: app },
+      "const next = await import('@flowslens/runtime/next');",
+      "const runtime = await import('@flowslens/runtime');",
+      "const browser = await import('@flowslens/runtime/browser');",
+      "if (typeof next.register !== 'function') throw new Error('no register');",
+      "if (typeof runtime.traceDb !== 'function') throw new Error('no traceDb');",
+      "if (typeof runtime.installServerTracing !== 'function') throw new Error('no installServerTracing');",
+      "if (typeof browser.installBrowserTracer !== 'function') throw new Error('no browser tracer');",
+    ].join('\n'),
+    'utf8',
   );
+  run('the runtime exports register, traceDb and the browser tracer', process.execPath, [check], {
+    cwd: app,
+  });
 }

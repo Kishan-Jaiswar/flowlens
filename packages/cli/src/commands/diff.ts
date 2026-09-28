@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   analyzeChanged,
   diffGraphs,
@@ -48,8 +48,15 @@ export const REPORT_MARKER = '<!-- flowlens-report -->';
  */
 export function runDiff(args: DiffArgs): number {
   const root = resolve(args.root);
-  const top = git(root, ['rev-parse', '--show-toplevel']);
-  if (top.error) return fail(`not a git repository: ${root}`);
+  /**
+   * Where the project sits inside the repository, asked of git rather than
+   * worked out from two paths: on Windows the temp directory comes back in
+   * its 8.3 short form (`RUNNER~1`) while git reports the long one, and a
+   * `relative()` between them led back out of the checkout — so the "base"
+   * scanned was the branch itself and every difference vanished.
+   */
+  const prefix = git(root, ['rev-parse', '--show-prefix']);
+  if (prefix.error) return fail(`not a git repository: ${root}`);
 
   const fork = git(root, ['merge-base', args.base, 'HEAD']);
   if (fork.error) {
@@ -73,7 +80,7 @@ export function runDiff(args: DiffArgs): number {
   try {
     const added = git(root, ['worktree', 'add', '--detach', '--quiet', checkout, forkPoint]);
     if (added.error) return fail(`could not check out ${args.base}: ${added.error}`);
-    const scanned = scan({ root: join(checkout, relative(top.out.trim(), root)) });
+    const scanned = scan({ root: join(checkout, prefix.out.trim()) });
     baseGraph = scanned.graph;
     baseFindings = findingsOf(baseGraph);
   } finally {
