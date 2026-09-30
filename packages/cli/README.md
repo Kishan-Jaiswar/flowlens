@@ -135,22 +135,22 @@ flowlens serve
 ```
 
 A local dashboard on `http://127.0.0.1:4177`, which asks seven questions about
-the feature you have open. Each tab carries its own headline number, so the
+the action you have open. Each tab carries its own headline number, so the
 worrying one is visible before you open it:
 
 ```text
-Flow · 24   APIs · 1   Timing · no runs   Breaks · 2   Tests · none   Docs · 6 actions   Changed · 5
+Docs · 7 steps   Issues · 2   Performance · not run   Tests · none   Changed · 5   Breaks · 3   Unused · 14
 ```
 
-| Tab         | The question                              | Where the answer comes from                                    |
-| ----------- | ----------------------------------------- | -------------------------------------------------------------- |
-| **Flow**    | What happens when a user does this?       | click → handler → request → route → service → collection       |
-| **APIs**    | What exactly does it request?             | body, guards, DTO, the code it runs, every collection, callers |
-| **Timing**  | Where does the time go?                   | runtime spans only — no spans, no numbers, never an estimate   |
-| **Breaks**  | What else would a change here break?      | the graph walked backwards from every step                     |
-| **Tests**   | What would catch it if you broke it?      | which test files import the files this flow runs through       |
-| **Docs**    | What is this screen, in plain English?    | every action on the screen, written out with no jargon         |
-| **Changed** | What do my uncommitted edits put at risk? | `git status` crossed with the graph                            |
+| Tab             | The question                              | Where the answer comes from                                       |
+| --------------- | ----------------------------------------- | ----------------------------------------------------------------- |
+| **Docs**        | What does this action do, end to end?     | click → handler → request → route → service → collection          |
+| **Issues**      | What is already wrong in it?              | missing auth, tenant leaks, mass assignment, N+1, reads that wait |
+| **Performance** | Where does the time go?                   | runtime spans only — each step, and each query with its code      |
+| **Tests**       | What would catch it if you broke it?      | which test files import its files, and the cases still to write   |
+| **Changed**     | What do my uncommitted edits put at risk? | `git status` crossed with the graph                               |
+| **Breaks**      | What else would a change here break?      | the graph walked backwards from every step                        |
+| **Unused**      | What does nothing use?                    | files, exports, dependencies and endpoints nothing reaches        |
 
 **Breaks** is the one that changes how you work. A flow read on its own is
 quietly misleading: most of the chain is shared, and editing one service because
@@ -159,18 +159,14 @@ Breaks splits the same steps into "shared with other features" and "only this
 one uses", and keeps infrastructure — a toast hook, a cache, an audit trail —
 out of the way so the real findings are not competing with wallpaper.
 
-**Docs** is the tab to send to somebody else. It drops the selected action and
-describes the whole screen: a table of every control with the requests and
-tables beside it, then each action start to finish, then every collection with
-its schema and fields, then how those collections link to each other — read
-from a Mongoose `ref`, a Prisma `@relation`, a `$lookup`, or the naming
-convention, which is labelled a guess wherever it appears. Generated from the
-graph by template, with no model in the loop, so it cannot invent a step;
-**Copy as Markdown** gives you the same text for a wiki or a handover note.
-
-Knowing the links is what lets it warn you that a screen deleting a customer
-leaves the orders naming that customer pointing at nothing — a finding that is
-invisible from the screen, from the code it runs, and from every other tab.
+**Docs** is the action end to end: _At a glance_ first, one line per stage that
+opens in place, then only the stages the action has, with the rest named under
+_Not in this action_ and the reason. The request step carries the body, guards,
+DTO check, the code it runs and a `curl`; _Diagram_ shows the same steps as
+numbered cards. Generated from the graph by template, with no model in the
+loop, so it cannot invent a step; **Copy as Markdown** gives you the same text
+for a wiki or a handover note. Old `#tab=flow|apis|timing|queries` links still
+land in the right place.
 
 **Changed** needs no instrumentation and no tests, so it works on the first run:
 
@@ -181,7 +177,7 @@ high risk   1 changed file is used by 5 features; 5 of them have no test.
 An action that makes several requests is shown as a sequence, and the shapes are
 told apart rather than lumped together:
 
-| In your code                                              | What the APIs tab says                        |
+| In your code                                              | What the Docs tab says                        |
 | --------------------------------------------------------- | --------------------------------------------- |
 | `const a = await get(); post({ id: a.id })`               | needs the response from `GET …`               |
 | `post(…).then(() => put(…))`                              | only after `POST …` resolves                  |
@@ -197,7 +193,7 @@ Every `file:line` in every tab opens your editor (`?editor=vscode`, `cursor`,
 
 ---
 
-## Four more questions it answers
+## More questions it answers
 
 ```bash
 # "What is this file I'm reading?" — which features run through this line
@@ -211,6 +207,15 @@ flowlens doctor
 
 # "Write the docs for me" — a feature document in markdown
 flowlens flow orderform-submit-order --markdown > docs/submit-order.md
+
+# "What bugs does the code show?" — no auth, tenant leaks, N+1, with the line
+flowlens findings --fail-on high
+
+# "What does nothing use?" — files, exports, dependencies, endpoints
+flowlens unused
+
+# "What does this branch change about the app?" — markdown for a PR comment
+flowlens diff --base main
 ```
 
 `impact` is the one to reach for before a refactor: it reports the blast radius
@@ -270,12 +275,23 @@ prefix. `/api` is stripped from both sides by default; change it with
 | `flowlens where <file>:<line>`  | What is this code for? Features running through it. |
 | `flowlens impact <symbol>`      | If I change this, what breaks?                      |
 | `flowlens doctor [project]`     | Broken API calls, dead endpoints, shared writes.    |
+| `flowlens findings [project]`   | Bugs the code shows, each with the line to open.    |
+| `flowlens unused [project]`     | Files, folders, exports and deps nothing uses.      |
+| `flowlens diff --base main`     | What this branch changes about the app — for a PR.  |
 | `flowlens serve [project]`      | The dashboard.                                      |
+| `flowlens mcp [project]`        | The graph as tools for an AI assistant (MCP).       |
 | `flowlens init [project]`       | Detect the layout and write `flowlens.config.json`. |
+| `flowlens instrument [project]` | Set up runtime tracing: new files only, dev only.   |
 | `flowlens trace [project]`      | Merge recorded runtime spans into the graph.        |
 
 `[project]` defaults to the current directory, and `scan` works from any
 subdirectory of it. Add `--json` to any command for machine-readable output.
+
+`findings` and `diff` take `--fail-on high|medium|low` to fail a CI job. `serve`
+generates a new span-collection token on every run; `--token <t>` (or
+`$FLOWLENS_TOKEN`) fixes it, so a tracer URL saved in `.env.local` keeps
+working. To let an AI assistant query the graph:
+`claude mcp add flowlens -- npx -y @flowslens/cli mcp .`
 
 ---
 
@@ -331,8 +347,10 @@ project path, so `git status` after a scan is empty:
 | Windows | `%LOCALAPPDATA%\flowlens\Cache`                      |
 
 `scan` and `serve` both print the exact path. `FLOWLENS_CACHE` moves it.
-`flowlens init` is the one command that writes to your project, because writing
-a config file is what you asked it to do.
+Two commands write to your project, because writing is what you asked them to
+do: `flowlens init` writes a config file, and `flowlens instrument` adds the
+tracing files — new files only, printing the lines for files you already have
+rather than editing them.
 
 ---
 
@@ -341,7 +359,8 @@ a config file is what you asked it to do.
 Everything above is read from source, so a step means "this path _can_ run".
 Add [`@flowslens/runtime`](https://www.npmjs.com/package/@flowslens/runtime) to
 your app and a step becomes `confirmed` — it _did_ run, and here is how long it
-took. Entirely optional; the CLI works without it.
+took. Entirely optional; the CLI works without it. On a Next.js App Router app,
+`flowlens instrument .` sets it up for you (`--print` shows what it would write).
 
 ---
 

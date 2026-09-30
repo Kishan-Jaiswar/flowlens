@@ -42,7 +42,14 @@ work:
 | Per-feature views  | `core/flow/{api,insight,contract}` | The dashboard's tabs                     |
 | Table relations    | `core/analyzer/relations`          | Which collections link to which, and how |
 | Screen documents   | `core/flow/explain`                | One screen in plain English, no model    |
+| Action documents   | `core/flow/action`                 | One action stage by stage: the Docs tab  |
+| Query timing       | `core/flow/queries`                | Each query an action runs, with its code |
+| Test plans         | `core/flow/testplan`               | The cases to write, as `it.todo`s        |
+| Findings           | `core/flow/findings`               | Auth, tenant scope, mass assignment, N+1 |
+| Unused code        | `core/analyzer/unused`             | What no entry point reaches              |
 | Diff-scoped risk   | `core/impact/changed`              | What the working tree puts at risk       |
+| Branch diff        | `core/impact/diff`                 | Two graphs compared, for a PR comment    |
+| MCP server         | `cli/commands/mcp`                 | The graph as read-only assistant tools   |
 | Runtime tracer     | `runtime`                          | Record what actually ran                 |
 | Dependency engine  | `core/impact`                      | Walk the graph backwards                 |
 | Graph engine       | `core/graph`                       | Hold it, traverse it, serialise it       |

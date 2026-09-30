@@ -26,7 +26,7 @@ _already been built_, and they are worth more than any new feature.
       `index.html`, with `fetch` answering from a real scan of the example app —
       and the rendered DOM is asserted: layer order, per-layer colour classes,
       the flow list, escaping, and that a step is labelled by what it did rather
-      than by its node kind. Seven tests, not a full sweep of 660 lines, but the
+      than by its node kind. 35 tests, not a full sweep of 3,100 lines, but the
       labelling layer is where a wrong answer gets delivered confidently.
 
 ## Done — v1.0 (published)
@@ -101,7 +101,25 @@ _already been built_, and they are worth more than any new feature.
 - [x] **`actionProps` / `inputActionProps` config**, so a design system whose
       button is `onAction` is no longer invisible.
 
-## Next — v1.1
+Unreleased — on `main`, in the next release:
+
+- [x] **Seven dashboard tabs, none repeating another:** Docs (the action as a
+      list or a diagram — the old Flow and APIs tabs), Issues, Performance (the
+      old Timing and Queries, with each query's code), Tests (with the cases to
+      write as `it.todo`s), Changed, Breaks and Unused. Old tab links redirect.
+- [x] **`flowlens findings`** — routes with no auth check, queries missing the
+      tenant filter or taking it from the request, mass assignment, queries in
+      loops and reads that wait for each other, each with the line to open.
+      `--fail-on` for CI; the Issues tab shows the same list per action.
+- [x] **`flowlens unused`** — files, folders, exports and dependencies no entry
+      point reaches, imports that point at nothing, and endpoints no frontend
+      calls.
+- [x] **Next.js tracing in one line** — `@flowslens/runtime/next` `register()`,
+      `traceDb()` for the native MongoDB driver and `installServerTracing()`,
+      with `flowlens instrument` writing the files. `serve --token` fixes the
+      span-collection token so a URL saved in `.env.local` survives a restart.
+
+## Next
 
 - [ ] **Prove the tracer against a real database.** HTTP and method spans are
       now proven live, end to end. What is left is Mongo: wire
@@ -138,8 +156,10 @@ Still open here, and worth stating precisely because parts of it are done:
 The Breaks tab covers the "what else depends on this" half of this milestone.
 What is left below is the part that needs either spans or a rule engine.
 
-- [ ] **N+1 detection.** A trace where one request produces _n_ similar queries.
-      Cheap to detect once spans exist, and immediately actionable.
+- [x] **N+1 detection, from source.** A query inside a loop, and independent
+      reads awaited one after another, are `flowlens findings`.
+- [ ] **N+1 detection, from spans.** A trace where one request produces _n_
+      similar queries — catches the loops the source hides behind a helper.
 - [x] **API contract drift** for NestJS DTOs — payload keys no DTO accepts, and
       declared fields the frontend never sends.
 - [ ] **Contract drift for Zod and Yup schemas**, which is how most Next.js
@@ -150,8 +170,8 @@ What is left below is the part that needs either spans or a rule engine.
       ordinary code and typing it would be guesswork.
 - [ ] **Guard semantics.** A guard is named, not read: which role or scope it
       requires is still invisible.
-- [ ] **Query shape.** Collection and operation, but not the filter, the
-      projection, or whether a loop makes it an N+1.
+- [ ] **Query shape.** Collection and operation, but not the filter or the
+      projection. (Whether a loop makes it an N+1 is now read.)
 - [ ] **Next.js `middleware.ts`**, which runs for matching routes and is not
       read at all.
 - [ ] **Chains through a global store.** The `useEffect` chain is resolved
@@ -160,7 +180,7 @@ What is left below is the part that needs either spans or a rule engine.
 - [ ] **Architecture rules.** Assert "controllers must not touch models
       directly" and fail CI when a new edge violates it.
 - [ ] **Feature health.** Error rate and p95 per flow, from the same spans. The
-      Timing tab now shows mean own-time per step; percentiles and error rates
+      Performance tab now shows mean own-time per step and per query; percentiles and error rates
       need the sink to record outcomes, not just durations.
 
 ## v1.4 — Chrome DevTools panel
