@@ -101,7 +101,7 @@ _already been built_, and they are worth more than any new feature.
 - [x] **`actionProps` / `inputActionProps` config**, so a design system whose
       button is `onAction` is no longer invisible.
 
-Unreleased — on `main`, in the next release:
+## Done — v1.2 (published)
 
 - [x] **Seven dashboard tabs, none repeating another:** Docs (the action as a
       list or a diagram — the old Flow and APIs tabs), Issues, Performance (the
@@ -138,7 +138,7 @@ Unreleased — on `main`, in the next release:
       branch introduces. `--fail-on` and a GitHub Actions workflow
       (`docs/ci/flowlens-pr.yml`) make it the CI story.
 
-## v1.2 — more of the stack
+## More of the stack
 
 - [x] PostgreSQL/MySQL via Prisma
 - [ ] TypeORM, Sequelize and Drizzle adapters

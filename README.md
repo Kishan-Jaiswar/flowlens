@@ -23,11 +23,7 @@ codebase:
 
 ## Project status
 
-**v1.1.2, published on npm as `@flowslens/*`.** `main` is ahead of it: `unused`,
-`diff`, `mcp`, `findings`, Next.js tracing and the seven-tab dashboard below are
-in the next release, and until then run from a checkout (see
-[From source](#from-source)). The [changelog](CHANGELOG.md) lists them under
-_Unreleased_. Honest summary of what is and is not proven:
+**v1.2.0, published on npm as `@flowslens/*`.** Honest summary of what is and is not proven:
 
 |                        | State                                                                                                                                                                                                                         |
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
