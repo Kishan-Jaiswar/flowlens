@@ -191,6 +191,11 @@ import('http://127.0.0.1:4177/__flowlens/browser.js?token=…').then((m) =>
 );
 ```
 
+The token changes every time the dashboard starts. If the endpoint lives in a
+file — `NEXT_PUBLIC_FLOWLENS_SPANS` in `.env.local`, as `flowlens instrument`
+sets up — start the dashboard with a fixed one so the URL keeps working:
+`flowlens serve . --token flowlens-dev` (or `FLOWLENS_TOKEN=flowlens-dev`).
+
 ---
 
 ## Then: record and merge

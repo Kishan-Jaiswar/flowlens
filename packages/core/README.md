@@ -202,6 +202,24 @@ if (broken.length > 0) {
 }
 ```
 
+For the bugs `flowlens findings` reports, `projectFindings` returns them most
+severe first, each with the line, why it matters and the fix:
+
+```js
+import { projectFindings, scan } from '@flowslens/core';
+
+const { graph } = scan({ root: '.' });
+const high = projectFindings(graph).findings.filter(
+  (f) => f.severity === 'high',
+);
+
+for (const f of high) console.error(`${f.at.file}:${f.at.line}  ${f.title}`);
+if (high.length > 0) process.exitCode = 1;
+```
+
+The CLI does the same with `flowlens findings --fail-on high`, and
+`flowlens diff --base main --fail-on high` fails only on issues the branch adds.
+
 ---
 
 ## What the graph contains
@@ -255,6 +273,14 @@ scanned graph, which is what turns `static` into `confirmed`.
 | `detectStack` / `stackSummary`                             | Frameworks and versions, from the manifests.                          |
 | `loadPrismaSchema`                                         | Prisma models and their table names.                                  |
 | `findBrokenCalls`, `findSharedWrites`, `findDeadEndpoints` | Findings.                                                             |
+| `projectFindings`                                          | Bugs the code shows: no auth, tenant leaks, mass assignment, N+1.     |
+| `projectUnused`                                            | Files, exports, dependencies and endpoints nothing uses.              |
+| `diffGraphs` / `introducesAtLeast`                         | What a branch changes about the app, and whether it adds an issue.    |
+| `explainAction` / `renderActionDocument`                   | One action, stage by stage — the dashboard's Docs tab.                |
+| `explainScreen` / `renderScreenDocument`                   | A whole screen in plain English.                                      |
+| `actionQueries`                                            | Every database query one action runs, with its code and timing.       |
+| `planTests`                                                | The test cases to write for an action.                                |
+| `collectionRelations`                                      | Which collections link to which, and how that is known.               |
 | `linkDataLineage`                                          | `state → payload → DTO → collection`.                                 |
 | `renderFlowTree`, `renderFeatureDocument`                  | Text and markdown output.                                             |
 | `mergeRuntimeTrace`                                        | Fold recorded spans into a scanned graph.                             |

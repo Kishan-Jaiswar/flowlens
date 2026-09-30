@@ -23,8 +23,11 @@ codebase:
 
 ## Project status
 
-**v1.1.1, published on npm as `@flowslens/*`.** Honest summary of what is and
-is not proven:
+**v1.1.2, published on npm as `@flowslens/*`.** `main` is ahead of it: `unused`,
+`diff`, `mcp`, `findings`, Next.js tracing and the seven-tab dashboard below are
+in the next release, and until then run from a checkout (see
+[From source](#from-source)). The [changelog](CHANGELOG.md) lists them under
+_Unreleased_. Honest summary of what is and is not proven:
 
 |                        | State                                                                                                                                                                                                                         |
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -33,7 +36,7 @@ is not proven:
 | Operating systems      | Windows, macOS and Linux: unit suite, every CLI command, and a from-scratch launcher run, all three in CI                                                                                                                     |
 | Runtime tracing        | **Proven live for HTTP and method spans**: a real server, real sockets, a real trace file, merged into a real scan and asserted `confirmed`. The Mongoose plugin is still driven by fakes — a real database is the last piece |
 | Stacks read            | React/Next, NestJS/Express, Mongoose, the MongoDB driver and Prisma. Vue, Svelte, TypeORM, GraphQL and raw SQL are not read yet, and `flowlens stack` tells you so before you spend the afternoon                             |
-| Test suite             | 540 tests across 23 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                                                     |
+| Test suite             | 642 tests across 31 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                                                     |
 
 `docs/ROADMAP.md` leads with what is missing rather than what is planned.
 
@@ -462,6 +465,7 @@ scanned in 10.7s      339 URL constants resolved
 | `flowlens where <file>:<line>`  | What is this code for? Features running through it. |
 | `flowlens impact <symbol>`      | If I change this, what breaks?                      |
 | `flowlens doctor [project]`     | Broken API calls, dead endpoints, shared writes.    |
+| `flowlens findings [project]`   | Bugs the code shows, each with the line to open.    |
 | `flowlens trace [project]`      | Merge recorded runtime spans into the graph.        |
 | `flowlens serve [project]`      | The dashboard.                                      |
 | `flowlens instrument [project]` | Set up runtime tracing: new files only, dev only.   |
@@ -475,6 +479,28 @@ Add `--json` to any command to get machine-readable output.
 is piped or scripted (`--open` and `--no-open` override that). If port 4177 is
 busy it moves to the next free one and tells you — unless you asked for a
 specific `--port`, in which case a busy port is an error rather than a surprise.
+
+### What is already wrong here
+
+```bash
+flowlens findings
+```
+
+The bugs the graph and the source can show between them, most severe first,
+each with the line to open, why it matters in this code, and what to change:
+
+| Finding                       | What it means                                                           |
+| ----------------------------- | ----------------------------------------------------------------------- |
+| No auth check                 | A route with no auth check in front of it; high when it writes.         |
+| Missing tenant filter         | A query that forgets the field the rest of the project scopes by.       |
+| Tenant taken from the request | The scoping field read from the body or query, where anyone can set it. |
+| Mass assignment               | The request body written to a collection as it arrived.                 |
+| N+1                           | A query inside a loop.                                                  |
+| Reads that wait               | Independent awaits run one after another instead of together.           |
+
+`--fail-on high` (or `medium`, `low`) exits 1 when a finding at that severity
+exists, for CI; `--json` gives the full list. The Issues tab in the dashboard
+shows the same findings, filtered to the action you have open.
 
 ### Ask your AI assistant, answered from the graph
 
@@ -773,6 +799,14 @@ what they know instead — otherwise any page in your browser could forge spans,
 and a forged span is worse than a missing one, because merged into the graph it
 reads as `confirmed`.
 
+The token is new on every run, so a URL saved in a file — the
+`NEXT_PUBLIC_FLOWLENS_SPANS` line `flowlens instrument` suggests for `.env.local` —
+stops working the next time the dashboard starts. Fix it instead:
+
+```bash
+flowlens serve ./my-app --token flowlens-dev   # or FLOWLENS_TOKEN=flowlens-dev
+```
+
 The tracer is served by the dashboard, so there is no file to copy into your
 project. Spans append to a machine-local cache — never to your repository — and
 `flowlens serve` prints the exact path. Then:
@@ -792,18 +826,42 @@ node packages/cli/bin/flowlens.mjs trace examples/crud --trace /tmp/demo-trace.j
 
 ## The dashboard's seven tabs
 
-`flowlens serve` opens one feature at a time and asks seven questions about it,
-in the order a developer actually asks them. Each tab carries its own headline
-number, so the worrying one is visible before you open it:
+`flowlens serve` opens one action at a time and asks seven questions, none
+repeating another. Each tab carries its own headline number, so the worrying
+one is visible before you open it:
 
 ```text
-Flow · 24   APIs · 1   Timing · no runs   Breaks · 2   Tests · none   Docs · 6 actions   Changed · 5
+Docs · 7 steps   Issues · 2   Performance · not run   Tests · none   Changed · 5   Breaks · 3   Unused · 14
 ```
 
-**Docs** is the one you can forward to somebody who does not read code. The
-other six describe one action to a developer; this one describes the whole
-screen the action sits on, in sentences with no jargon in them — this is real
-output, not an illustration:
+| Tab             | The question                              | Where the answer comes from                                          |
+| --------------- | ----------------------------------------- | -------------------------------------------------------------------- |
+| **Docs**        | What does this action do, end to end?     | The static graph, stage by stage — as a list, or as a diagram        |
+| **Issues**      | What is already wrong in it?              | `flowlens findings`, narrowed to this action                         |
+| **Performance** | Where does the time go?                   | Runtime spans only: each step, and each database query with its code |
+| **Tests**       | What would catch it if you broke it?      | Which test files import its files, and the cases still to write      |
+| **Changed**     | What do my uncommitted edits put at risk? | `git status` crossed with the graph — project-wide, not per action   |
+| **Breaks**      | What else would a change here break?      | The graph walked backwards from every step of this action            |
+| **Unused**      | What does nothing use?                    | `flowlens unused` — project-wide                                     |
+
+Links to the tabs this set replaced — `#tab=flow`, `apis`, `timing`,
+`queries` — still land in the right place.
+
+**Docs** opens with _At a glance_: one line per stage, each opening in place to
+its detail, all closed at first. Only the stages the action has are numbered;
+the rest are listed under _Not in this action_ with the reason, so "no auth
+check" is still stated rather than silently missing. _Diagram_ shows the same
+steps as numbered cards, with the way back to the screen as its own lane.
+**Copy as Markdown** gives you the document for a wiki or a handover note.
+
+**Performance** says how many runs a ranking rests on, and warns when the
+slowest step was measured fewer than three times. **Tests** lists the cases to
+write, read off the action document, with an `it.todo` skeleton to paste.
+
+The screen an action sits on has a document of its own, for somebody who does
+not read code: `GET /api/screen?name=<screen>&format=markdown` on the running
+dashboard. It describes every action on the screen in sentences with no jargon
+in them — this is real output, not an illustration:
 
 ```text
 # Login
@@ -862,8 +920,8 @@ in the `orders` schema, the request, or any other tab says so:
 
 Flowslens reads those links from a declared Mongoose `ref`, a Prisma
 `@relation`, a `$lookup`/`.populate()` that actually follows one, or — labelled
-as a guess, every time — the naming convention. That is also what lets the tab
-say something no other view can:
+as a guess, every time — the naming convention. That is also what lets the
+document say something no other view can:
 
 ```text
 ## Worth knowing
@@ -875,8 +933,8 @@ say something no other view can:
 
 Every sentence is a template over a fact already in the graph — no model is
 involved, and nothing is sent anywhere — so it says only what the code says and
-reads the same on every run. **Copy as Markdown** hands you the same document
-for a wiki, a handover note or a release ticket.
+reads the same on every run. Drop `&format=markdown` for the same document as
+JSON.
 
 **Changed** is the one to reach for mid-edit. It ignores the selected feature and
 asks the project-wide question instead — what have I touched, and what runs
@@ -892,13 +950,14 @@ Features affected, most-touched first
     DELETE /products/:param             app/api/products/[id]/route.ts:38
 ```
 
-Unlike Timing it needs no instrumentation, and unlike Tests it says something
+Unlike Performance it needs no instrumentation, and unlike Tests it says something
 useful on a project with none — so it works from the first minute. Every
 `file:line` in every tab opens your editor (`?editor=vscode`, `cursor`, `idea`,
 `zed`, …).
 
-**APIs** is the seam in full — one request, everything about it, which ends the
-clicking-around it used to take to answer "what does this endpoint actually do":
+**The request step** in Docs is the seam in full — one request, everything
+about it, which ends the clicking-around it used to take to answer "what does
+this endpoint actually do". It is what the APIs tab used to show:
 
 ```text
 POST /auth/verify-otp          matched   file-route   static
@@ -989,15 +1048,6 @@ because agreeing about a body is a fact about an endpoint. It needs a declared
 shape — NestJS DTO classes today — so a Next.js route that validates with Zod
 reports "no DTO to check" rather than guessing, and a body built from a variable
 rather than an object literal is reported as unreadable rather than as absent.
-
-| Tab         | The question                                                | Where the answer comes from                                                     |
-| ----------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| **Flow**    | What happens when a user does this?                         | The static graph: click → handler → request → route → service → collection      |
-| **APIs**    | What exactly does it request, and what happens server-side? | The seam in full: body, guards, DTO, handlers, collections, other callers       |
-| **Timing**  | Where does the time go?                                     | Runtime spans only. No spans, no numbers — it tells you how to get them instead |
-| **Breaks**  | What else would a change here break?                        | The graph walked backwards from every step of this flow                         |
-| **Tests**   | What would catch it if you broke it?                        | Which test files import the files this flow runs through                        |
-| **Changed** | What do my uncommitted edits put at risk?                   | `git status` crossed with the graph — project-wide, not per feature             |
 
 **Breaks** is the one that changes how you work. A flow read on its own is
 quietly misleading: it shows a chain as though it belonged to this feature, when
