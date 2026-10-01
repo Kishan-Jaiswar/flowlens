@@ -80,6 +80,20 @@ export {
   type StageKey,
 } from './flow/action.js';
 export {
+  actionDecisions,
+  renderDecisionTree,
+  type ActionDecisions,
+  type ActionDecisionsOptions,
+  type DecisionBranch,
+  type DecisionEnd,
+  type DecisionGroup,
+  type DecisionNode,
+  type DecisionQuestion,
+  type DecisionSide,
+  type DecisionStep,
+  type DecisionTry,
+} from './flow/decisions.js';
+export {
   planTests,
   testFileFor,
   type PlannedTest,

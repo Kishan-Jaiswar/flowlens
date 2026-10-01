@@ -288,24 +288,7 @@ export function explainAction(
   flow: FeatureFlow,
   options: ExplainActionOptions = {},
 ): ActionDoc {
-  const reader = options.reader ?? new SourceReader(graph);
-  const ctx: Ctx = {
-    graph,
-    flow,
-    reader,
-    apis: flowApis(graph, flow),
-    flows: resolveFlows(graph, { includeLocalOnly: true }),
-    front: [],
-    calls: [],
-    frontSchemas: [],
-    labels: new Map(),
-    limits: new Set(),
-  };
-
-  // Each reading is independent: a file that fails to parse costs its stage,
-  // not the document.
-  safely(ctx, () => locateEntry(ctx));
-  safely(ctx, () => locateCalls(ctx));
+  const ctx = locatedContext(graph, flow, options.reader ?? new SourceReader(graph));
   safely(ctx, () => {
     if (ctx.formFn) ctx.labels = fieldLabels(ctx.formFn);
   });
@@ -376,6 +359,68 @@ export function explainAction(
         'library or a generated client shows up as the call, not as what it does.',
     ],
   };
+}
+
+/**
+ * Where an action's code lives: the handlers the click runs, each request's
+ * call site with the hook around it, and the server functions that answer.
+ *
+ * Shared with the decision tree (`decisions.ts`), which walks the same
+ * functions statement by statement instead of stage by stage — two readers
+ * finding the handler two ways would sooner or later disagree about which
+ * function the button runs.
+ */
+export interface LocatedAction {
+  front: Array<{ name: string; fn: Functionish; role: 'child' | 'handler' | 'request' }>;
+  calls: Array<{
+    detail: ApiCallDetail;
+    call?: CallExpression;
+    fn?: Functionish;
+    hook?: { name: string; fn: Functionish; options?: Node };
+    backendFns: Array<{ label: string; fn: Functionish; at: SourcePoint }>;
+  }>;
+  /** The child component whose own handler runs before the prop it was given. */
+  child?: { component: string; fn: Functionish; handler?: Functionish };
+  /** `form.handleSubmit(onSubmit)` on the element: a library validates before the handler. */
+  entryExpression?: Node;
+  limits: string[];
+}
+
+export function locateAction(
+  graph: FlowGraph,
+  flow: FeatureFlow,
+  options: ExplainActionOptions = {},
+): LocatedAction {
+  const ctx = locatedContext(graph, flow, options.reader ?? new SourceReader(graph));
+  const expression =
+    ctx.entryOpening && flow.event ? attribute(ctx.entryOpening, flow.event) : undefined;
+  return {
+    front: ctx.front.map(({ name, fn, role }) => ({ name, fn, role })),
+    calls: ctx.calls,
+    ...(ctx.child ? { child: ctx.child } : {}),
+    ...(expression ? { entryExpression: expression } : {}),
+    limits: [...ctx.limits],
+  };
+}
+
+function locatedContext(graph: FlowGraph, flow: FeatureFlow, reader: SourceReader): Ctx {
+  const ctx: Ctx = {
+    graph,
+    flow,
+    reader,
+    apis: flowApis(graph, flow),
+    flows: resolveFlows(graph, { includeLocalOnly: true }),
+    front: [],
+    calls: [],
+    frontSchemas: [],
+    labels: new Map(),
+    limits: new Set(),
+  };
+  // Each reading is independent: a file that fails to parse costs its stage,
+  // not the document.
+  safely(ctx, () => locateEntry(ctx));
+  safely(ctx, () => locateCalls(ctx));
+  return ctx;
 }
 
 function safely(ctx: Ctx, run: () => void): void {

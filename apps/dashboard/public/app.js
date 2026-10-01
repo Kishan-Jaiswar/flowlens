@@ -73,6 +73,10 @@ const state = {
   queries: null,
   queriesFor: null,
   queriesLoading: false,
+  /** The Decisions tab's tree for the selected action, and which action it is for. */
+  decisions: null,
+  decisionsFor: null,
+  decisionsLoading: false,
   /** Project-wide findings, read once per scan. */
   findings: null,
   /** Which severities and kinds the Issues tab shows for the rest of the project. */
@@ -83,15 +87,21 @@ const state = {
 /**
  * The tabs, in the order the user asked for them.
  *
- * Five, each answering one question and none repeating another: Docs is the
+ * Each answers one question and none repeats another: Docs is the
  * whole action (as a list or as a diagram — the old Flow tab — with the
  * request details the old APIs tab had folded into its request step),
- * Performance is where the time goes (steps, and each database query with its
+ * Decisions is every way it can go — the checks and branches from the click
+ * to the database and back — Performance is where the time goes (steps, and each database query with its
  * code), then Tests, Changed and Breaks. Links to the tabs that were merged
  * away still land in the right place (see `LEGACY_TABS`).
  */
 const TABS = [
   ['docs', 'Docs', 'This action end to end, as a list or a diagram'],
+  [
+    'decisions',
+    'Decisions',
+    'Every way this action can go: each check, branch and query, from the click to the database and back',
+  ],
   [
     'issues',
     'Issues',
@@ -129,6 +139,7 @@ const el = {
   tabs: document.getElementById('tabs'),
   panels: {
     docs: document.getElementById('panel-docs'),
+    decisions: document.getElementById('panel-decisions'),
     issues: document.getElementById('panel-issues'),
     perf: document.getElementById('panel-perf'),
     impact: document.getElementById('panel-impact'),
@@ -430,6 +441,16 @@ function tabBadge(id) {
     return { text: `${found} steps`, tone: 'neutral' };
   }
 
+  if (id === 'decisions') {
+    if (state.decisionsLoading) return { text: '…', tone: 'neutral' };
+    const tree = state.decisions;
+    if (!tree || tree.error || tree.flowId !== state.selectedFlow?.id) return undefined;
+    const count = tree.counts.decisions;
+    return count === 0
+      ? { text: 'straight', tone: 'muted' }
+      : { text: `${count} ${count === 1 ? 'branch' : 'branches'}`, tone: 'neutral' };
+  }
+
   if (id === 'issues') {
     if (!state.findings) return { text: '…', tone: 'neutral' };
     if (state.findings.error) return undefined;
@@ -508,6 +529,7 @@ function showTab(id) {
     button.setAttribute('aria-selected', String(active));
   }
 
+  if (state.tab === 'decisions') openDecisionsForSelection();
   if (state.tab === 'impact') renderImpact();
   if (state.tab === 'issues') renderIssues();
   if (state.tab === 'tests') renderTests();
@@ -2573,6 +2595,966 @@ async function loadQueries(flowId) {
     renderTabs();
     if (state.tab === 'perf') renderPerf();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Decisions — every way the action can go
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetched when the tab is opened, like the document: it reads source files on
+ * the server, and clicking through the list should not pay for trees nobody
+ * looks at.
+ */
+function openDecisionsForSelection() {
+  const id = state.selectedFlow?.id ?? null;
+  if (id && id !== state.decisionsFor) {
+    void loadDecisions(id);
+    return;
+  }
+  renderDecisions();
+}
+
+async function loadDecisions(flowId) {
+  state.decisionsFor = flowId;
+  state.decisions = null;
+  state.decisionsLoading = true;
+  // Folds belong to one action's chart; a new action starts from the defaults.
+  fc.folds = new Map();
+  fc.fitNext = true;
+  renderTabs();
+  renderDecisions();
+  try {
+    const tree = await getJson(`/api/decisions?flow=${encodeURIComponent(flowId)}`);
+    if (state.decisionsFor !== flowId) return;
+    state.decisions = tree;
+  } catch (error) {
+    if (state.decisionsFor !== flowId) return;
+    state.decisions = { error: String(error.message ?? error) };
+  } finally {
+    if (state.decisionsFor === flowId) state.decisionsLoading = false;
+    renderTabs();
+    if (state.tab === 'decisions') renderDecisions();
+  }
+}
+
+/**
+ * The chart's view settings, kept across re-renders of the same action.
+ *
+ * `folds` is keyed by each box's position in the tree, so opening a helper and
+ * then toggling the code lines does not snap it shut again.
+ */
+const fc = {
+  zoom: 1,
+  showCalls: false,
+  showCode: false,
+  folds: new Map(),
+  /** Fit a chart wider than the screen the first time it is drawn. */
+  fitNext: true,
+};
+
+/** The view toggles outlive a reload: a reader who wants the code wants it every time. */
+const FC_SETTINGS = 'flowlens.decisions.view';
+try {
+  const saved = JSON.parse(localStorage.getItem(FC_SETTINGS) ?? '{}');
+  fc.showCalls = saved.showCalls === true;
+  fc.showCode = saved.showCode === true;
+} catch {
+  // A private window or a corrupt value: the defaults are fine.
+}
+function saveFcSettings() {
+  try {
+    const { showCalls, showCode } = fc;
+    localStorage.setItem(FC_SETTINGS, JSON.stringify({ showCalls, showCode }));
+  } catch {
+    // Not persisted; the toggle still works for this visit.
+  }
+}
+
+/** Spacing, in pixels at 100%. */
+const FC = {
+  gapY: 30,
+  gapX: 44,
+  framePad: 16,
+  headGap: 12,
+  branchDrop: 30,
+  merge: 18,
+};
+
+function renderDecisions() {
+  const panel = el.panels.decisions;
+  if (!panel) return;
+  const flow = state.selectedFlow;
+  if (!flow) {
+    panel.innerHTML = `<div class="empty-state"><h3>Nothing selected</h3><p>Select an action on the left.</p></div>`;
+    return;
+  }
+  const tree = state.decisions;
+  if (state.decisionsLoading || !tree || (tree.flowId && tree.flowId !== flow.id))
+    return panelLoading(panel, 'every way this action can go');
+  if (tree.error) return panelError(panel, tree);
+
+  const { decisions, outcomes, queries, requests } = tree.counts;
+  const summary =
+    decisions === 0
+      ? answer(
+          'neutral',
+          'This action runs straight through',
+          'No `if`, `switch` or early return decides anything along the way.',
+        )
+      : answer(
+          'neutral',
+          `${decisions} ${decisions === 1 ? 'place decides' : 'places decide'} which way this action goes`,
+          `It can end ${outcomes} ${outcomes === 1 ? 'way' : 'ways'}` +
+            (requests ? `, sends ${requests} ${requests === 1 ? 'request' : 'requests'}` : '') +
+            (queries ? ` and runs ${queries} ${queries === 1 ? 'query' : 'queries'}` : '') +
+            '. Read it top to bottom: at each ◆ the arrows say which answer leads where.',
+        );
+
+  const check = (key, label, on) =>
+    `<label class="fc-check"><input type="checkbox" data-fc-option="${key}"${on ? ' checked' : ''}> ${label}</label>`;
+  const toolbar =
+    `<div class="fc-toolbar">` +
+    `<div class="fc-group-buttons" role="group" aria-label="Zoom">` +
+    `<button class="button" data-fc="out" title="Zoom out">−</button>` +
+    `<button class="button fc-zoom" data-fc="reset" title="Actual size">${Math.round(fc.zoom * 100)}%</button>` +
+    `<button class="button" data-fc="in" title="Zoom in">+</button>` +
+    `<button class="button" data-fc="fit" title="Fit the width of the panel">Fit</button>` +
+    `</div>` +
+    `<div class="fc-group-buttons">` +
+    check('showCode', 'Show code', fc.showCode) +
+    check('showCalls', 'Show helper calls', fc.showCalls) +
+    `</div>` +
+    `<div class="fc-group-buttons">` +
+    `<button class="button" data-fc="open">Expand all</button>` +
+    `<button class="button" data-fc="close">Collapse helpers</button>` +
+    `<button class="button" data-fc="copy">Copy as text</button>` +
+    `</div></div>`;
+
+  const legend =
+    `<div class="fc-legend">` +
+    `<span class="fc-key"><i class="fc-swatch shape-pill"></i>Start / end</span>` +
+    `<span class="fc-key"><i class="fc-swatch shape-box"></i>Step</span>` +
+    `<span class="fc-key"><i class="fc-swatch shape-diamond"></i>Decision</span>` +
+    `<span class="fc-key"><i class="fc-swatch shape-db"></i>Database</span>` +
+    `<span class="fc-key"><i class="fc-swatch side-browser"></i>Browser</span>` +
+    `<span class="fc-key"><i class="fc-swatch side-server"></i>Server</span>` +
+    `<span class="fc-key"><i class="fc-swatch side-external"></i>Leaves the app</span>` +
+    `</div>`;
+
+  const limits = tree.limits.length
+    ? `<details class="dt-limits"><summary>What this cannot see</summary><ul>${tree.limits
+        .map((limit) => `<li>${escapeHtml(limit)}</li>`)
+        .join('')}</ul></details>`
+    : '';
+
+  panel.innerHTML =
+    summary +
+    `<div class="fc-bar">${toolbar}${legend}</div>` +
+    `<div class="fc-scroll"><div class="fc-sizer"><div class="fc-stage"></div></div></div>` +
+    limits;
+
+  drawFlowchart(panel, tree);
+
+  for (const button of panel.querySelectorAll('[data-fc]')) {
+    button.addEventListener('click', () => flowchartAction(panel, tree, flow, button));
+  }
+  for (const input of panel.querySelectorAll('[data-fc-option]')) {
+    input.addEventListener('change', () => {
+      fc[input.dataset.fcOption] = input.checked;
+      saveFcSettings();
+      drawFlowchart(panel, tree);
+    });
+  }
+}
+
+function flowchartAction(panel, tree, flow, button) {
+  const action = button.dataset.fc;
+  if (action === 'copy') return void copyDecisionText(flow.id, button);
+  if (action === 'in' || action === 'out' || action === 'reset' || action === 'fit') {
+    const stage = panel.querySelector('.fc-stage');
+    const scroll = panel.querySelector('.fc-scroll');
+    const width = Number(stage?.dataset.width ?? 0);
+    if (action === 'in') fc.zoom = Math.min(1.6, fc.zoom + 0.1);
+    if (action === 'out') fc.zoom = Math.max(0.3, fc.zoom - 0.1);
+    if (action === 'reset') fc.zoom = 1;
+    if (action === 'fit' && width > 0 && scroll)
+      fc.zoom = Math.max(0.3, Math.min(1, (scroll.clientWidth - 8) / width));
+    fc.zoom = Math.round(fc.zoom * 100) / 100;
+    applyZoom(panel);
+    return;
+  }
+  if (action === 'open' || action === 'close') {
+    for (const key of collectGroupKeys(tree.nodes)) {
+      fc.folds.set(key.key, action === 'open' ? true : key.always);
+    }
+    drawFlowchart(panel, tree);
+  }
+}
+
+async function copyDecisionText(flowId, button) {
+  try {
+    const response = await fetch(
+      apiUrl(`/api/decisions?flow=${encodeURIComponent(flowId)}&format=text`),
+    );
+    await navigator.clipboard.writeText(await response.text());
+    button.textContent = 'Copied';
+  } catch {
+    button.textContent = 'Could not copy';
+  }
+  setTimeout(() => (button.textContent = 'Copy as text'), 1500);
+}
+
+function applyZoom(panel) {
+  const stage = panel.querySelector('.fc-stage');
+  const sizer = panel.querySelector('.fc-sizer');
+  if (!stage || !sizer) return;
+  const width = Number(stage.dataset.width ?? 0);
+  const height = Number(stage.dataset.height ?? 0);
+  stage.style.transform = `scale(${fc.zoom})`;
+  sizer.style.width = `${Math.ceil(width * fc.zoom)}px`;
+  sizer.style.height = `${Math.ceil(height * fc.zoom)}px`;
+  const label = panel.querySelector('.fc-zoom');
+  if (label) label.textContent = `${Math.round(fc.zoom * 100)}%`;
+}
+
+/** Every group's fold key, and whether "Collapse helpers" leaves it open. */
+function collectGroupKeys(nodes, path = 'n', out = []) {
+  nodes.forEach((node, index) => {
+    const key = `${path}.${index}`;
+    if (node.type === 'group') {
+      // A helper the request is made from stays open, or folding it would hide the request.
+      out.push({
+        key,
+        always:
+          node.kind === 'request' ||
+          node.kind === 'unlinked' ||
+          path === 'n' ||
+          containsRequest(node.nodes),
+      });
+      collectGroupKeys(node.nodes, key, out);
+    } else if (node.type === 'decision') {
+      node.branches.forEach((branch, b) => collectGroupKeys(branch.nodes, `${key}.b${b}`, out));
+    } else if (node.type === 'try') {
+      collectGroupKeys(node.nodes, `${key}.t`, out);
+      if (node.catch) collectGroupKeys(node.catch.nodes, `${key}.c`, out);
+      if (node.finally) collectGroupKeys(node.finally, `${key}.f`, out);
+    }
+  });
+  return out;
+}
+
+function containsRequest(nodes) {
+  return nodes.some(
+    (node) =>
+      (node.type === 'group' && (node.kind === 'request' || containsRequest(node.nodes))) ||
+      (node.type === 'decision' && node.branches.some((branch) => containsRequest(branch.nodes))) ||
+      (node.type === 'try' &&
+        (containsRequest(node.nodes) || containsRequest(node.catch?.nodes ?? []))),
+  );
+}
+
+/** A query that changes data, or a request, somewhere inside. */
+function writesData(node) {
+  const children = [
+    ...(node.nodes ?? []),
+    ...(node.branches ?? []).flatMap((branch) => branch.nodes),
+    ...(node.catch?.nodes ?? []),
+    ...(node.finally ?? []),
+  ];
+  return children.some(
+    (child) =>
+      (child.type === 'step' && child.kind === 'db' && child.effect !== 'read') ||
+      (child.type === 'group' && child.kind === 'request') ||
+      writesData(child),
+  );
+}
+
+// ---- building the chart ---------------------------------------------------
+
+/**
+ * The chart is laid out in two passes over a tree of blocks:
+ *
+ * - `measure` gives each block its size, its axis (the x the flow enters and
+ *   leaves on) and whether every path through it ends;
+ * - `place` puts it at an absolute position and records the boxes, frames
+ *   and arrows to draw.
+ *
+ * The boxes are real HTML (so text wraps, and file links work) measured after
+ * they are in the page; the arrows and diamonds are one SVG underneath.
+ */
+function drawFlowchart(panel, tree) {
+  const stage = panel.querySelector('.fc-stage');
+  if (!stage) return;
+  stage.innerHTML = '';
+  // Room to measure in: in a zero-width stage every box would shrink to its
+  // narrowest wrap and measure taller than it draws.
+  stage.style.width = '6000px';
+  stage.style.height = '6000px';
+  const nodesLayer = document.createElement('div');
+  nodesLayer.className = 'fc-nodes';
+  stage.appendChild(nodesLayer);
+
+  const root = buildSeq(tree.nodes, 'n', 0, nodesLayer);
+  measure(root);
+  const margin = 24;
+  const out = { edges: [], frames: [], diamonds: [], labels: [] };
+  place(root, margin, margin, out);
+  const width = root.w + margin * 2;
+  const height = root.h + margin * 2;
+
+  stage.dataset.width = String(width);
+  stage.dataset.height = String(height);
+  stage.style.width = `${width}px`;
+  stage.style.height = `${height}px`;
+  stage.insertAdjacentHTML('afterbegin', flowchartSvg(out, width, height));
+  for (const label of out.labels) {
+    const tag = document.createElement('div');
+    tag.className = `fc-edge-label${label.tone ? ` tone-${label.tone}` : ''}`;
+    tag.textContent = label.text;
+    tag.style.left = `${label.x}px`;
+    tag.style.top = `${label.y}px`;
+    nodesLayer.appendChild(tag);
+  }
+  // The first drawing of an action fits the screen if it is wider than it;
+  // after that the reader's own zoom is kept.
+  const scroll = panel.querySelector('.fc-scroll');
+  if (fc.fitNext && scroll && scroll.clientWidth > 0) {
+    fc.zoom = width > scroll.clientWidth ? Math.max(0.45, (scroll.clientWidth - 8) / width) : 1;
+    fc.zoom = Math.round(fc.zoom * 100) / 100;
+    fc.fitNext = false;
+  }
+  applyZoom(panel);
+
+  for (const toggle of stage.querySelectorAll('[data-fc-toggle]')) {
+    toggle.addEventListener('click', (event) => {
+      if (event.target.closest('[data-editor-href]')) return;
+      const key = toggle.dataset.fcToggle;
+      fc.folds.set(key, toggle.dataset.open !== 'true');
+      drawFlowchart(panel, tree);
+    });
+  }
+}
+
+function buildSeq(nodes, path, depth, layer) {
+  const items = [];
+  // Helper calls are hidden by default — unless they are all an arm has, as
+  // in `delta > 0 ? addStock() : deductFefo()`, where they are the answer.
+  const onlyCalls = nodes.every((node) => node.type === 'step' && node.kind === 'call');
+  nodes.forEach((node, index) => {
+    if (node.type === 'step' && node.kind === 'call' && !fc.showCalls && !onlyCalls) return;
+    items.push(...buildBlock(node, `${path}.${index}`, depth, layer));
+  });
+  return { kind: 'seq', items };
+}
+
+function buildBlock(node, key, depth, layer) {
+  switch (node.type) {
+    case 'step':
+    case 'end':
+      return [{ kind: 'box', el: boxElement(node, layer), ends: node.type === 'end' }];
+    case 'decision': {
+      const branches = node.branches.map((branch, index) => ({
+        label: branch.label,
+        ends: branch.ends,
+        tone: branchTone(branch),
+        seq: emptyAware(buildSeq(branch.nodes, `${key}.b${index}`, depth, layer), layer),
+      }));
+      return [
+        {
+          kind: 'decision',
+          el: diamondElement(node, layer),
+          side: node.side,
+          branches,
+          fall: node.otherwise ?? null,
+        },
+      ];
+    }
+    case 'group': {
+      const defaultOpen =
+        node.kind === 'request' || node.kind === 'unlinked' || depth < 2 || writesData(node);
+      const open = fc.folds.has(key) ? fc.folds.get(key) : defaultOpen;
+      if (!open || node.nodes.length === 0) {
+        return [{ kind: 'box', el: foldedElement(node, key, layer), ends: false }];
+      }
+      return [
+        {
+          kind: 'frame',
+          el: frameHeadElement(node, key, layer),
+          frameClass: `kind-${node.kind} side-${node.side}`,
+          seq: buildSeq(node.nodes, key, depth + 1, layer),
+        },
+      ];
+    }
+    case 'try': {
+      const blocks = [
+        {
+          kind: 'try',
+          el: plainHead('Try', 'try', layer),
+          seq: buildSeq(node.nodes, `${key}.t`, depth, layer),
+          catch: node.catch
+            ? {
+                label: `if ${node.catch.label}`,
+                ends: node.catch.ends,
+                tone: 'bad',
+                seq: emptyAware(buildSeq(node.catch.nodes, `${key}.c`, depth, layer), layer),
+              }
+            : null,
+        },
+      ];
+      if (node.finally?.length) {
+        blocks.push({
+          kind: 'frame',
+          el: plainHead('Either way (finally)', 'finally', layer),
+          frameClass: 'kind-finally',
+          seq: buildSeq(node.finally, `${key}.f`, depth, layer),
+        });
+      }
+      return blocks;
+    }
+    default:
+      return [];
+  }
+}
+
+/** An arm with nothing in it still needs something to point the arrow at. */
+function emptyAware(seq, layer) {
+  if (seq.items.length > 0) return seq;
+  const el = document.createElement('div');
+  el.className = 'fc-node fc-plain';
+  el.textContent = 'nothing to show — plain code';
+  layer.appendChild(el);
+  return { kind: 'seq', items: [{ kind: 'box', el, ends: false }] };
+}
+
+/** Red for an arm that ends in a failure, so the unhappy paths stand out. */
+function branchTone(branch) {
+  const last = branch.nodes.at(-1);
+  if (!last || last.type !== 'end') return '';
+  const worst = Math.max(0, ...(last.statuses ?? []));
+  if (last.outcome === 'throw' || worst >= 400) return 'bad';
+  if (last.outcome === 'stop') return 'stop';
+  return '';
+}
+
+function endTone(node) {
+  const worst = Math.max(0, ...(node.statuses ?? []));
+  if (node.outcome === 'throw' || worst >= 500) return 'danger';
+  if (worst >= 400) return 'warn';
+  if (node.outcome === 'respond' && worst > 0) return 'ok';
+  return 'muted';
+}
+
+function codeLine(label, code) {
+  if (!fc.showCode || !code) return '';
+  const clean = (text) => text.replace(/\s+/g, '').toLowerCase();
+  if (clean(label) === clean(code)) return '';
+  return `<code class="fc-code">${escapeHtml(code)}</code>`;
+}
+
+function atLine(at) {
+  return at ? `<span class="fc-at">${fileRef(at.file, at.line, '', true)}</span>` : '';
+}
+
+function boxElement(node, layer) {
+  const el = document.createElement('div');
+  if (node.type === 'end') {
+    const status = node.statuses?.length ? node.statuses.join(' / ') : '';
+    const label = status ? statusWords(node) : node.label;
+    el.className = `fc-node fc-end tone-${endTone(node)} side-${node.side}`;
+    el.innerHTML =
+      (status ? `<span class="fc-status">${escapeHtml(status)}</span>` : '') +
+      `<div class="fc-body"><div class="fc-label">${escapeHtml(label)}</div>` +
+      `${node.outcome === 'stop' ? '' : codeLine(node.label, node.text)}${atLine(node.at)}</div>`;
+  } else {
+    const icon =
+      { trigger: '▶', db: '⛁', external: '⇢', guard: '⛨', ui: '◧', call: 'ƒ' }[node.kind] ?? '•';
+    const effect = node.effect
+      ? `<span class="fc-effect effect-${escapeHtml(node.effect)}">${escapeHtml(EFFECT_TILE[node.effect] ?? node.effect)}</span>`
+      : '';
+    el.className = `fc-node fc-step kind-${node.kind} side-${node.side}`;
+    el.innerHTML =
+      `<span class="fc-icon" aria-hidden="true">${icon}</span>` +
+      `<div class="fc-body"><div class="fc-label">${escapeHtml(node.label)}${effect}</div>` +
+      `${node.kind === 'trigger' ? '' : codeLine(node.label, node.text)}${atLine(node.at)}</div>`;
+  }
+  layer.appendChild(el);
+  return el;
+}
+
+/** Beside a status badge the number is already said: `422` + `Respond: Validation failed`. */
+function statusWords(node) {
+  const message = node.message ? `: ${node.message}` : '';
+  if (node.outcome === 'respond') return `Respond${message}`;
+  if (node.outcome === 'throw') return `Throw${message || ' an error'}`;
+  return `Return to the caller${message}`;
+}
+
+function diamondElement(node, layer) {
+  const el = document.createElement('div');
+  el.className = `fc-node fc-diamond-text side-${node.side}`;
+  el.innerHTML =
+    `<div class="fc-label">${escapeHtml(node.label)}</div>` +
+    codeLine(node.label, node.code) +
+    atLine(node.at);
+  el.title = node.code;
+  layer.appendChild(el);
+  return el;
+}
+
+function frameHeadElement(node, key, layer) {
+  const el = document.createElement('div');
+  el.className = `fc-frame-head kind-${node.kind} side-${node.side}`;
+  el.dataset.fcToggle = key;
+  el.dataset.open = 'true';
+  el.setAttribute('role', 'button');
+  el.tabIndex = 0;
+  const icon = { request: '⇄', loop: '↻', function: 'ƒ', unlinked: '⋯' }[node.kind] ?? 'ƒ';
+  const where = node.handledBy
+    ? `<span class="fc-at">answered by ${fileRef(node.handledBy.file, node.handledBy.line, '', true)}</span>`
+    : atLine(node.at);
+  el.innerHTML =
+    `<span class="fc-fold" aria-hidden="true">▾</span><span class="fc-icon">${icon}</span>` +
+    `<span class="fc-label">${escapeHtml(node.label)}</span>` +
+    (node.kind === 'request' || node.title === node.label ? '' : codeLine(node.label, node.title)) +
+    where;
+  layer.appendChild(el);
+  return el;
+}
+
+function foldedElement(node, key, layer) {
+  const el = document.createElement('div');
+  const count = countInside(node.nodes);
+  el.className = `fc-node fc-folded kind-${node.kind} side-${node.side}`;
+  el.dataset.fcToggle = key;
+  el.dataset.open = 'false';
+  el.setAttribute('role', 'button');
+  el.tabIndex = 0;
+  el.title = 'Open to see what happens inside';
+  el.innerHTML =
+    `<span class="fc-fold" aria-hidden="true">▸</span>` +
+    `<div class="fc-body"><div class="fc-label">${escapeHtml(node.label)}` +
+    (count ? ` <span class="fc-count">${count} inside</span>` : '') +
+    `</div>${codeLine(node.label, node.title)}${atLine(node.at)}</div>`;
+  layer.appendChild(el);
+  return el;
+}
+
+function plainHead(text, kind, layer) {
+  const el = document.createElement('div');
+  el.className = `fc-frame-head kind-${kind}`;
+  el.innerHTML = `<span class="fc-label">${escapeHtml(text)}</span>`;
+  layer.appendChild(el);
+  return el;
+}
+
+/** How many decisions, queries and ends a folded box hides. */
+function countInside(nodes) {
+  let decisions = 0;
+  let queries = 0;
+  const visit = (list) => {
+    for (const node of list) {
+      if (node.type === 'decision') {
+        decisions += 1;
+        node.branches.forEach((branch) => visit(branch.nodes));
+      } else if (node.type === 'group') visit(node.nodes);
+      else if (node.type === 'try') {
+        visit(node.nodes);
+        if (node.catch) visit(node.catch.nodes);
+      } else if (node.type === 'step' && node.kind === 'db') queries += 1;
+    }
+  };
+  visit(nodes);
+  const parts = [];
+  if (decisions) parts.push(`${decisions} ${decisions === 1 ? 'decision' : 'decisions'}`);
+  if (queries) parts.push(`${queries} ${queries === 1 ? 'query' : 'queries'}`);
+  return parts.join(', ');
+}
+
+// ---- measuring ------------------------------------------------------------
+
+/** Width and height of an element, estimated where the page cannot measure (hidden, tests). */
+function sizeOf(el) {
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  if (w > 0 && h > 0) return { w, h };
+  const chars = (el.textContent ?? '').length;
+  const width = Math.max(110, Math.min(300, chars * 7 + 40));
+  const lines = Math.max(1, Math.ceil((chars * 7) / (width - 30)));
+  return { w: width, h: 18 * lines + 18 };
+}
+
+function measure(block) {
+  switch (block.kind) {
+    case 'box': {
+      const { w, h } = sizeOf(block.el);
+      Object.assign(block, { w, h, ax: w / 2 });
+      return block;
+    }
+    case 'seq': {
+      let left = 0;
+      let right = 0;
+      let cy = 0;
+      let bottom = 0;
+      // Space a decision's exit arm still occupies to the right of the axis
+      // after the diamond itself: later steps may sit beside it, not over it.
+      const reserved = [];
+      block.items.forEach((item, index) => {
+        measure(item);
+        left = Math.max(left, item.ax);
+        right = Math.max(right, item.w - item.ax);
+        if (index) cy += FC.gapY;
+        const reach = item.w - item.ax;
+        for (const region of reserved) {
+          if (region.bottom > cy && reach > region.left - 20) cy = region.bottom + FC.gapY;
+        }
+        item.offY = cy;
+        if (item.overhang)
+          reserved.push({ left: item.overhang.left, bottom: cy + item.overhang.bottom });
+        cy += item.h;
+        bottom = Math.max(bottom, cy, ...reserved.map((region) => region.bottom));
+      });
+      const ends = block.items.some((item) => item.ends);
+      return Object.assign(block, { w: left + right, h: bottom, ax: left, ends });
+    }
+    case 'frame': {
+      const head = sizeOf(block.el);
+      measure(block.seq);
+      const inner = Math.max(head.w, block.seq.w);
+      const w = inner + FC.framePad * 2;
+      const axInner = Math.max(block.seq.ax, head.w / 2);
+      return Object.assign(block, {
+        head,
+        w: Math.max(w, axInner + (block.seq.w - block.seq.ax) + FC.framePad * 2),
+        h: head.h + FC.headGap + block.seq.h + FC.framePad + (block.seq.ends ? 0 : FC.gapY - 8),
+        ax: FC.framePad + axInner,
+        ends: false,
+      });
+    }
+    case 'decision': {
+      const text = sizeOf(block.el);
+      // The smallest diamond the text box fits inside: tw/dw + th/dh <= 1.
+      const dh = text.h + 40;
+      const dw = Math.max(150, text.w / (1 - text.h / dh) + 24);
+      block.text = text;
+      block.dw = dw;
+      block.dh = dh;
+      block.branches.forEach((branch) => measure(branch.seq));
+      return block.fall ? measureSide(block) : measureSplit(block);
+    }
+    case 'try': {
+      const head = sizeOf(block.el);
+      measure(block.seq);
+      const frame = {
+        w: Math.max(head.w, block.seq.w) + FC.framePad * 2,
+        h: head.h + FC.headGap + block.seq.h + FC.framePad,
+        ax: FC.framePad + Math.max(block.seq.ax, head.w / 2),
+      };
+      block.head = head;
+      block.frame = frame;
+      if (block.catch) measure(block.catch.seq);
+      const catchW = block.catch ? FC.gapX + 40 + block.catch.seq.w : 0;
+      const catchH = block.catch ? FC.branchDrop + block.catch.seq.h : 0;
+      const tryEnds = block.seq.ends;
+      const catchEnds = !block.catch || block.catch.ends;
+      const continues = !tryEnds || !catchEnds;
+      const body = Math.max(frame.h, catchH);
+      return Object.assign(block, {
+        w: frame.w + catchW,
+        h: body + (continues ? FC.merge * 2 : 0),
+        ax: frame.ax,
+        ends: !continues,
+      });
+    }
+  }
+  return block;
+}
+
+/** `if (!valid) { …; return; }` — the arm goes right, the flow carries on down. */
+function measureSide(block) {
+  const { dw, dh } = block;
+  let x = dw / 2 + FC.gapX;
+  let tallest = 0;
+  for (const branch of block.branches) {
+    branch.x = x; // left edge, relative to the axis
+    x += branch.seq.w + FC.gapX;
+    tallest = Math.max(tallest, branch.seq.h);
+  }
+  const anyRejoin = block.branches.some((branch) => !branch.ends);
+  const body = Math.max(dh, dh / 2 + FC.branchDrop + tallest);
+  const w = dw / 2 + Math.max(dw / 2, x - FC.gapX);
+  if (!anyRejoin) {
+    // Every arm ends: the flow carries on right under the diamond, beside them.
+    return Object.assign(block, {
+      w,
+      h: dh + FC.merge,
+      ax: dw / 2,
+      ends: false,
+      overhang: { left: dw / 2 + FC.gapX, bottom: body },
+    });
+  }
+  return Object.assign(block, {
+    w,
+    h: body + FC.merge * 2,
+    ax: dw / 2,
+    ends: false,
+  });
+}
+
+/** `if … else …` — the arms side by side under the diamond, joining below. */
+function measureSplit(block) {
+  const { dw, dh } = block;
+  const total =
+    block.branches.reduce((sum, branch) => sum + branch.seq.w, 0) +
+    FC.gapX * Math.max(0, block.branches.length - 1);
+  const w = Math.max(dw, total);
+  let x = (w - total) / 2;
+  let tallest = 0;
+  for (const branch of block.branches) {
+    branch.x = x; // left edge, relative to the block
+    x += branch.seq.w + FC.gapX;
+    tallest = Math.max(tallest, branch.seq.h);
+  }
+  const anyRejoin = block.branches.some((branch) => !branch.ends);
+  return Object.assign(block, {
+    w,
+    h: dh + FC.branchDrop + 14 + tallest + (anyRejoin ? FC.merge * 2 : 0),
+    ax: w / 2,
+    ends: !anyRejoin,
+  });
+}
+
+// ---- placing --------------------------------------------------------------
+
+function put(el, x, y) {
+  el.style.left = `${Math.round(x)}px`;
+  el.style.top = `${Math.round(y)}px`;
+}
+
+/**
+ * One connector. `head: false` for a line that only carries the flow on to
+ * the next arrow — an arrowhead halfway down a straight line reads as a step.
+ */
+function arrow(out, points, { label, at, tone, head = true } = {}) {
+  out.edges.push({ points, tone, head });
+  if (label) {
+    const [x, y] = at ?? points[1] ?? points[0];
+    out.labels.push({ text: label, x, y, tone });
+  }
+}
+
+function place(block, x, y, out) {
+  switch (block.kind) {
+    case 'box':
+      put(block.el, x, y);
+      return;
+    case 'seq': {
+      const axis = x + block.ax;
+      block.items.forEach((item, index) => {
+        const top = y + item.offY;
+        if (index > 0) {
+          const previous = block.items[index - 1];
+          if (!previous.ends)
+            arrow(out, [
+              [axis, y + previous.offY + previous.h],
+              [axis, top],
+            ]);
+        }
+        place(item, axis - item.ax, top, out);
+      });
+      return;
+    }
+    case 'frame': {
+      out.frames.push({ x, y, w: block.w, h: block.h, cls: block.frameClass });
+      put(block.el, x + FC.framePad - 4, y + 8);
+      const axis = x + block.ax;
+      const top = y + block.head.h + FC.headGap + 6;
+      place(block.seq, axis - block.seq.ax, top, out);
+      if (!block.seq.ends) {
+        const bottom = top + block.seq.h;
+        arrow(
+          out,
+          [
+            [axis, bottom],
+            [axis, y + block.h],
+          ],
+          { head: false },
+        );
+      }
+      return;
+    }
+    case 'decision': {
+      const axis = x + block.ax;
+      out.diamonds.push({
+        cx: axis,
+        cy: y + block.dh / 2,
+        w: block.dw,
+        h: block.dh,
+        side: block.side,
+      });
+      put(block.el, axis - block.text.w / 2, y + (block.dh - block.text.h) / 2);
+      return block.fall ? placeSide(block, axis, y, out) : placeSplit(block, x, y, out);
+    }
+    case 'try': {
+      const { frame } = block;
+      const axis = x + block.ax;
+      out.frames.push({ x, y, w: frame.w, h: frame.h, cls: 'kind-try' });
+      put(block.el, x + FC.framePad - 4, y + 8);
+      const top = y + block.head.h + FC.headGap + 6;
+      place(block.seq, axis - block.seq.ax, top, out);
+      const bottom = y + block.h;
+      const mergeY = bottom - FC.merge;
+      if (!block.seq.ends)
+        arrow(
+          out,
+          [
+            [axis, top + block.seq.h],
+            [axis, bottom],
+          ],
+          { head: false },
+        );
+      if (block.catch) {
+        const left = x + frame.w + FC.gapX + 40;
+        const cx = left + block.catch.seq.ax;
+        const startY = y + block.head.h / 2 + 8;
+        arrow(
+          out,
+          [
+            [x + frame.w, startY],
+            [cx, startY],
+            [cx, y + FC.branchDrop],
+          ],
+          {
+            label: block.catch.label,
+            at: [(x + frame.w + cx) / 2, startY],
+            tone: 'bad',
+          },
+        );
+        place(block.catch.seq, left, y + FC.branchDrop, out);
+        if (!block.catch.ends) {
+          arrow(out, [
+            [cx, y + FC.branchDrop + block.catch.seq.h],
+            [cx, mergeY],
+            [axis, mergeY],
+          ]);
+        }
+      }
+      return;
+    }
+  }
+}
+
+function placeSide(block, axis, y, out) {
+  const { dw, dh } = block;
+  const rightCorner = axis + dw / 2;
+  const midY = y + dh / 2;
+  const bottom = y + block.h;
+  const mergeY = bottom - FC.merge;
+  // The answer that carries on goes straight down.
+  arrow(
+    out,
+    [
+      [axis, y + dh],
+      [axis, bottom],
+    ],
+    {
+      label: block.fall,
+      at: [axis, y + dh + 14],
+      head: false,
+    },
+  );
+  for (const branch of block.branches) {
+    const left = axis + branch.x;
+    const cx = left + branch.seq.ax;
+    const top = midY + FC.branchDrop;
+    arrow(
+      out,
+      [
+        [rightCorner, midY],
+        [cx, midY],
+        [cx, top],
+      ],
+      {
+        label: branch.label,
+        at: [(rightCorner + Math.min(cx, rightCorner + 160)) / 2 + 8, midY],
+        tone: branch.tone,
+      },
+    );
+    place(branch.seq, left, top, out);
+    if (!branch.ends) {
+      arrow(out, [
+        [cx, top + branch.seq.h],
+        [cx, mergeY],
+        [axis, mergeY],
+      ]);
+    }
+  }
+}
+
+function placeSplit(block, x, y, out) {
+  const { dh } = block;
+  const axis = x + block.ax;
+  const splitY = y + dh + 12;
+  const top = y + dh + FC.branchDrop + 14;
+  const tallest = Math.max(...block.branches.map((branch) => branch.seq.h));
+  const mergeY = top + tallest + FC.merge;
+  for (const branch of block.branches) {
+    const left = x + branch.x;
+    const cx = left + branch.seq.ax;
+    arrow(
+      out,
+      [
+        [axis, y + dh],
+        [axis, splitY],
+        [cx, splitY],
+        [cx, top],
+      ],
+      {
+        label: branch.label,
+        at: [cx, (splitY + top) / 2],
+        tone: branch.tone,
+      },
+    );
+    place(branch.seq, left, top, out);
+    if (!branch.ends) {
+      arrow(out, [
+        [cx, top + branch.seq.h],
+        [cx, mergeY],
+        [axis, mergeY],
+        [axis, y + block.h],
+      ]);
+    }
+  }
+}
+
+function flowchartSvg(out, width, height) {
+  const path = (points) =>
+    points.map(([px, py], index) => `${index ? 'L' : 'M'}${px} ${py}`).join(' ');
+  const frames = out.frames
+    .map(
+      (frame) =>
+        `<rect class="fc-frame ${escapeHtml(frame.cls)}" x="${frame.x}" y="${frame.y}" width="${frame.w}" height="${frame.h}" rx="12" />`,
+    )
+    .join('');
+  const diamonds = out.diamonds
+    .map(
+      (d) =>
+        `<polygon class="fc-diamond side-${escapeHtml(d.side)}" points="${d.cx},${d.cy - d.h / 2} ${d.cx + d.w / 2},${d.cy} ${d.cx},${d.cy + d.h / 2} ${d.cx - d.w / 2},${d.cy}" />`,
+    )
+    .join('');
+  const edges = out.edges
+    .map(
+      (edge) =>
+        `<path class="fc-edge${edge.tone ? ` tone-${edge.tone}` : ''}" d="${path(edge.points)}" ${edge.head ? ` marker-end="url(#fc-arrow${edge.tone === 'bad' ? '-bad' : ''})"` : ''} />`,
+    )
+    .join('');
+  return (
+    `<svg class="fc-svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" aria-hidden="true">` +
+    `<defs>` +
+    `<marker id="fc-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="fc-arrowhead" /></marker>` +
+    `<marker id="fc-arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="fc-arrowhead tone-bad" /></marker>` +
+    `</defs>${frames}${edges}${diamonds}</svg>`
+  );
 }
 
 /** Findings, read once per scan: the flow list marks and the Issues tab both need them. */

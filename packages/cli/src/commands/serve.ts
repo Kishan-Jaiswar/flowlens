@@ -11,6 +11,7 @@ import {
   findBrokenCalls,
   findDeadEndpoints,
   findSharedWrites,
+  actionDecisions,
   actionQueries,
   explainAction,
   projectFindings,
@@ -22,6 +23,7 @@ import {
   flowTiming,
   indexTests,
   renderActionDocument,
+  renderDecisionTree,
   renderFeatureDocument,
   renderScreenDocument,
   resolveFlows,
@@ -477,6 +479,30 @@ export function runServe(args: ServeArgs): number {
         return;
       }
       sendJson(response, doc);
+      return;
+    }
+
+    /**
+     * Every way one action can go — what the Decisions tab shows: the checks,
+     * branches and early exits from the click to the database and back, read
+     * from the same source files as the document. `format=text` is the tree
+     * as plain text, for pasting into a pull request or a chat.
+     */
+    if (path === '/api/decisions') {
+      const flowId = url.searchParams.get('flow');
+      const flow = resolveFlows(graph, { includeLocalOnly: true }).find((f) => f.id === flowId);
+      if (!flow) {
+        sendJson(response, { error: 'unknown flow' }, 404);
+        return;
+      }
+      reader ??= new SourceReader(graph);
+      const tree = actionDecisions(graph, flow, { reader });
+      if (url.searchParams.get('format') === 'text') {
+        response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+        response.end(renderDecisionTree(tree));
+        return;
+      }
+      sendJson(response, tree);
       return;
     }
 

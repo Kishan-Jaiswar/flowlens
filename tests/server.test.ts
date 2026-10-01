@@ -189,6 +189,20 @@ describe('graph API', () => {
     expect(document).toContain('## Execution path');
   });
 
+  it('answers every way an action can go, as a tree or as text', async () => {
+    const response = await get('/api/decisions?flow=orderform-submit-order');
+    expect(response.status).toBe(200);
+    const tree = (await response.json()) as { flowId: string; counts: { requests: number } };
+    expect(tree.flowId).toBe('orderform-submit-order');
+    expect(tree.counts.requests).toBe(1);
+
+    const text = await get('/api/decisions?flow=orderform-submit-order&format=text');
+    expect(text.headers.get('content-type')).toContain('text/plain');
+    expect(await text.text()).toContain('⇄ POST /orders');
+
+    expect((await get('/api/decisions?flow=no-such-flow')).status).toBe(404);
+  });
+
   it('404s an unknown flow', async () => {
     const response = await get('/api/document?flow=no-such-flow');
     expect(response.status).toBe(404);

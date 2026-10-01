@@ -5,6 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   projectFindings,
+  actionDecisions,
   actionQueries,
   analyzeChanged,
   analyzeFlowImpact,
@@ -72,6 +73,12 @@ function apiResponse(path: string): unknown {
     );
     return flow ? actionQueries(scanned.graph, flow) : { error: 'unknown flow' };
   }
+  if (path.startsWith('/api/decisions')) {
+    const flow = flows.find(
+      (candidate) => candidate.id === new URL(path, 'http://x').searchParams.get('flow'),
+    );
+    return flow ? actionDecisions(scanned.graph, flow) : { error: 'unknown flow' };
+  }
   if (path.startsWith('/api/action')) {
     const params = new URL(path, 'http://x').searchParams;
     const flow = flows.find((candidate) => candidate.id === params.get('flow'));
@@ -122,7 +129,7 @@ async function loadDashboard(): Promise<void> {
   // insight the tabs need.
   await vi.waitFor(() => {
     expect(document.getElementById('graph')?.textContent).not.toBe('');
-    expect(document.querySelectorAll('#tabs .tab').length).toBe(7);
+    expect(document.querySelectorAll('#tabs .tab').length).toBe(8);
     expect(document.querySelector('#tab-impact .tab-badge')).not.toBeNull();
   });
 }
@@ -244,12 +251,13 @@ async function openTab(id: string): Promise<HTMLElement> {
 }
 
 describe('the tabs', () => {
-  it('offers the seven tabs in the agreed order, with Docs open first', async () => {
+  it('offers the eight tabs in the agreed order, with Docs open first', async () => {
     const labels = [...document.querySelectorAll('#tabs .tab-label')].map(
       (node) => node.textContent,
     );
     expect(labels).toEqual([
       'Docs',
+      'Decisions',
       'Issues',
       'Performance',
       'Tests',
@@ -340,6 +348,73 @@ describe('the tabs', () => {
         expect((intro?.textContent ?? '').length, `${id} explains itself`).toBeGreaterThan(20);
       });
     }
+  });
+});
+
+describe('the Decisions tab', () => {
+  async function openChart(): Promise<HTMLElement> {
+    const panel = await openTab('decisions');
+    await vi.waitFor(() => {
+      expect(panel.querySelector('.fc-stage .fc-node')).not.toBeNull();
+    });
+    return panel;
+  }
+
+  it('draws the action as a flowchart, from the click to the database', async () => {
+    const panel = await openChart();
+    // Starts at the click, in words; the request is a frame of its own.
+    expect(panel.querySelector('.fc-step.kind-trigger')?.textContent).toMatch(/The user|opens/);
+    expect(panel.querySelector('.fc-frame-head.kind-request')?.textContent).toMatch(
+      /Send (GET|POST|PUT|PATCH|DELETE) \/\S+ to the server/,
+    );
+    // Shapes and connectors are drawn, not listed.
+    expect(panel.querySelector('svg.fc-svg rect.fc-frame.kind-request')).not.toBeNull();
+    expect(panel.querySelectorAll('svg.fc-svg path.fc-edge').length).toBeGreaterThan(2);
+    expect(panel.querySelector('.answer-title')?.textContent).toMatch(/decide|straight/);
+    const badge = document.querySelector('#tab-decisions .tab-badge')?.textContent?.trim();
+    expect(badge).toMatch(/branch|straight/);
+  });
+
+  it('labels each step in words, and shows the code underneath on request', async () => {
+    const panel = await openChart();
+    // Words first: a reader who does not read code is not handed any.
+    expect(panel.querySelector('.fc-stage .fc-code')).toBeNull();
+    const toggle = panel.querySelector<HTMLInputElement>('[data-fc-option="showCode"]')!;
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event('change'));
+    expect(panel.querySelector('.fc-stage .fc-step .fc-code')).not.toBeNull();
+    toggle.checked = false;
+    toggle.dispatchEvent(new Event('change'));
+    expect(panel.querySelector('.fc-stage .fc-code')).toBeNull();
+  });
+
+  it('keeps the action list beside the chart', async () => {
+    await openChart();
+    const sidebar = document.querySelector<HTMLElement>('.layout .sidebar')!;
+    expect(document.querySelector('.layout')?.hasAttribute('data-wide')).toBe(false);
+    expect(sidebar.hidden).toBe(false);
+    expect(sidebar.querySelectorAll('#flow-list > *').length).toBeGreaterThan(0);
+  });
+
+  it('folds helpers into one box and opens them again, but never folds the request', async () => {
+    const panel = await openChart();
+    panel.querySelector<HTMLElement>('[data-fc="open"]')!.click();
+    expect(panel.querySelector('.fc-folded')).toBeNull();
+    const opened = panel.querySelectorAll('.fc-frame-head[data-fc-toggle]').length;
+    panel.querySelector<HTMLElement>('[data-fc="close"]')!.click();
+    expect(panel.querySelector('.fc-frame-head.kind-request')).not.toBeNull();
+    expect(panel.querySelectorAll('.fc-frame-head[data-fc-toggle]').length).toBeLessThanOrEqual(
+      opened,
+    );
+  });
+
+  it('zooms the chart without redrawing it', async () => {
+    const panel = await openChart();
+    panel.querySelector<HTMLElement>('[data-fc="in"]')!.click();
+    expect(panel.querySelector('.fc-zoom')?.textContent).toBe('110%');
+    expect(panel.querySelector<HTMLElement>('.fc-stage')?.style.transform).toBe('scale(1.1)');
+    panel.querySelector<HTMLElement>('[data-fc="reset"]')!.click();
+    expect(panel.querySelector('.fc-zoom')?.textContent).toBe('100%');
   });
 });
 

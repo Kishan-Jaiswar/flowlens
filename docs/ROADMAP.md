@@ -101,6 +101,12 @@ _already been built_, and they are worth more than any new feature.
 - [x] **`actionProps` / `inputActionProps` config**, so a design system whose
       button is `onAction` is no longer invisible.
 
+## Done — unreleased
+
+- [x] **A Decisions tab:** the action as a decision tree — the checks,
+      branches, early exits and queries from the click to the database and
+      back, with the status each exit answers.
+
 ## Done — v1.2 (published)
 
 - [x] **Seven dashboard tabs, none repeating another:** Docs (the action as a

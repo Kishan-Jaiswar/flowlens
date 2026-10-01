@@ -7,6 +7,22 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A Decisions tab — every way an action can go.** The action as a
+  flowchart — pills, step boxes, decision diamonds and database drums joined
+  by labelled yes/no arrows, each step in plain words with its code on
+  request — from the click to the database and back: each `if`, `switch`, `?:`,
+  `&&`, `try`/`catch` and early `return`/`throw` is a decision with what runs
+  on each answer — the frontend check that stops a submit, the request and the
+  server function that answers it, the status each guard responds with, the
+  branch that picks `updateOne` over `insertOne`, and the `onSuccess`/`onError`
+  the screen ends in. Read from the source of the functions the action runs,
+  following the project's own helpers and `this.service.method()` into the
+  injected class; library calls are left out. Also `GET /api/decisions`
+  (`format=text` for the tree as plain text) and `actionDecisions()` /
+  `renderDecisionTree()` in `@flowslens/core`.
+
 ## [1.2.0] - 2026-09-30
 
 ### Added

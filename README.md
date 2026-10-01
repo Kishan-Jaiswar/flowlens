@@ -820,19 +820,20 @@ node packages/cli/bin/flowlens.mjs trace examples/crud --trace /tmp/demo-trace.j
 
 ---
 
-## The dashboard's seven tabs
+## The dashboard's eight tabs
 
-`flowlens serve` opens one action at a time and asks seven questions, none
+`flowlens serve` opens one action at a time and asks eight questions, none
 repeating another. Each tab carries its own headline number, so the worrying
 one is visible before you open it:
 
 ```text
-Docs · 7 steps   Issues · 2   Performance · not run   Tests · none   Changed · 5   Breaks · 3   Unused · 14
+Docs · 7 steps   Decisions · 12 branches   Issues · 2   Performance · not run   Tests · none   Changed · 5   Breaks · 3   Unused · 14
 ```
 
 | Tab             | The question                              | Where the answer comes from                                          |
 | --------------- | ----------------------------------------- | -------------------------------------------------------------------- |
 | **Docs**        | What does this action do, end to end?     | The static graph, stage by stage — as a list, or as a diagram        |
+| **Decisions**   | Which way can it go, and what decides?    | The source of every function it runs, from the handler to the query  |
 | **Issues**      | What is already wrong in it?              | `flowlens findings`, narrowed to this action                         |
 | **Performance** | Where does the time go?                   | Runtime spans only: each step, and each database query with its code |
 | **Tests**       | What would catch it if you broke it?      | Which test files import its files, and the cases still to write      |
@@ -849,6 +850,45 @@ the rest are listed under _Not in this action_ with the reason, so "no auth
 check" is still stated rather than silently missing. _Diagram_ shows the same
 steps as numbered cards, with the way back to the screen as its own lane.
 **Copy as Markdown** gives you the document for a wiki or a handover note.
+
+**Decisions** draws the action as a flowchart, read from the code rather
+than run: a pill where it starts and wherever it ends, a box for each step, a
+diamond for each `if`, `switch`, `?:`, `try`/`catch` and early `return` or
+`throw`, and a drum for each query. An early exit leaves its diamond to the
+right while the flow carries on straight down; an if/else splits under the
+diamond and joins again below. The request is a green frame with the server
+function that answers it inside, and every way out says what the caller
+gets — `422 Respond: Validation failed`. Each step is labelled in words
+(`Update medicines`, `Show error "Enter a valid quantity"`); **Show code** puts
+the code under each label, and hovering a box shows its file and line. Helpers
+in your own code are frames you can fold; library calls are left out. The chart
+uses the whole width beside the action list, centres itself, fits a wide
+action on first open, and zooms.
+**Copy as text** gives the
+same tree for a pull request (`GET /api/decisions?flow=<id>&format=text`):
+
+```text
+▸ MedicineForm.handleSubmit()
+  ◆ parsed.success?
+  ├─ no
+  │  • setErrors(next)
+  │  ■ stops here
+  └─ yes ↓ continues
+  ⇄ POST /medicines  → app/api/medicines/route.ts:29
+    ◆ parsed.success?
+    ├─ no
+    │  ■ responds apiError("Validation failed", 422, …) [422]
+    └─ yes ↓ continues
+    ▸ upsertMedicine(ctx.clinicId, parsed.data, ctx.user.name)
+      ⛁ medicines.findOne (read)
+      ◆ existing?
+      ├─ yes
+      │  ⛁ medicines.updateOne (update)
+      │  ■ returns { medicine, action: "updated" }
+      └─ no ↓ continues
+      ⛁ medicines.insertOne (create)
+    ■ responds json(result, { status: … ? 201 : 200 }) [201/200]
+```
 
 **Performance** says how many runs a ranking rests on, and warns when the
 slowest step was measured fewer than three times. **Tests** lists the cases to
