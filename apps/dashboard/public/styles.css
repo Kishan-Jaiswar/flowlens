@@ -2978,6 +2978,10 @@ code.code-link .file-link {
   stroke-dasharray: none;
   fill: color-mix(in srgb, var(--backend) 5%, var(--surface));
 }
+.fc-frame.kind-parallel {
+  stroke-dasharray: 2 3;
+  stroke-width: 1.6;
+}
 .fc-frame.kind-try {
   --side: var(--text-muted);
 }
@@ -3143,6 +3147,17 @@ code.code-link .file-link {
 }
 .fc-step.kind-external {
   border-style: dashed;
+}
+/* A value the next query or decision depends on: quieter than a step. */
+.fc-step.kind-compute {
+  box-shadow: none;
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+.fc-step.kind-compute .fc-label {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .fc-folded {

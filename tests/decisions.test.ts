@@ -270,3 +270,377 @@ describe('the decision tree across a NestJS service chain', () => {
     expect(writes).toEqual(['orders.create', 'auditlogs.create']);
   });
 });
+
+describe('the decision tree reads control flow the way it runs', () => {
+  const root = mkdtempSync(join(tmpdir(), 'flowlens-decisions-flow-'));
+  const put = (rel: string, text: string): void => {
+    mkdirSync(join(root, rel, '..'), { recursive: true });
+    writeFileSync(join(root, rel), text, 'utf8');
+  };
+  put('tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@/*': ['./*'] } } }));
+  put(
+    'lib/db/mongo.ts',
+    `export async function getCollections() {
+       const db = await getDb();
+       return {
+         products: db.collection('products'),
+         logs: db.collection('logs'),
+         items: db.collection('items'),
+       };
+     }`,
+  );
+  put(
+    'lib/cache.ts',
+    `export class CacheService {
+       get(key) { return this.store.findOne({ key }); }
+     }`,
+  );
+  put(
+    'lib/db/import.ts',
+    `import { getCollections } from './mongo';
+     export async function importRows(rows, mode) {
+       const { products, logs, items } = await getCollections();
+       const seen = new Map();
+       for (const row of rows) {
+         if (!row.sku) continue;
+         if (seen.get(row.sku)) break;
+         await products.insertOne(row);
+       }
+       await Promise.all(rows.map(async (row) => {
+         if (!row.note) return;
+         await logs.insertOne({ note: row.note });
+       }));
+       const first = rows.find((row) => row.sku);
+       switch (mode) {
+         case "merge":
+         case "append":
+           await items.updateOne({ sku: first.sku }, { $set: first });
+           break;
+         case "replace":
+           await items.deleteMany({});
+         default:
+           await items.insertMany(rows);
+       }
+       return { ok: true };
+     }`,
+  );
+  put(
+    'app/api/import/route.ts',
+    `import { importRows } from "@/lib/db/import";
+     async function handleImport(body) {
+       if (!body.rows) return Response.json({ error: "No rows" }, { status: 400 });
+       await importRows(body.rows, body.mode);
+       return Response.json({ ok: true }, { status: 201 });
+     }
+     export async function POST(request) {
+       const body = await request.json();
+       return handleImport(body);
+     }`,
+  );
+  put(
+    'app/(app)/import/page.tsx',
+    `"use client";
+     import { useState } from "react";
+     async function sendImport(rows) {
+       const response = await fetch("/api/import", { method: "POST", body: JSON.stringify({ rows }) });
+       return response.json();
+     }
+     export default function ImportPage() {
+       const [result, setResult] = useState(null);
+       const run = async () => {
+         setResult(await sendImport([]));
+       };
+       return <button onClick={run}>Run import</button>;
+     }`,
+  );
+  const { graph } = scan({ root });
+  const importFlow = resolveFlows(graph, { includeLocalOnly: true }).find(
+    (candidate) => candidate.label === 'Run import',
+  )!;
+  const importTree = actionDecisions(graph, importFlow);
+  const nodes = all(importTree.nodes);
+  const printed = renderDecisionTree(importTree);
+  const find = (question: string): DecisionQuestion => {
+    const found = nodes.find(
+      (node): node is DecisionQuestion => node.type === 'decision' && node.question === question,
+    );
+    expect(found, `"${question}" in\n${printed}`).toBeDefined();
+    return found!;
+  };
+
+  it('follows a request made inside another call’s arguments', () => {
+    // `setResult(await sendImport([]))`: the request is in the argument.
+    expect(nodes).toContainEqual(
+      expect.objectContaining({ type: 'group', kind: 'request', title: 'POST /import' }),
+    );
+  });
+
+  it('follows a route that hands the request to a helper, with each of its responses', () => {
+    const statuses = nodes
+      .filter((node) => node.type === 'end' && node.outcome === 'respond')
+      .map((node) => node.type === 'end' && node.statuses);
+    expect(statuses).toEqual(expect.arrayContaining([[400], [201]]));
+  });
+
+  it('keeps continue and break in a loop as the decisions they are', () => {
+    const sku = find('row.sku?');
+    expect(sku.branches[0]?.nodes.at(-1)).toMatchObject({ type: 'end', outcome: 'next' });
+    expect(sku.otherwise).toBe('yes');
+    const seen = find('seen.get(row.sku)?');
+    expect(seen.branches[0]?.nodes.at(-1)).toMatchObject({ type: 'end', outcome: 'break' });
+  });
+
+  it('shows work done in a .map callback as a loop, with its early return', () => {
+    const loop = nodes.find(
+      (node) => node.type === 'group' && node.kind === 'loop' && node.title.startsWith('for each'),
+    );
+    expect(loop, printed).toBeDefined();
+    const inside = loop?.type === 'group' ? all(loop.nodes) : [];
+    expect(inside).toContainEqual(expect.objectContaining({ kind: 'db', text: 'logs.insertOne' }));
+    expect(inside).toContainEqual(expect.objectContaining({ type: 'end', outcome: 'next' }));
+  });
+
+  it('reads switch fall-through: shared labels on one arm, and a case running into the next', () => {
+    const mode = find('mode?');
+    expect(mode.branches.map((branch) => branch.label)).toEqual([
+      'case "merge" / case "append"',
+      'case "replace"',
+      'default',
+    ]);
+    const replace = mode.branches[1]!.nodes.map((node) => node.type === 'step' && node.text);
+    // No `break` after deleteMany, so the default's insertMany runs too.
+    expect(replace).toEqual(['items.deleteMany', 'items.insertMany']);
+  });
+
+  it('does not mistake a Map lookup or an array find for project code or a query', () => {
+    expect(printed).not.toContain('CacheService');
+    expect(nodes).not.toContainEqual(expect.objectContaining({ kind: 'db', text: 'items.find' }));
+    expect(nodes).not.toContainEqual(expect.objectContaining({ kind: 'db', text: 'seen.get' }));
+  });
+});
+
+describe('the decision tree follows what the code hands around', () => {
+  const root = mkdtempSync(join(tmpdir(), 'flowlens-decisions-hand-'));
+  const put = (rel: string, text: string): void => {
+    mkdirSync(join(root, rel, '..'), { recursive: true });
+    writeFileSync(join(root, rel), text, 'utf8');
+  };
+  put('tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@/*': ['./*'] } } }));
+  put(
+    'lib/server.ts',
+    `export function apiError(message, status) { return Response.json({ error: message }, { status }); }
+     export async function requireUser(request) {
+       if (!request.headers.get("authorization")) return { error: apiError("Sign in", 401) };
+       if (request.headers.get("x-banned")) return { error: apiError("Banned", 403) };
+       return { user: { id: 1 } };
+     }`,
+  );
+  put(
+    'lib/db/store.ts',
+    `export async function stats() {
+       const db = await getDb();
+       const [total, latest] = await Promise.all([
+         db.collection<Doc>("orders").countDocuments({}),
+         db.collection<Doc>("orders").find({}).limit(5).toArray(),
+       ]);
+       return { total, latest };
+     }`,
+  );
+  put(
+    'app/api/stats/route.ts',
+    `import { requireUser } from "@/lib/server";
+     import { stats } from "@/lib/db/store";
+     export async function GET(request) {
+       const ctx = await requireUser(request);
+       if ("error" in ctx) return ctx.error;
+       return Response.json(await stats());
+     }`,
+  );
+  put(
+    'lib/api.ts',
+    `import axios from "axios";
+     export const api = axios.create({ baseURL: "/api" });
+     api.interceptors.response.use((r) => r, async (error) => {
+       if (error.response?.status === 401) window.location.assign("/login");
+       return Promise.reject(error);
+     });`,
+  );
+  put(
+    'features/stats.ts',
+    `import { useQuery } from "@tanstack/react-query";
+     import { api } from "@/lib/api";
+     export function useStats(ready) {
+       return useQuery({
+         queryKey: ["stats"],
+         queryFn: async () => (await api.get("/stats")).data,
+         enabled: ready,
+       });
+     }
+     export function useSaveNote() {
+       const save = async (note) => {
+         try {
+           await api.post("/notes", { note });
+         } catch {
+           // the note is optional; a failure is ignored
+         }
+       };
+       return { save };
+     }`,
+  );
+  put(
+    'app/(app)/stats/page.tsx',
+    `"use client";
+     import { useStats, useSaveNote } from "@/features/stats";
+     export default function StatsPage() {
+       const { data, refetch } = useStats(true);
+       const { save } = useSaveNote();
+       const reload = async () => {
+         await save("reloaded");
+         refetch();
+       };
+       return <button onClick={reload}>Reload stats</button>;
+     }`,
+  );
+  const { graph } = scan({ root });
+  const flows = resolveFlows(graph, { includeLocalOnly: true });
+  const reload = flows.find((candidate) => candidate.label === 'Reload stats')!;
+  const tree = actionDecisions(graph, reload);
+  const nodes = all(tree.nodes);
+  const printed = renderDecisionTree(tree);
+
+  it('follows a function a hook hands back, and refetch to its query', () => {
+    expect(printed).toContain('⇄ POST /notes');
+    expect(printed).toContain('⇄ GET /stats');
+    expect(tree.nodes.some((node) => node.type === 'group' && node.kind === 'unlinked')).toBe(
+      false,
+    );
+  });
+
+  it('shows an empty catch around a request as an error that is ignored', () => {
+    const attempt = nodes.find((node) => node.type === 'try');
+    expect(attempt?.type === 'try' && attempt.catch?.label).toMatch(/ignored/);
+  });
+
+  it('names every status a forwarded error can carry', () => {
+    const forwarded = nodes.find(
+      (node) => node.type === 'end' && node.text === 'responds ctx.error',
+    );
+    expect(forwarded?.type === 'end' && forwarded.statuses).toEqual([401, 403]);
+  });
+
+  it('follows the work inside a response, and draws Promise.all as parallel', () => {
+    const parallel = nodes.find((node) => node.type === 'group' && node.kind === 'parallel');
+    expect(parallel, printed).toBeDefined();
+    const queries = parallel?.type === 'group' ? all(parallel.nodes) : [];
+    expect(queries.map((node) => node.type === 'step' && node.text)).toEqual([
+      'orders.countDocuments',
+      'orders.find',
+    ]);
+  });
+
+  it('puts the API client’s response interceptor between the answer and the screen', () => {
+    const interceptor = nodes.find(
+      (node) => node.type === 'group' && node.title.includes('interceptors.response'),
+    );
+    expect(interceptor, printed).toBeDefined();
+  });
+
+  it('waits on enabled: for a query made on load', () => {
+    const loads = flows.find(
+      (candidate) => candidate.event === 'mount' && candidate.endpoints.includes('GET /stats'),
+    );
+    if (!loads) return; // the page load is only an action when the scan names one
+    const onLoad = all(actionDecisions(graph, loads).nodes);
+    expect(onLoad).toContainEqual(
+      expect.objectContaining({ type: 'decision', question: 'ready?' }),
+    );
+  });
+});
+
+describe('the decision tree knows the framework’s default status', () => {
+  it('answers 201 for a NestJS POST that returns a value, 200 for a GET', () => {
+    const { graph } = exampleScan();
+    const flows = resolveFlows(graph);
+    const create = all(
+      actionDecisions(
+        graph,
+        flows.find((flow) => flow.id === 'orderform-submit-order')!,
+      ).nodes,
+    );
+    expect(create).toContainEqual(
+      expect.objectContaining({ type: 'end', outcome: 'respond', statuses: [201] }),
+    );
+    const search = flows.find((flow) => flow.endpoints.some((e) => e.startsWith('GET ')));
+    if (search) {
+      const found = all(actionDecisions(graph, search).nodes);
+      expect(found).toContainEqual(
+        expect.objectContaining({ type: 'end', outcome: 'respond', statuses: [200] }),
+      );
+    }
+  });
+});
+
+describe('the decision tree shows what decides which records a query touches', () => {
+  const root = mkdtempSync(join(tmpdir(), 'flowlens-decisions-values-'));
+  const put = (rel: string, text: string): void => {
+    mkdirSync(join(root, rel, '..'), { recursive: true });
+    writeFileSync(join(root, rel), text, 'utf8');
+  };
+  put(
+    'lib/db/store.ts',
+    `export async function adjust(input, current) {
+       const db = await getDb();
+       const filter = { ownerId: input.ownerId };
+       if (input.medicineId) filter.medicineId = input.medicineId;
+       const target =
+         input.action === "increase" ? current + input.qty
+         : input.action === "decrease" ? current - input.qty
+         : input.qty;
+       await db.collection("stock").updateOne(filter, { $set: { target } }, { upsert: true });
+       if (!input.quiet) window.location.href = "/stock";
+     }`,
+  );
+  put(
+    'app/api/stock/route.ts',
+    `import { adjust } from "../../../lib/db/store";
+     export async function POST(request) { await adjust(await request.json(), 0); return Response.json({ ok: true }); }`,
+  );
+  put(
+    'app/page.tsx',
+    `"use client";
+     export default function P() { const go = async () => { await fetch("/api/stock", { method: "POST" }); }; return <button onClick={go}>Adjust</button>; }`,
+  );
+  const { graph } = scan({ root });
+  const flow = resolveFlows(graph, { includeLocalOnly: true }).find((f) => f.label === 'Adjust')!;
+  const nodes = all(actionDecisions(graph, flow).nodes);
+
+  it('draws a condition added to a query’s filter under the decision that adds it', () => {
+    const medicine = nodes.find(
+      (node) => node.type === 'decision' && node.code === 'input.medicineId',
+    );
+    expect(medicine?.type === 'decision' && medicine.branches[0]?.nodes[0]).toMatchObject({
+      kind: 'compute',
+      label: 'Filter on medicine id',
+    });
+  });
+
+  it('draws a chain of ?: that picks a value as nested decisions', () => {
+    const computed = nodes
+      .filter((node) => node.type === 'step' && node.kind === 'compute')
+      .map((node) => node.type === 'step' && node.text);
+    expect(computed).toEqual(
+      expect.arrayContaining([
+        'target = current + input.qty',
+        'target = current - input.qty',
+        'target = input.qty',
+      ]),
+    );
+  });
+
+  it('calls an update with upsert what it is, and a location assignment a navigation', () => {
+    expect(nodes).toContainEqual(
+      expect.objectContaining({ kind: 'db', text: 'stock.updateOne', effect: 'upsert' }),
+    );
+    expect(nodes).toContainEqual(expect.objectContaining({ kind: 'ui', label: 'Go to /stock' }));
+  });
+});

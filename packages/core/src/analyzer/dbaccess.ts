@@ -1,4 +1,4 @@
-import { SyntaxKind, type Node, type SourceFile } from 'ts-morph';
+import { Node, SyntaxKind, type SourceFile } from 'ts-morph';
 import type { FlowGraph } from '../graph/graph.js';
 import { ids } from '../graph/ids.js';
 import { callsIn, calleeMember, calleeReceiver, lineOf } from './ast.js';
@@ -98,6 +98,12 @@ export function linkDbOperations(
   for (const call of callsIn(scope)) {
     const operation = calleeMember(call);
     const receiver = calleeReceiver(call);
+    // `clinics.find((c) => c.active)` is an array method on a variable that
+    // happens to share a collection's name; a driver's `find` takes a filter.
+    if (
+      call.getArguments().some((arg) => Node.isArrowFunction(arg) || Node.isFunctionExpression(arg))
+    )
+      continue;
     if (!receiver) continue;
 
     /**
@@ -163,7 +169,10 @@ export function collectionFor(
   aliases?: CollectionAliases,
 ): string | undefined {
   // db.collection('customers').find(...)
-  const explicitCollection = /collection\(\s*['"]([^'"]+)['"]\s*\)/.exec(receiver);
+  // `db.collection<Doc>("customers")`, the type argument and line breaks included.
+  const explicitCollection = /collection\s*(?:<[^>]*>)?\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/.exec(
+    receiver,
+  );
   if (explicitCollection?.[1]) return explicitCollection[1];
 
   const head = receiver.split('.')[0] ?? receiver;

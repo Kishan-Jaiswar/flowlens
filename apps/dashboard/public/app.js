@@ -33,6 +33,7 @@ const EFFECTS = [
 ];
 
 const EFFECT_TILE = {
+  upsert: 'upsert',
   read: 'read',
   create: 'insert',
   update: 'update',
@@ -3068,7 +3069,9 @@ function boxElement(node, layer) {
       `${node.outcome === 'stop' ? '' : codeLine(node.label, node.text)}${atLine(node.at)}</div>`;
   } else {
     const icon =
-      { trigger: '▶', db: '⛁', external: '⇢', guard: '⛨', ui: '◧', call: 'ƒ' }[node.kind] ?? '•';
+      { trigger: '▶', db: '⛁', external: '⇢', guard: '⛨', ui: '◧', call: 'ƒ', compute: '≔' }[
+        node.kind
+      ] ?? '•';
     const effect = node.effect
       ? `<span class="fc-effect effect-${escapeHtml(node.effect)}">${escapeHtml(EFFECT_TILE[node.effect] ?? node.effect)}</span>`
       : '';
@@ -3109,7 +3112,8 @@ function frameHeadElement(node, key, layer) {
   el.dataset.open = 'true';
   el.setAttribute('role', 'button');
   el.tabIndex = 0;
-  const icon = { request: '⇄', loop: '↻', function: 'ƒ', unlinked: '⋯' }[node.kind] ?? 'ƒ';
+  const icon =
+    { request: '⇄', loop: '↻', parallel: '⇉', function: 'ƒ', unlinked: '⋯' }[node.kind] ?? 'ƒ';
   const where = node.handledBy
     ? `<span class="fc-at">answered by ${fileRef(node.handledBy.file, node.handledBy.line, '', true)}</span>`
     : atLine(node.at);

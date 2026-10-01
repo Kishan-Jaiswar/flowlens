@@ -23,6 +23,24 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`format=text` for the tree as plain text) and `actionDecisions()` /
   `renderDecisionTree()` in `@flowslens/core`.
 
+### Fixed
+
+- **Queries on `db.collection<Doc>("x")` are found, and an array's `find` is
+  no longer one.** A collection opened with a type argument, or across lines,
+  was named after the variable (`dbs.find`) or missed; `clinics.find((c) => …)`
+  on a plain array that shares a collection's name was reported as a read.
+  Every tab that lists queries was affected.
+
+- **The Decisions tab follows the code the way it runs.** Checked flow by flow
+  against a real app: work inside a response (`json(await listX())`), inside
+  `Promise.all` (drawn as parallel), `.map` callbacks, IIFEs and callbacks
+  passed to helpers is followed; `continue`, `break`, switch fall-through and
+  a catch that swallows the error are drawn as the decisions they are; the
+  filter conditions a query is built from and `?:` chains that pick a value
+  are shown; a forwarded `ctx.error` carries every status it can have, a
+  NestJS handler its default 201/200, and the API client's response
+  interceptor sits between the answer and the screen.
+
 ## [1.2.0] - 2026-09-30
 
 ### Added

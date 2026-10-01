@@ -30,9 +30,13 @@
 import {
   Node,
   SyntaxKind,
+  type ArrayLiteralExpression,
   type CallExpression,
+  type ConditionalExpression,
   type IfStatement,
+  type PropertyAccessExpression,
   type ReturnStatement,
+  type VariableDeclaration,
 } from 'ts-morph';
 import type { Functionish } from '../analyzer/ast.js';
 import { dbEffectOf } from '../analyzer/mongo.js';
@@ -42,11 +46,13 @@ import { locateAction, type LocatedAction } from './action.js';
 import {
   bodyStatements,
   condense,
+  endsFunction,
   functionAtLine,
   functionOf,
   localVariable,
   nameOf,
   nearestFunction,
+  returnsOf,
   shortCall,
   SourceReader,
   statusOf,
@@ -73,8 +79,10 @@ export interface DecisionStep {
    * - `ui` — state set, toast, navigation, a callback prop
    * - `db` / `external` — a query, or work that leaves the app
    * - `guard` — middleware declared on the route, run before the handler
+   * - `compute` — a value the next query or decision depends on: a filter
+   *   condition added, or the result of a chain of `?:`
    */
-  kind: 'trigger' | 'call' | 'ui' | 'db' | 'external' | 'guard';
+  kind: 'trigger' | 'call' | 'ui' | 'db' | 'external' | 'guard' | 'compute';
   /** What happens, in plain words: `Update medicines`, `Show error "…"`. */
   label: string;
   /** The code that does it, as written (condensed). */
@@ -118,10 +126,11 @@ export interface DecisionGroup {
   /**
    * - `function` — a project function with something worth seeing inside
    * - `request` — the request, with the server function that answers it
-   * - `loop` — a `for`/`while` whose body does real work
+   * - `loop` — a `for`/`while`, or a `.map`/`.forEach` callback, that does real work
+   * - `parallel` — `Promise.all([...])`: started together, waited for together
    * - `unlinked` — requests the walk from the handler did not reach
    */
-  kind: 'function' | 'request' | 'loop' | 'unlinked';
+  kind: 'function' | 'request' | 'loop' | 'parallel' | 'unlinked';
   /** `Runs adjustStock`, `Sends POST /stock to the server`. */
   label: string;
   title: string;
@@ -150,8 +159,9 @@ export interface DecisionEnd {
    * - `respond` — the server answers the request
    * - `return` — a function returns early to its caller
    * - `throw` — an error is thrown
+   * - `next` / `break` — inside a loop: skip to the next item, or leave the loop
    */
-  outcome: 'stop' | 'respond' | 'return' | 'throw';
+  outcome: 'stop' | 'respond' | 'return' | 'throw' | 'next' | 'break';
   /** `Respond 422 · Validation failed`, `Stop`. */
   label: string;
   text: string;
@@ -192,7 +202,11 @@ const MAX_NODES = 900;
 
 /** Frontend calls that change what the user sees. */
 const UI_CALLS =
-  /^(toast(\.\w+)?|alert|notify|enqueueSnackbar|message\.\w+|notification\.\w+|router\.(push|replace|back|refresh|prefetch)|navigate|redirect|window\.location\.\w+|location\.(assign|replace|reload)|\w+\.invalidateQueries|\w+\.setQueryData|\w+\.refetch(Queries)?|refetch|mutate|reset|form\.reset|\w+\.reset|revalidatePath|revalidateTag)$/;
+  /^(toast(\.\w+)?|alert|notify|enqueueSnackbar|message\.\w+|notification\.\w+|router\.(push|replace|back|refresh|prefetch)|navigate|redirect|window\.location\.\w+|location\.(assign|replace|reload)|\w+\.invalidateQueries|\w+\.setQueryData|\w+\.refetch(Queries)?|refetch|mutate|reset|form\.reset|\w+\.reset|revalidatePath|revalidateTag|window\.(print|open|scrollTo)|print)$/;
+
+/** Driver methods no plain array or map has. */
+const DRIVER_ONLY =
+  /^(insertOne|insertMany|updateOne|updateMany|replaceOne|deleteOne|deleteMany|findOne|findOneAndUpdate|findOneAndDelete|findOneAndReplace|countDocuments|estimatedDocumentCount|aggregate|bulkWrite|distinct|findById|findByIdAndUpdate|findByIdAndDelete)$/;
 
 /** Hooks whose options carry the request's success and failure callbacks. */
 const MUTATIONS = /\.(mutate|mutateAsync)$/;
@@ -203,8 +217,16 @@ interface Frame {
    * What a `return` means here: the handler stopping, the server answering, or
    * a helper giving a value back to its caller.
    */
-  role: 'handler' | 'server' | 'helper';
+  role: 'handler' | 'server' | 'helper' | 'item';
   depth: number;
+  /** What a `break` leaves here: a loop, or the `case` it sits in. */
+  breaks?: 'loop' | 'switch';
+  /** The status a framework sends for a plain returned value: Nest's 201 for a POST. */
+  defaultStatus?: number;
+  /** Parameters bound to the functions the caller passed: `onFilterChange(() => …)`. */
+  bound?: Map<string, Functionish>;
+  /** Variables this function passes to a query: `filter` in `find(filter)`. */
+  queryVars?: Set<string>;
 }
 
 type LocatedCall = LocatedAction['calls'][number];
@@ -292,10 +314,7 @@ export function actionDecisions(
           ? 'Requests made'
           : 'Requests made — the walk from the handler did not reach them',
       side: 'browser',
-      nodes: missed.flatMap((call) => [
-        ...requestNodes(walk, call, { side: 'browser', role: 'handler', depth: 0 }),
-        ...hookOutcome(walk, call, undefined, { side: 'browser', role: 'handler', depth: 0 }),
-      ]),
+      nodes: orderByUse(walk, missed).flatMap((call) => unlinkedNodes(walk, call)),
     });
   }
 
@@ -316,6 +335,51 @@ export function actionDecisions(
         'dynamic call, shows up as the call.',
     ],
   };
+}
+
+/** Requests nobody's handler reached, in the order the component asks for them. */
+function orderByUse(walk: Walk, calls: LocatedCall[]): LocatedCall[] {
+  const file = walk.reader.file(walk.flow.source?.file ?? walk.flow.steps[0]?.file);
+  const position = (call: LocatedCall): number => {
+    const hook = call.hook?.name;
+    if (!file || !hook) return Number.MAX_SAFE_INTEGER;
+    const use = file
+      .getDescendantsOfKind(SyntaxKind.CallExpression)
+      .find((candidate) => calleeText(candidate) === hook);
+    return use?.getStart() ?? Number.MAX_SAFE_INTEGER;
+  };
+  return [...calls].sort((a, b) => position(a) - position(b));
+}
+
+/**
+ * One request made on load: the query function around it (so what it does
+ * with the answer shows), its success and failure callbacks, and — when the
+ * hook says `enabled: …` — the condition it waits for.
+ */
+function unlinkedNodes(walk: Walk, call: LocatedCall): DecisionNode[] {
+  const frame: Frame = { side: 'browser', role: 'helper', depth: 0 };
+  const inner = call.fn ? walkFunction(walk, call.fn, frame) : [];
+  const nodes = [
+    ...(walk.drawn.has(call) ? inner : [...inner, ...requestNodes(walk, call, frame)]),
+    ...hookOutcome(walk, call, undefined, frame),
+  ];
+  const options = call.hook?.options;
+  const enabled =
+    options && Node.isObjectLiteralExpression(options) ? options.getProperty('enabled') : undefined;
+  const condition =
+    enabled && Node.isPropertyAssignment(enabled) ? enabled.getInitializer() : undefined;
+  if (!condition || condition.getText() === 'true') return nodes;
+  return [
+    decision(
+      walk,
+      `${condense(condition.getText(), 50)}?`,
+      condition.getText(),
+      frame,
+      condition,
+      [{ label: 'yes — the request is sent', nodes, ends: false }],
+      'no — nothing is requested',
+    ),
+  ];
 }
 
 function walkEntry(walk: Walk): DecisionNode[] {
@@ -405,10 +469,103 @@ function walkFunction(walk: Walk, fn: Functionish, frame: Frame): DecisionNode[]
       // `async (input) => api.post(…)`: the expression is the whole function.
       return walkExpression(walk, body, frame);
     }
-    return walkStatements(walk, bodyStatements(fn), frame, true);
+    const queryVars = queryVariables(walk, fn);
+    return walkStatements(
+      walk,
+      bodyStatements(fn),
+      queryVars.size ? { ...frame, queryVars } : { ...frame, queryVars: undefined },
+      true,
+    );
   } finally {
     walk.stack.pop();
   }
+}
+
+/**
+ * The variables a function hands to its queries: `filter` and `or` in
+ * `find({ ownerId, $or: or, ...filter })`. Assignments to them decide which
+ * records the query touches, so they are drawn even though they call nothing.
+ */
+function queryVariables(walk: Walk, fn: Functionish): Set<string> {
+  const names = new Set<string>();
+  for (const call of fn.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+    if (nearestFunction(call) !== fn) continue;
+    if (effectsAt(walk, call).every((node) => node.kind !== 'db-op') && !unlinkedQuery(walk, call))
+      continue;
+    for (const arg of call.getArguments()) {
+      const value = unwrap(arg);
+      if (Node.isIdentifier(value)) names.add(value.getText());
+      for (const node of value.getDescendants()) {
+        if (Node.isShorthandPropertyAssignment(node)) names.add(node.getName());
+        if (Node.isSpreadAssignment(node) || Node.isPropertyAssignment(node)) {
+          const inner = Node.isSpreadAssignment(node)
+            ? node.getExpression()
+            : node.getInitializer();
+          if (inner && Node.isIdentifier(inner)) names.add(inner.getText());
+        }
+      }
+    }
+  }
+  return names;
+}
+
+/** `filter.category = query.category` / `or.push({ sku })` on a variable a query reads. */
+function queryBuilding(walk: Walk, expression: Node, frame: Frame): DecisionStep | undefined {
+  if (!frame.queryVars?.size) return undefined;
+  const node = unwrap(expression);
+  let base: string | undefined;
+  let label = '';
+  if (
+    Node.isBinaryExpression(node) &&
+    node.getOperatorToken().getKind() === SyntaxKind.EqualsToken
+  ) {
+    const left = node.getLeft();
+    base = left.getText().split(/[.[]/)[0];
+    const key = Node.isPropertyAccessExpression(left) ? left.getName() : undefined;
+    label = key ? `Filter on ${words(key)}` : `Set ${base}`;
+  } else if (Node.isCallExpression(node) && /\.(push|unshift)$/.test(calleeText(node))) {
+    base = calleeText(node).split('.')[0];
+    label = `Add a condition to ${base}`;
+  }
+  if (!base || !frame.queryVars.has(base)) return undefined;
+  const made = step(walk, 'compute', condense(node.getText(), 90), frame, node);
+  made.label = label;
+  return made;
+}
+
+/**
+ * `const target = a === "increase" ? x + q : a === "decrease" ? x - q : q` —
+ * a chain of `?:` that picks a value is a business rule, so it is drawn as the
+ * decision it is, each arm saying what the value becomes.
+ */
+function valueChoice(
+  walk: Walk,
+  name: string,
+  init: Node,
+  frame: Frame,
+): DecisionQuestion | undefined {
+  const value = unwrap(init);
+  if (!Node.isConditionalExpression(value)) return undefined;
+  const nested = (node: Node): boolean => Node.isConditionalExpression(unwrap(node));
+  if (!nested(value.getWhenTrue()) && !nested(value.getWhenFalse())) return undefined;
+  const arm = (node: Node): DecisionNode[] => {
+    const inner = unwrap(node);
+    if (Node.isConditionalExpression(inner)) {
+      const deeper = valueChoice(walk, name, inner, frame) ?? chooseOne(inner);
+      return [deeper];
+    }
+    const made = step(walk, 'compute', `${name} = ${condense(inner.getText(), 70)}`, frame, inner);
+    made.label = `${name} = ${condense(inner.getText(), 50)}`;
+    return [made];
+  };
+  const chooseOne = (node: ConditionalExpression): DecisionQuestion => {
+    const { question, thenLabel, elseLabel } = phrase(node.getCondition().getText());
+    return decision(walk, question, node.getCondition().getText(), frame, node, [
+      { label: thenLabel, nodes: arm(node.getWhenTrue()), ends: false },
+      { label: elseLabel, nodes: arm(node.getWhenFalse()), ends: false },
+    ]);
+  };
+  return chooseOne(value);
 }
 
 /**
@@ -434,13 +591,20 @@ function walkStatement(walk: Walk, statement: Node, frame: Frame, last: boolean)
   if (Node.isBlock(statement)) return walkStatements(walk, statement.getStatements(), frame, false);
 
   if (Node.isExpressionStatement(statement)) {
+    const building = queryBuilding(walk, statement.getExpression(), frame);
+    if (building) return [...walkExpression(walk, statement.getExpression(), frame), building];
     return walkExpression(walk, statement.getExpression(), frame);
   }
 
   if (Node.isVariableStatement(statement)) {
     return statement.getDeclarations().flatMap((declaration) => {
       const init = declaration.getInitializer();
-      return init ? walkExpression(walk, init, frame) : [];
+      if (!init) return [];
+      const name = declaration.getNameNode();
+      const chosen = Node.isIdentifier(name)
+        ? valueChoice(walk, name.getText(), init, frame)
+        : undefined;
+      return chosen ? [chosen] : walkExpression(walk, init, frame);
     });
   }
 
@@ -463,20 +627,47 @@ function walkStatement(walk: Walk, statement: Node, frame: Frame, last: boolean)
 
   if (Node.isIfStatement(statement)) return ifNodes(walk, statement, frame);
 
+  // `if (!row.sku) continue;` decides what the rest of the loop body does for
+  // this item; dropping it would show the work after it as unconditional.
+  if (Node.isContinueStatement(statement))
+    return [end(walk, 'next', 'skips to the next item', frame, statement)];
+  if (Node.isBreakStatement(statement))
+    return [
+      end(
+        walk,
+        'break',
+        frame.breaks === 'switch' ? 'ends this case' : 'leaves the loop',
+        frame,
+        statement,
+      ),
+    ];
+
   if (Node.isSwitchStatement(statement)) {
-    const branches: DecisionBranch[] = statement.getClauses().map((clause) => {
-      const body = clause.getStatements().filter((inner) => !Node.isBreakStatement(inner));
-      const nodes = walkStatements(walk, body, frame, false);
-      return {
-        label: Node.isCaseClause(clause)
-          ? `case ${condense(clause.getExpression().getText(), 30)}`
-          : 'default',
-        nodes,
-        ends: endsAll(nodes),
-      };
+    // `case "a": case "b": …` is one arm with two labels, and a case with no
+    // `break` runs on into the next one — read the arms the way they execute.
+    const clauses = statement.getClauses();
+    const labelOf = (clause: (typeof clauses)[number]): string =>
+      Node.isCaseClause(clause)
+        ? `case ${condense(clause.getExpression().getText(), 30)}`
+        : 'default';
+    const branches: DecisionBranch[] = [];
+    let pending: string[] = [];
+    clauses.forEach((clause, index) => {
+      pending.push(labelOf(clause));
+      if (clause.getStatements().length === 0 && index < clauses.length - 1) return;
+      const body: Node[] = [];
+      for (let next = index; next < clauses.length; next += 1) {
+        const statements = clauses[next]!.getStatements();
+        const stop = statements.findIndex((inner) => Node.isBreakStatement(inner));
+        body.push(...(stop >= 0 ? statements.slice(0, stop) : statements));
+        if (stop >= 0 || endsFunction(statements.at(-1))) break;
+      }
+      const nodes = walkStatements(walk, body, { ...frame, breaks: 'switch' }, false);
+      branches.push({ label: pending.join(' / '), nodes, ends: endsAll(nodes) });
+      pending = [];
     });
     if (branches.every((branch) => branch.nodes.length === 0)) return [];
-    const exhaustive = statement.getClauses().some((clause) => Node.isDefaultClause(clause));
+    const exhaustive = clauses.some((clause) => Node.isDefaultClause(clause));
     return [
       decision(
         walk,
@@ -501,7 +692,11 @@ function walkStatement(walk: Walk, statement: Node, frame: Frame, last: boolean)
       ? walkStatements(walk, finallyBlock.getStatements(), frame, false)
       : [];
     if (nodes.length === 0 && caught.length === 0 && after.length === 0) return [];
-    if (caught.length === 0 && after.length === 0) return nodes;
+    // `try { await send() } catch { d = null }`: an empty catch is still a
+    // decision — a failure is swallowed and the code carries on — and drawing
+    // the body bare would hand that failure to whatever catch is further out.
+    const swallows = clause !== undefined && caught.length === 0 && nodes.some(canFail);
+    if (caught.length === 0 && after.length === 0 && !swallows) return nodes;
     walk.size += 1;
     return [
       {
@@ -510,7 +705,15 @@ function walkStatement(walk: Walk, statement: Node, frame: Frame, last: boolean)
         at: walk.reader.point(statement),
         nodes,
         ...(clause
-          ? { catch: { label: 'anything above fails', nodes: caught, ends: endsAll(caught) } }
+          ? {
+              catch: {
+                label: swallows
+                  ? 'anything above fails — the error is ignored and it carries on'
+                  : 'anything above fails',
+                nodes: caught,
+                ends: endsAll(caught),
+              },
+            }
           : {}),
         ...(after.length ? { finally: after } : {}),
       },
@@ -525,8 +728,10 @@ function walkStatement(walk: Walk, statement: Node, frame: Frame, last: boolean)
     Node.isDoStatement(statement)
   ) {
     const body = statement.getStatement();
-    const nodes = walkStatement(walk, body, frame, false);
-    if (!nodes.some(worthShowing)) return [];
+    const nodes = walkStatement(walk, body, { ...frame, breaks: 'loop' }, false);
+    // Shown when it does real work, or decides something per item — a loop of
+    // `continue`s is what produces the list the next decision looks at.
+    if (!nodes.some((node) => worthShowing(node) || node.type === 'decision')) return [];
     const head = statement.getText().split('{')[0] ?? 'loop';
     walk.size += 1;
     return [
@@ -583,20 +788,119 @@ function returnNodes(
   last: boolean,
 ): DecisionNode[] {
   const expression = statement.getExpression();
+  // `return handleCreate(req)` from a route: the helper's own returns are the
+  // responses, so it is followed as the server rather than reported as one
+  // response with whichever status its first `return` happens to give.
+  const delegate = expression ? branchingHelper(walk, expression) : undefined;
+  if (delegate && frame.role === 'server' && frame.depth < MAX_DEPTH) {
+    const call = unwrap(expression!) as CallExpression;
+    walk.size += 1;
+    return [
+      {
+        type: 'group',
+        kind: 'function',
+        label: '',
+        title: shortCall(call),
+        side: frame.side,
+        at: walk.reader.point(call),
+        nodes: walkFunction(walk, delegate, { ...frame, depth: frame.depth + 1 }),
+      },
+    ];
+  }
   // `return apiError(…, 403)` and `return { error: unauthorized() }` name their
-  // status already; following the helper would only add its plumbing.
-  const found = expression ? statusIn(walk, expression) : undefined;
-  const work = found || !expression ? [] : walkExpression(walk, expression, frame);
+  // status already; following the helper would only add its plumbing — but
+  // what goes *into* the response is work: `json(await listMedicines(…))`.
+  let found = expression && !delegate ? statusIn(walk, expression) : undefined;
+  const work = !expression
+    ? []
+    : found
+      ? responseWork(walk, expression, frame)
+      : walkExpression(walk, expression, frame);
   if (frame.role === 'server') {
+    // A Nest handler that returns a value answers 201 to a POST, 200 otherwise.
+    if (!found && frame.defaultStatus && expression && !looksLikeResponse(expression))
+      found = { statuses: [frame.defaultStatus] };
     const text = expression
       ? `responds ${condense(expression.getText(), 70)}`
       : 'responds with no body';
     return [...work, end(walk, 'respond', text, frame, statement, found)];
   }
-  if (last && !found) return work;
+  // The last `return` of a helper is drawn when the helper has others: its
+  // ways out are the decision the caller then makes.
+  const owner = nearestFunction(statement) as Functionish | undefined;
+  const several = frame.role === 'helper' && owner !== undefined && returnsOf(owner).length > 1;
+  if (last && !found && !several) return work;
   if (frame.role === 'handler') return [...work, end(walk, 'stop', 'stops here', frame, statement)];
+  // An early `return` in a `.map`/`.forEach` callback finishes that item only.
+  if (frame.role === 'item')
+    return [...work, end(walk, 'next', 'finishes this item early', frame, statement)];
   const text = expression ? `returns ${condense(expression.getText(), 70)}` : 'returns';
   return [...work, end(walk, 'return', text, frame, statement, found)];
+}
+
+/** The work inside a response: its arguments, less the ones that only name a status. */
+function responseWork(walk: Walk, expression: Node, frame: Frame): DecisionNode[] {
+  const value = unwrap(expression);
+  const parts: Node[] = Node.isCallExpression(value)
+    ? value.getArguments()
+    : Node.isNewExpression(value)
+      ? (value.getArguments() ?? [])
+      : Node.isObjectLiteralExpression(value)
+        ? value
+            .getProperties()
+            .flatMap((property) =>
+              Node.isPropertyAssignment(property) && property.getInitializer()
+                ? [property.getInitializer()!]
+                : [],
+            )
+        : [];
+  return parts.flatMap((part) =>
+    statusOf(walk.reader, part)?.statuses.length ? [] : walkExpression(walk, part, frame),
+  );
+}
+
+/** `Response.json(…)`, `res.status(…).json(…)`, `new Response(…)` — an answer already. */
+function looksLikeResponse(expression: Node): boolean {
+  return /^(new )?(Response|NextResponse)\b|\.(json|send|status|redirect)\(/.test(
+    unwrap(expression).getText(),
+  );
+}
+
+function forwardedStatuses(
+  walk: Walk,
+  access: PropertyAccessExpression,
+): { statuses: number[] } | undefined {
+  const base = unwrap(access.getExpression());
+  if (!Node.isIdentifier(base)) return undefined;
+  const init = declarationOf(base)?.getInitializer();
+  const call = init ? unwrap(init) : undefined;
+  if (!call || !Node.isCallExpression(call)) return undefined;
+  const helper = resolveCallee(walk, call);
+  if (!helper) return undefined;
+  const statuses = new Set<number>();
+  for (const returned of returnsOf(helper)) {
+    const object = unwrap(returned);
+    if (!Node.isObjectLiteralExpression(object)) continue;
+    const property = object.getProperty(access.getName());
+    if (!property || !Node.isPropertyAssignment(property)) continue;
+    const initializer = property.getInitializer();
+    for (const status of (initializer ? statusOf(walk.reader, initializer)?.statuses : []) ?? [])
+      statuses.add(status);
+  }
+  return statuses.size ? { statuses: [...statuses].sort((a, b) => a - b) } : undefined;
+}
+
+/**
+ * The project function a returned call runs, when it can return more than one
+ * thing — `apiError(msg, 400)` has one `return` and names its status; a
+ * handler with an `if` and two responses does not.
+ */
+function branchingHelper(walk: Walk, expression: Node): Functionish | undefined {
+  const value = unwrap(expression);
+  if (!Node.isCallExpression(value)) return undefined;
+  const target = resolveCallee(walk, value);
+  if (!target || walk.stack.includes(target)) return undefined;
+  return returnsOf(target).length > 1 ? target : undefined;
 }
 
 /** The status a returned value carries: the value itself, or one of its properties. */
@@ -607,6 +911,18 @@ function statusIn(
   const direct = statusOf(walk.reader, expression);
   if (direct?.statuses.length) return direct;
   const value = unwrap(expression);
+  // `const response = NextResponse.json(…); …; return response;`
+  if (Node.isIdentifier(value)) {
+    const init = declarationOf(value)?.getInitializer();
+    const held = init ? statusOf(walk.reader, init) : undefined;
+    if (held?.statuses.length) return held;
+  }
+  // `return ctx.error` where `ctx = await requireClinic(…)`: every status that
+  // helper puts under `error`.
+  if (Node.isPropertyAccessExpression(value)) {
+    const forwarded = forwardedStatuses(walk, value);
+    if (forwarded) return forwarded;
+  }
   if (!Node.isObjectLiteralExpression(value)) return undefined;
   for (const property of value.getProperties()) {
     if (!Node.isPropertyAssignment(property)) continue;
@@ -678,10 +994,21 @@ function walkExpression(walk: Walk, expression: Node, frame: Frame): DecisionNod
         ),
       ];
     }
-    return [
+    const work = [
       ...walkExpression(walk, node.getLeft(), frame),
       ...walkExpression(walk, node.getRight(), frame),
     ];
+    // `window.location.href = "/login"` sends the user somewhere else.
+    if (
+      operator === SyntaxKind.EqualsToken &&
+      /^(window\.)?location(\.href)?$/.test(node.getLeft().getText())
+    ) {
+      const target = literalOf(node.getRight()) ?? condense(node.getRight().getText(), 50);
+      const go = step(walk, 'ui', condense(node.getText(), 80), frame, node);
+      go.label = `Go to ${target}`;
+      work.push(go);
+    }
+    return work;
   }
 
   // The calls in this expression, not inside functions it creates.
@@ -691,24 +1018,74 @@ function walkExpression(walk: Walk, expression: Node, frame: Frame): DecisionNod
     .sort((a, b) => a.getEnd() - b.getEnd());
 
   const kept = calls
-    .map((call) => ({ call, kind: classify(walk, call) }))
+    .map((call) => ({ call, kind: classify(walk, call, frame) }))
     .filter((entry) => entry.kind !== undefined);
   const out: DecisionNode[] = [];
   const handled = new Set<CallExpression>();
   for (const { call, kind } of kept) {
     if (handled.has(call) || walk.size >= MAX_NODES) continue;
-    // `setError(message(e))`: the helper is part of what the outer call shows.
-    if ((kind === 'project' || kind === 'ui') && insideArgumentsOfKept(call, kept)) continue;
-    out.push(...callNodes(walk, call, kind!, frame, handled));
+    // `Promise.all([a(), b()])` draws its own members; skip them here.
+    if (
+      kept.some(
+        (other) =>
+          other.kind === 'parallel' && other.call !== call && insideArguments(call, other.call),
+      )
+    )
+      continue;
+    const nodes = callNodes(walk, call, kind!, frame, handled);
+    // `setError(message(e))`: a plain helper inside another call's arguments is
+    // part of what that call shows. One with a request or a query inside —
+    // `setData(await loadOrders())` — is the step itself, and stays.
+    if (
+      (kind === 'project' || kind === 'ui') &&
+      insideArgumentsOfKept(call, kept) &&
+      nodes.every((node) => node.type === 'step')
+    )
+      continue;
+    out.push(...nodes);
   }
   return out;
 }
 
 type CallKind =
-  'request' | 'effect' | 'query' | 'mutate' | 'continuation' | 'prop' | 'ui' | 'project';
+  | 'request'
+  | 'parallel'
+  | 'iife'
+  | 'outside'
+  | 'bound'
+  | 'hooked'
+  | 'effect'
+  | 'query'
+  | 'mutate'
+  | 'continuation'
+  | 'each'
+  | 'prop'
+  | 'ui'
+  | 'project';
 
-function classify(walk: Walk, call: CallExpression): CallKind | undefined {
+/** Array methods whose callback runs once per item. */
+const EACH = new Set([
+  'map',
+  'forEach',
+  'flatMap',
+  'filter',
+  'some',
+  'every',
+  'reduce',
+  'find',
+  'findIndex',
+]);
+
+function classify(walk: Walk, call: CallExpression, frame: Frame): CallKind | undefined {
   if (walk.requests.has(siteKey(call))) return 'request';
+  const head = calleeText(call);
+  if (/^Promise\.(all|allSettled|race|any)$/.test(head)) {
+    const [list] = call.getArguments();
+    if (list && Node.isArrayLiteralExpression(unwrap(list))) return 'parallel';
+  }
+  const target = unwrap(call.getExpression());
+  if (Node.isArrowFunction(target) || Node.isFunctionExpression(target)) return 'iife';
+  if (Node.isIdentifier(call.getExpression()) && frame.bound?.has(head)) return 'bound';
   if (effectsAt(walk, call).length > 0) return 'effect';
   if (unlinkedQuery(walk, call)) return 'query';
   const text = calleeText(call);
@@ -716,9 +1093,28 @@ function classify(walk: Walk, call: CallExpression): CallKind | undefined {
   const member = text.split('.').pop() ?? '';
   if ((member === 'then' || member === 'catch') && call.getArguments().length > 0)
     return 'continuation';
+  if (
+    EACH.has(member) &&
+    call.getArguments().some((arg) => functionOf(arg)) &&
+    !resolveCallee(walk, call)
+  )
+    return 'each';
   if (Node.isIdentifier(call.getExpression()) && walk.childProps.has(text)) return 'prop';
+  // `const { refetch } = useMedicines()` is that query's request again.
+  if (Node.isIdentifier(call.getExpression()) && hookMember(walk, call)?.request) return 'hooked';
+  // `setImportJobId(…)` is a function in the project that writes to the
+  // database; only a `set…` nobody declared as a function is a state setter.
+  if (/^set[A-Z]\w*$/.test(text) && resolveCallee(walk, call)) return 'project';
   if (UI_CALLS.test(text) || /^set[A-Z]\w*$/.test(text)) return 'ui';
   if (resolveCallee(walk, call)) return 'project';
+  if (Node.isIdentifier(call.getExpression()) && hookMember(walk, call)) return 'hooked';
+  // `fetch(url)` that is not one of this app's own requests leaves the app.
+  if (
+    /^(fetch|axios|got|ky|axios\.(get|post|put|patch|delete|head|request)|(got|ky)\.(get|post|put|patch|delete)|superagent\.(get|post|put|patch|delete))$/.test(
+      text,
+    )
+  )
+    return 'outside';
   if (Node.isIdentifier(call.getExpression()) && isProp(call, text)) return 'ui';
   return undefined;
 }
@@ -747,7 +1143,9 @@ function callNodes(
           text: isDb ? effect.label : `${effect.label} (leaves the app)`,
           side: isDb ? 'database' : 'external',
           at: walk.reader.point(call),
-          ...(isDb ? { effect: String(meta['effect'] ?? meta['access'] ?? 'read') } : {}),
+          ...(isDb
+            ? { effect: upsertAware(call, String(meta['effect'] ?? meta['access'] ?? 'read')) }
+            : {}),
           nodeId: effect.id,
         } satisfies DecisionStep;
       });
@@ -762,12 +1160,115 @@ function callNodes(
           text: `${found.collection}.${found.operation}`,
           side: 'database',
           at: walk.reader.point(call),
-          effect: found.effect,
+          effect: upsertAware(call, found.effect),
+        },
+      ];
+    }
+    case 'parallel': {
+      const list = unwrap(call.getArguments()[0]!) as ArrayLiteralExpression;
+      const inner = list.getElements().flatMap((element) => walkExpression(walk, element, frame));
+      if (inner.length === 0) return [];
+      walk.size += 1;
+      return [
+        {
+          type: 'group',
+          kind: 'parallel',
+          label: '',
+          title: `at the same time (${calleeText(call)})`,
+          side: frame.side,
+          at: walk.reader.point(call),
+          nodes: inner,
+        },
+      ];
+    }
+    case 'iife': {
+      // `(async () => { … })()` runs where it is written.
+      const fn = unwrap(call.getExpression()) as Functionish;
+      return walkFunction(walk, fn, { ...frame, role: 'helper', depth: frame.depth + 1 });
+    }
+    case 'bound': {
+      // The callee runs the function its caller handed it: `fn()` is `setCategory(v)`.
+      const fn = frame.bound!.get(calleeText(call))!;
+      return walkFunction(walk, fn, { ...frame, role: 'helper', depth: frame.depth + 1 });
+    }
+    case 'hooked': {
+      const member = hookMember(walk, call)!;
+      if (member.request) return requestNodes(walk, member.request, frame);
+      if (member.fn && frame.depth < MAX_DEPTH && !walk.stack.includes(member.fn)) {
+        const inner = walkFunction(walk, member.fn, {
+          ...frame,
+          role: 'helper',
+          depth: frame.depth + 1,
+        });
+        if (inner.some(worthShowing)) {
+          walk.size += 1;
+          return [
+            {
+              type: 'group',
+              kind: 'function',
+              label: '',
+              title: shortCall(call),
+              side: frame.side,
+              at: walk.reader.point(call),
+              nodes: inner,
+            },
+          ];
+        }
+      }
+      const node = step(walk, 'ui', shortCall(call), frame, call);
+      node.label = `Call ${calleeText(call)}() from ${member.hook}()`;
+      return [node];
+    }
+    case 'outside': {
+      const text = calleeText(call);
+      const [target] = call.getArguments();
+      const where = target ? (literalOf(target) ?? condense(target.getText(), 50)) : '';
+      // `axios.post("/api/auth/refresh")` is this app's own route, not a third party.
+      const own = where.startsWith('/');
+      const verb = /\.(get|post|put|patch|delete|head)$/.exec(text)?.[1]?.toUpperCase();
+      walk.size += 1;
+      return [
+        {
+          type: 'step',
+          kind: own ? 'ui' : 'external',
+          label: own
+            ? `Request this app’s own ${verb ? `${verb} ` : ''}${where}`
+            : `Call an outside service${where ? `: ${where}` : ''}`,
+          text: shortCall(call),
+          side: own ? frame.side : 'external',
+          at: walk.reader.point(call),
         },
       ];
     }
     case 'mutate':
       return mutateNodes(walk, call, frame);
+    case 'each': {
+      // `rows.map(async (row) => medicines.insertOne(row))`: the query runs per
+      // row, which is a loop the tree must show, not code it may skip.
+      const callback = call
+        .getArguments()
+        .map((arg) => functionOf(arg))
+        .find(Boolean)!;
+      const inner = walkFunction(walk, callback, {
+        ...frame,
+        role: 'item',
+        depth: frame.depth + 1,
+      });
+      if (!inner.some((node) => worthShowing(node) || node.type === 'decision')) return [];
+      const callee = call.getExpression() as PropertyAccessExpression;
+      walk.size += 1;
+      return [
+        {
+          type: 'group',
+          kind: 'loop',
+          label: '',
+          title: `for each item of ${condense(callee.getExpression().getText(), 40)}`,
+          side: frame.side,
+          at: walk.reader.point(call),
+          nodes: inner,
+        },
+      ];
+    }
     case 'continuation':
       return continuationNodes(walk, call, frame, handled);
     case 'prop': {
@@ -794,12 +1295,23 @@ function callNodes(
       const label = shortCall(call);
       if (frame.depth >= MAX_DEPTH)
         return [step(walk, 'call', `${label} — not followed further`, frame, call)];
-      if (walk.opened.has(target))
+      // A helper handed a function runs it, so each call is opened on its own.
+      const takesFunctions = call.getArguments().some((arg) => functionOf(arg) !== undefined);
+      if (walk.opened.has(target) && !takesFunctions)
         return [step(walk, 'call', `${label} — opened above`, frame, call)];
+      const bound = new Map<string, Functionish>();
+      target.getParameters().forEach((param, index) => {
+        const arg = call.getArguments()[index];
+        const fn =
+          functionOf(arg) ??
+          (arg && Node.isIdentifier(arg) ? resolveName(walk, arg.getText(), arg) : undefined);
+        if (fn && Node.isIdentifier(param.getNameNode())) bound.set(param.getName(), fn);
+      });
       const inner = walkFunction(walk, target, {
         side: frame.side,
         role: 'helper',
         depth: frame.depth + 1,
+        ...(bound.size ? { bound } : {}),
       });
       if (!inner.some(worthShowing)) return [step(walk, 'call', label, frame, call)];
       walk.opened.add(target);
@@ -841,7 +1353,13 @@ function requestNodes(walk: Walk, located: LocatedCall, frame: Frame): DecisionN
   }
   const handler = located.backendFns[0];
   if (handler) {
-    const server: Frame = { side: 'server', role: 'server', depth: frame.depth + 1 };
+    const nest = detail.route?.framework === 'nestjs';
+    const server: Frame = {
+      side: 'server',
+      role: 'server',
+      depth: frame.depth + 1,
+      ...(nest ? { defaultStatus: detail.method === 'POST' ? 201 : 200 } : {}),
+    };
     nodes.push(...walkFunction(walk, handler.fn, server));
   } else if (!detail.matched) {
     nodes.push({
@@ -863,6 +1381,61 @@ function requestNodes(walk: Walk, located: LocatedCall, frame: Frame): DecisionN
       ...(located.call ? { at: walk.reader.point(located.call) } : {}),
       ...(handler ? { handledBy: handler.at } : {}),
       nodes,
+    },
+    ...interceptorNodes(walk, located, frame),
+  ];
+}
+
+/**
+ * The client's own response interceptor, between the answer and the screen:
+ * `api.interceptors.response.use(ok, onError)` is where a 401 is refreshed
+ * and retried, or sent to the login page — the screen's `onError` only sees
+ * what it lets through.
+ */
+function interceptorNodes(walk: Walk, located: LocatedCall, frame: Frame): DecisionNode[] {
+  const callee = located.call?.getExpression();
+  const base =
+    callee && Node.isPropertyAccessExpression(callee) ? unwrap(callee.getExpression()) : undefined;
+  if (!base || !Node.isIdentifier(base)) return [];
+  const declared = walk.reader.declaration(base.getText(), base.getSourceFile());
+  const file = declared?.getSourceFile();
+  if (!file) return [];
+  const use = file
+    .getDescendantsOfKind(SyntaxKind.CallExpression)
+    .find((candidate) => /\.interceptors\.response\.use$/.test(calleeText(candidate)));
+  const onError = use?.getArguments()[1];
+  const fn = onError
+    ? (functionOf(onError) ??
+      (Node.isIdentifier(onError) ? resolveName(walk, onError.getText(), onError) : undefined))
+    : undefined;
+  if (!fn) return [];
+  if (walk.opened.has(fn)) {
+    const again = step(
+      walk,
+      'call',
+      `${base.getText()}.interceptors.response — opened above`,
+      frame,
+      use!,
+    );
+    again.label = 'If it fails, the API client’s interceptor runs (opened above)';
+    return [again];
+  }
+  walk.limits.add(
+    'An interceptor is drawn as written: whether its conditions hold for this particular URL is not worked out.',
+  );
+  const inner = walkFunction(walk, fn, { side: 'browser', role: 'helper', depth: frame.depth + 1 });
+  if (!inner.some(worthShowing)) return [];
+  walk.opened.add(fn);
+  walk.size += 1;
+  return [
+    {
+      type: 'group',
+      kind: 'function',
+      label: 'If the request fails, the API client’s interceptor runs first',
+      title: `${base.getText()}.interceptors.response (on error)`,
+      side: 'browser',
+      at: walk.reader.point(use!),
+      nodes: inner,
     },
   ];
 }
@@ -936,6 +1509,16 @@ function continuationNodes(
   const callee = call.getExpression();
   if (!Node.isPropertyAccessExpression(callee)) return [];
   const member = callee.getName();
+  // `.then(a).catch(b)`: the `.catch` draws both arms as one decision.
+  const outer = call.getParent();
+  if (
+    member === 'then' &&
+    outer &&
+    Node.isPropertyAccessExpression(outer) &&
+    outer.getName() === 'catch' &&
+    Node.isCallExpression(outer.getParent())
+  )
+    return [];
   const helper: Frame = { ...frame, role: 'helper', depth: frame.depth + 1 };
   const run = (arg: Node | undefined): DecisionNode[] => {
     const fn =
@@ -997,31 +1580,92 @@ function resolveCallee(walk: Walk, call: CallExpression): Functionish | undefine
       if (method) return method;
     }
   }
+  // `store.adjustStock(…)` through `import * as store from "@/lib/db/store"`.
+  const base = unwrap(callee.getExpression());
+  if (Node.isIdentifier(base)) {
+    const namespace = call
+      .getSourceFile()
+      .getImportDeclarations()
+      .find((declaration) => declaration.getNamespaceImport()?.getText() === base.getText());
+    if (namespace) {
+      const target = walk.reader.resolveModule(
+        call.getSourceFile(),
+        namespace.getModuleSpecifierValue(),
+      );
+      return target ? walk.reader.functionNamed(name, target) : undefined;
+    }
+  }
   const matches = walk.graph
     .nodesOfKind('method')
     .filter((node) => node.source && (node.label === name || node.label.endsWith(`.${name}`)));
-  const inFlow = matches.filter((node) =>
+  // Only a method whose class the receiver names: `this.ordersService.create`
+  // -> `OrdersService.create`. A name match alone would send `map.get(key)` to
+  // whichever class in the project happens to have a `get`.
+  const holder = receiver.split('.').pop()?.replace(/^_+/, '').toLowerCase() ?? '';
+  if (!holder) return undefined;
+  const owns = (node: FlowNode): boolean => {
+    const owner = node.label.split('.')[0]?.toLowerCase() ?? '';
+    return (
+      node.label.includes('.') &&
+      (owner === holder ||
+        (holder.length >= 4 && (owner.startsWith(holder) || holder.startsWith(owner))))
+    );
+  };
+  const candidates = matches.filter(owns);
+  const inFlow = candidates.filter((node) =>
     walk.flow.steps.some((flowStep) => flowStep.nodeId === node.id),
   );
-  // `this.ordersService.create` -> `OrdersService.create`, not the controller's
-  // own `create` that makes the call.
-  const holder = receiver.split('.').pop()?.replace(/^_+/, '').toLowerCase() ?? '';
-  const byHolder = (list: FlowNode[]): FlowNode[] =>
-    list.filter((node) => node.label.split('.')[0]?.toLowerCase() === holder);
-  const pick = [byHolder(inFlow), byHolder(matches), inFlow, matches].find(
-    (list) => list.length === 1,
-  )?.[0];
+  const pick = [inFlow, candidates].find((list) => list.length === 1)?.[0];
   if (!pick?.source) return undefined;
-  // `products.find()` is the driver, not a project method that happens to be called `find`.
-  if (
-    /^(find|findOne|insertOne|updateOne|deleteOne|aggregate|save|create|update|delete)$/.test(
-      name,
-    ) &&
-    !/service|repo|store|this/i.test(receiver)
-  )
-    return undefined;
   const file = walk.reader.file(pick.source.file);
   return file ? functionAtLine(file, pick.source.line) : undefined;
+}
+
+/**
+ * `const { createCustomer } = useCreateCustomer(); createCustomer(…)` — the
+ * function a hook hands back, or the request behind `refetch` from a query hook.
+ */
+function hookMember(
+  walk: Walk,
+  call: CallExpression,
+): { hook: string; fn?: Functionish; request?: LocatedCall } | undefined {
+  const name = calleeText(call);
+  const scope = nearestFunction(call);
+  const declaration = scope ? localVariable(scope, name) : undefined;
+  if (!declaration || !Node.isVariableDeclaration(declaration)) return undefined;
+  const binding = declaration.getNameNode();
+  const init = declaration.getInitializer();
+  const hookCall = init ? unwrap(init) : undefined;
+  if (!Node.isObjectBindingPattern(binding) || !hookCall || !Node.isCallExpression(hookCall))
+    return undefined;
+  const hook = calleeText(hookCall);
+  if (!/^use[A-Z]/.test(hook)) return undefined;
+  const element = binding.getElements().find((candidate) => candidate.getName() === name);
+  const key = element?.getPropertyNameNode()?.getText() ?? name;
+  const located = walk.located.calls.find((candidate) => candidate.hook?.name === hook);
+  if (/^(refetch|mutate|mutateAsync|trigger)$/.test(key) && located)
+    return { hook, request: located };
+  const hookFn = walk.reader.functionNamed(hook, call.getSourceFile());
+  if (hookFn) {
+    for (const returned of returnsOf(hookFn)) {
+      const object = unwrap(returned);
+      if (!Node.isObjectLiteralExpression(object)) continue;
+      const property = object.getProperty(key);
+      const value =
+        property && Node.isShorthandPropertyAssignment(property)
+          ? property.getNameNode()
+          : property && Node.isPropertyAssignment(property)
+            ? property.getInitializer()
+            : property && Node.isMethodDeclaration(property)
+              ? property
+              : undefined;
+      const fn =
+        functionOf(value) ??
+        (value && Node.isIdentifier(value) ? resolveName(walk, value.getText(), value) : undefined);
+      if (fn) return { hook, fn };
+    }
+  }
+  return { hook };
 }
 
 function resolveName(walk: Walk, name: string, at: Node): Functionish | undefined {
@@ -1109,8 +1753,15 @@ function unlinkedQuery(
   if (!Node.isPropertyAccessExpression(callee)) return undefined;
   const operation = callee.getName();
   const effect = dbEffectOf(operation);
-  if (!effect) return undefined;
+  if (!effect || takesCallback(call)) return undefined;
   const receiver = unwrap(callee.getExpression());
+  // Where the receiver came from is the evidence: `db.collection<T>("x")`, or
+  // a name destructured from `getCollections()`. Then even `find` is a query.
+  const origin = collectionOrigin(walk, receiver, 0);
+  if (origin) return { collection: origin, operation, effect };
+  // Without that, only a method no array or Map has, on a receiver named
+  // like a collection the graph knows.
+  if (!DRIVER_ONLY.test(operation)) return undefined;
   const name = Node.isIdentifier(receiver)
     ? receiver.getText()
     : Node.isPropertyAccessExpression(receiver)
@@ -1123,6 +1774,83 @@ function unlinkedQuery(
   return collection ? { collection: collection.label, operation, effect } : undefined;
 }
 
+/** `updateOne(filter, update, { upsert: true })` inserts when nothing matches. */
+function upsertAware(call: CallExpression, effect: string): string {
+  return effect === 'update' &&
+    call.getArguments().some((arg) => /\bupsert\s*:\s*true\b/.test(arg.getText()))
+    ? 'upsert'
+    : effect;
+}
+
+/** `rows.find((row) => …)` is an array method: a driver's `find` takes a filter object. */
+function takesCallback(call: CallExpression): boolean {
+  return call.getArguments().some((arg) => functionOf(arg) !== undefined);
+}
+
+/** The collection an expression holds, read from where it was made. */
+function collectionOrigin(walk: Walk, expression: Node, depth: number): string | undefined {
+  if (depth > 3) return undefined;
+  const node = unwrap(expression);
+  if (Node.isCallExpression(node)) {
+    // `db.collection("x")`, `db.collection<T>("x")`, `getCollection("x")`
+    if (/(^|\.)(collection|getCollection)$/.test(calleeText(node))) {
+      const [first] = node.getArguments();
+      return first ? literalOf(first) : undefined;
+    }
+    return undefined;
+  }
+  if (Node.isPropertyAccessExpression(node)) {
+    // `cols.medicines` where `const cols = await getCollections()`
+    const base = unwrap(node.getExpression());
+    return Node.isIdentifier(base) && collectionsSource(walk, base) ? node.getName() : undefined;
+  }
+  if (!Node.isIdentifier(node)) return undefined;
+  const declaration = declarationOf(node);
+  if (!declaration) return undefined;
+  const init = declaration.getInitializer();
+  const binding = declaration.getNameNode();
+  if (Node.isIdentifier(binding)) return init ? collectionOrigin(walk, init, depth + 1) : undefined;
+  if (Node.isObjectBindingPattern(binding) && init && isCollectionsCall(unwrap(init))) {
+    const element = binding
+      .getElements()
+      .find((candidate) => candidate.getName() === node.getText());
+    return element ? (element.getPropertyNameNode()?.getText() ?? element.getName()) : undefined;
+  }
+  return undefined;
+}
+
+/** `const cols = await getCollections()` — a value whose properties are collections. */
+function collectionsSource(walk: Walk, identifier: Node): boolean {
+  const declaration = declarationOf(identifier);
+  const init = declaration?.getInitializer();
+  return init !== undefined && isCollectionsCall(unwrap(init));
+}
+
+function isCollectionsCall(node: Node): boolean {
+  return (
+    Node.isCallExpression(node) && /(^|\.)(get)?(collections|models|db)$/i.test(calleeText(node))
+  );
+}
+
+/** The `const`/`let` an identifier was declared with, in its function or its module. */
+function declarationOf(identifier: Node): VariableDeclaration | undefined {
+  const name = identifier.getText();
+  const scope = nearestFunction(identifier);
+  const local = scope ? localVariable(scope, name) : undefined;
+  const found = local ?? identifier.getSourceFile().getVariableDeclaration(name);
+  return found && Node.isVariableDeclaration(found) ? found : undefined;
+}
+
+/** `const cache = new Map()` — state in this process, whatever the graph called it. */
+function isLocalStore(walk: Walk, call: CallExpression): boolean {
+  const callee = call.getExpression();
+  if (!Node.isPropertyAccessExpression(callee)) return false;
+  const base = unwrap(callee.getExpression());
+  if (!Node.isIdentifier(base)) return false;
+  const init = declarationOf(base)?.getInitializer();
+  return init !== undefined && /^new (Map|Set|WeakMap|WeakSet)\b/.test(unwrap(init).getText());
+}
+
 /** The db-ops and effects the graph found at this call — the call itself, not one beside it. */
 function effectsAt(walk: Walk, call: CallExpression): FlowNode[] {
   const point = walk.reader.point(call);
@@ -1132,9 +1860,15 @@ function effectsAt(walk: Walk, call: CallExpression): FlowNode[] {
   for (const line of lines) {
     for (const node of walk.effects.get(`${point.file}:${line}`) ?? []) {
       if (found.includes(node)) continue;
-      if (node.kind === 'db-op' && String(node.meta?.['operation'] ?? '') !== member) continue;
-      if (node.kind === 'external-effect' && String(node.meta?.['call'] ?? '') !== calleeText(call))
-        continue;
+      if (node.kind === 'db-op') {
+        if (String(node.meta?.['operation'] ?? '') !== member) continue;
+        // The scan took `clinics.find((c) => …)` for a query by its name.
+        if (takesCallback(call)) continue;
+      }
+      if (node.kind === 'external-effect') {
+        if (String(node.meta?.['call'] ?? '') !== calleeText(call)) continue;
+        if (isLocalStore(walk, call)) continue;
+      }
       found.push(node);
     }
   }
@@ -1182,6 +1916,12 @@ function ownedBy(call: Node, root: Node): boolean {
   return true;
 }
 
+function insideArguments(call: CallExpression, outer: CallExpression): boolean {
+  return outer
+    .getArguments()
+    .some((arg) => arg.getStart() <= call.getStart() && call.getEnd() <= arg.getEnd());
+}
+
 function insideArgumentsOfKept(
   call: CallExpression,
   kept: Array<{ call: CallExpression; kind: CallKind | undefined }>,
@@ -1217,13 +1957,30 @@ function endsAll(nodes: DecisionNode[]): boolean {
   return false;
 }
 
+/** A request, a query or an outside call: something that can fail at runtime. */
+function canFail(node: DecisionNode): boolean {
+  switch (node.type) {
+    case 'step':
+      return node.kind === 'db' || node.kind === 'external';
+    case 'group':
+      return node.kind === 'request' || node.nodes.some(canFail);
+    case 'decision':
+      return node.branches.some((branch) => branch.nodes.some(canFail));
+    case 'try':
+      return node.nodes.some(canFail);
+    default:
+      return false;
+  }
+}
+
 /** Whether a helper's inside is worth opening: anything but plain calls. */
 function worthShowing(node: DecisionNode): boolean {
   switch (node.type) {
     case 'step':
-      return node.kind !== 'call';
+      // A helper opened earlier in the tree was worth opening then.
+      return node.kind !== 'call' || node.text.endsWith('— opened above');
     case 'end':
-      return node.outcome !== 'return';
+      return !['return', 'next', 'break'].includes(node.outcome);
     case 'decision':
       return node.branches.some((branch) => branch.nodes.some(worthShowing));
     case 'group':
@@ -1297,8 +2054,18 @@ function decision(
 function triggerText(flow: FeatureFlow): string {
   if (flow.event === 'mount' || flow.id.endsWith('-loads'))
     return `${flow.component ?? 'The page'} opens`;
-  const verb =
-    flow.event === 'onSubmit' ? 'submits' : flow.event === 'onChange' ? 'changes' : 'clicks';
+  const verbs: Record<string, string> = {
+    onSubmit: 'submits',
+    onChange: 'changes',
+    onKeyDown: 'presses a key in',
+    onKeyUp: 'presses a key in',
+    onFocus: 'focuses',
+    onBlur: 'leaves',
+    onMouseDown: 'presses on',
+    onClose: 'closes',
+    onSelect: 'picks',
+  };
+  const verb = verbs[flow.event ?? ''] ?? 'clicks';
   // `MedicineForm onSubmit` is a name made from code; the title reads better.
   if (/\bon[A-Z]/.test(flow.label)) {
     const where = flow.component ?? flow.screen;
@@ -1323,7 +2090,7 @@ function countOf(nodes: DecisionNode[]): ActionDecisions['counts'] {
         if (node.catch) visit(node.catch.nodes);
         if (node.finally) visit(node.finally);
       } else if (node.type === 'end') {
-        if (node.outcome !== 'return') counts.outcomes += 1;
+        if (!['return', 'next', 'break'].includes(node.outcome)) counts.outcomes += 1;
       } else if (node.kind === 'db') counts.queries += 1;
     }
   };
@@ -1369,6 +2136,7 @@ function labelTree(nodes: DecisionNode[]): DecisionNode[] {
 }
 
 const DB_VERB: Record<string, string> = {
+  upsert: 'Update or insert into',
   read: 'Read',
   create: 'Insert into',
   update: 'Update',
@@ -1380,6 +2148,7 @@ function stepLabel(node: DecisionStep): string {
   switch (node.kind) {
     case 'trigger':
     case 'guard':
+    case 'compute':
       return capitalise(node.text);
     case 'db': {
       const [collection = node.text] = node.text.split('.');
@@ -1469,12 +2238,20 @@ function endLabel(node: DecisionEnd): string {
       return `Respond with ${node.text.replace(/^responds /, '')}`;
     case 'throw':
       return `Throw ${status ? `${status} error` : 'an error'}${message}`;
+    case 'next':
+      return node.text === 'finishes this item early'
+        ? 'Done with this item'
+        : 'Skip to the next item';
+    case 'break':
+      return node.text === 'ends this case' ? 'End this case' : 'Leave the loop';
     case 'return': {
       if (status) return `Return a ${status} error to the caller${message}`;
       const error = /error:\s*["'`]([^"'`]+)["'`]/.exec(node.text)?.[1];
       if (error) return `Return error "${error}" to the caller`;
       const value = node.text.replace(/^returns ?/, '');
-      return value ? `Return early with ${value}` : 'Return early';
+      // `return Promise.reject(error)` fails the caller's await with the error.
+      if (/^Promise\.reject\(/.test(value)) return 'Fail — pass the error on to the caller';
+      return value ? `Return ${value}` : 'Return';
     }
   }
 }
@@ -1485,6 +2262,8 @@ function groupLabel(node: DecisionGroup): string {
       return `Send ${node.title} to the server`;
     case 'loop':
       return capitalise(node.title);
+    case 'parallel':
+      return 'These run at the same time';
     case 'unlinked':
       return node.title;
     case 'function': {
@@ -1610,7 +2389,14 @@ export function renderDecisionTree(tree: ActionDecisions): string {
           lines.push(`${indent}■ ${node.text}${statusText(node)}${where(node.at)}`);
           break;
         case 'group': {
-          const mark = node.kind === 'request' ? '⇄' : node.kind === 'loop' ? '↻' : '▸';
+          const mark =
+            node.kind === 'request'
+              ? '⇄'
+              : node.kind === 'loop'
+                ? '↻'
+                : node.kind === 'parallel'
+                  ? '⇉'
+                  : '▸';
           const handled = node.handledBy
             ? `  → ${node.handledBy.file}:${node.handledBy.line}`
             : where(node.at);
