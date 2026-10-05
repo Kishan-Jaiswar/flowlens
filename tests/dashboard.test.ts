@@ -7,10 +7,12 @@ import {
   projectFindings,
   actionDecisions,
   actionQueries,
+  analyzeBreakage,
   analyzeChanged,
   analyzeFlowImpact,
   explainAction,
   flowApis,
+  flowPages,
   flowTiming,
   indexTests,
   planTests,
@@ -42,7 +44,13 @@ const publicDir = resolve(here, '..', 'apps', 'dashboard', 'public');
 
 const scanned = scan({ root: EXAMPLE_ROOT });
 const graph: SerializedGraph = scanned.graph.toJSON();
-const flows = resolveFlows(scanned.graph).map((flow) => ({ ...flow }));
+const resolved = resolveFlows(scanned.graph);
+const pagesByFlow = flowPages(scanned.graph, resolved);
+// The server adds each action's pages to `/api/flows`; so does this answer.
+const flows = resolved.map((flow) => ({ ...flow, pages: pagesByFlow.get(flow.id) ?? [] }));
+
+/** Set by a test to answer `/api/changed/breakage` with a report of its own. */
+let breakageResponse: unknown;
 
 /** What the real server answers, from a real graph. */
 function apiResponse(path: string): unknown {
@@ -50,6 +58,13 @@ function apiResponse(path: string): unknown {
   if (path.startsWith('/api/flows')) return flows;
   if (path.startsWith('/api/doctor')) {
     return { brokenCalls: [], deadEndpoints: [], sharedWrites: [] };
+  }
+  if (path.startsWith('/api/changed/breakage')) {
+    if (breakageResponse) return breakageResponse;
+    return {
+      against: 'the last commit',
+      ...analyzeBreakage(scanned.graph, [], { root: EXAMPLE_ROOT }),
+    };
   }
   if (path.startsWith('/api/changed')) {
     // A diff the graph really does run through: the example's own order form.
@@ -129,12 +144,13 @@ async function loadDashboard(): Promise<void> {
   // insight the tabs need.
   await vi.waitFor(() => {
     expect(document.getElementById('graph')?.textContent).not.toBe('');
-    expect(document.querySelectorAll('#tabs .tab').length).toBe(8);
+    expect(document.querySelectorAll('#tabs .tab').length).toBe(6);
     expect(document.querySelector('#tab-impact .tab-badge')).not.toBeNull();
   });
 }
 
 beforeEach(async () => {
+  breakageResponse = undefined;
   await loadDashboard();
 });
 
@@ -152,14 +168,92 @@ describe('the dashboard renders a real graph', () => {
   it('lists every flow the API returned', () => {
     const items = document.querySelectorAll('#flow-list *');
     expect(items.length).toBeGreaterThan(0);
-    const text = document.getElementById('flow-list')?.textContent ?? '';
-    for (const flow of flows.slice(0, 3)) {
-      expect(text).toContain(flow.title);
+    const rows = [...document.querySelectorAll<HTMLElement>('#flow-list .flow-item')];
+    for (const flow of flows) {
+      const row = rows.find((item) => item.dataset['flowId'] === flow.id);
+      expect(row, `no row for ${flow.id}`).toBeDefined();
+      // The page is in the heading; the full title stays on hover.
+      expect(row!.title).toContain(flow.title);
     }
-    // Every row keeps its detail line: how it is triggered, where, what it calls.
-    for (const item of document.querySelectorAll('#flow-list .flow-item')) {
+    // Every row keeps its detail line: the API it calls, or that it calls none.
+    for (const item of rows) {
       expect(item.querySelector('.meta')?.textContent?.trim()).toBeTruthy();
+      expect(item.querySelector('.kind-icon')).not.toBeNull();
     }
+  });
+
+  it('groups the actions under the page each one is on', () => {
+    const groups = [...document.querySelectorAll<HTMLDetailsElement>('#flow-list .page-group')];
+    expect(groups.length).toBeGreaterThan(0);
+    const routes = groups.map((group) => group.querySelector('.page-route')?.textContent ?? '');
+    for (const flow of flows) {
+      const expected = flow.pages.length
+        ? flow.pages.map((page) => (page.layout ? 'shared layout' : page.route))
+        : ['not placed on a page'];
+      for (const route of expected) {
+        const group = groups[routes.indexOf(route)];
+        expect(group, `no group ${route}`).toBeDefined();
+        expect(group!.querySelector(`[data-flow-id="${flow.id}"]`)).not.toBeNull();
+      }
+    }
+    // A page is named in words, with its route underneath.
+    const customers = groups[routes.indexOf('/customers')];
+    expect(customers?.querySelector('.page-name')?.textContent).toBe('Customers');
+    // Each heading counts the actions under it.
+    for (const group of groups) {
+      expect(group.querySelector('.page-count')?.textContent).toBe(
+        String(group.querySelectorAll('.flow-item').length),
+      );
+    }
+    expect(document.getElementById('flow-summary')?.textContent).toMatch(
+      /^\d+ actions? on \d+ pages?$/,
+    );
+  });
+
+  it('drops the page name from a row that sits under that page', () => {
+    const flow = flows.find((candidate) => candidate.title === 'Customers · Delete')!;
+    const row = document.querySelector(`[data-flow-id="${flow.id}"]`)!;
+    expect(row.querySelector('.label')?.textContent).toBe('Delete');
+    expect(row.querySelector('.list-method')?.textContent).toBe('DELETE');
+  });
+
+  it('searches by page route, folds groups, and says when nothing matches', async () => {
+    const filter = document.getElementById('filter') as HTMLInputElement;
+    const type = (value: string): void => {
+      filter.value = value;
+      filter.dispatchEvent(new Event('input'));
+    };
+    type('/orders');
+    const shown = [...document.querySelectorAll<HTMLElement>('#flow-list .flow-item')];
+    expect(shown.length).toBeGreaterThan(0);
+    for (const row of shown) {
+      const flow = flows.find((candidate) => candidate.id === row.dataset['flowId'])!;
+      expect(flow.pages.map((page) => page.route)).toContain('/orders');
+    }
+    expect(document.getElementById('flow-summary')?.textContent).toMatch(/match$/);
+
+    type('nothing-is-called-this');
+    expect(document.querySelector('#flow-list .list-empty')?.textContent).toContain(
+      'nothing-is-called-this',
+    );
+    document.querySelector<HTMLButtonElement>('#flow-list .clear-filter')!.click();
+    expect(filter.value).toBe('');
+
+    const fold = document.getElementById('fold-all') as HTMLButtonElement;
+    expect(fold.hidden).toBe(false);
+    fold.click();
+    expect(
+      [...document.querySelectorAll<HTMLDetailsElement>('#flow-list .page-group')].some(
+        (group) => group.open,
+      ),
+    ).toBe(false);
+    expect(fold.textContent).toBe('Expand all');
+    fold.click();
+    expect(
+      [...document.querySelectorAll<HTMLDetailsElement>('#flow-list .page-group')].every(
+        (group) => group.open,
+      ),
+    ).toBe(true);
   });
 
   it('selects the first flow and draws its layers in execution order', () => {
@@ -251,18 +345,16 @@ async function openTab(id: string): Promise<HTMLElement> {
 }
 
 describe('the tabs', () => {
-  it('offers the eight tabs in the agreed order, with Docs open first', async () => {
+  it('offers the six tabs in the agreed order, with Docs open first', async () => {
     const labels = [...document.querySelectorAll('#tabs .tab-label')].map(
       (node) => node.textContent,
     );
     expect(labels).toEqual([
       'Docs',
       'Decisions',
-      'Issues',
       'Performance',
       'Tests',
-      'Changed',
-      'Breaks',
+      'Issues & impact',
       'Unused',
     ]);
     expect(document.getElementById('tab-docs')?.getAttribute('aria-selected')).toBe('true');
@@ -312,6 +404,9 @@ describe('the tabs', () => {
       ['apis', 'docs', false],
       ['timing', 'perf', false],
       ['queries', 'perf', false],
+      ['changed', 'impact', false],
+      ['breaks', 'impact', false],
+      ['issues', 'impact', false],
     ] as const) {
       window.history.replaceState(null, '', `/#tab=${legacy}&flow=${flows[0]!.id}`);
       vi.resetModules();
@@ -340,7 +435,7 @@ describe('the tabs', () => {
   });
 
   it('every panel opens with a sentence saying what it answers', async () => {
-    for (const id of ['issues', 'perf', 'impact', 'tests', 'changed']) {
+    for (const id of ['perf', 'impact', 'tests']) {
       const panel = await openTab(id);
       // Some tabs fetch on open; the sentence comes with the answer.
       await vi.waitFor(() => {
@@ -348,6 +443,105 @@ describe('the tabs', () => {
         expect((intro?.textContent ?? '').length, `${id} explains itself`).toBeGreaterThan(20);
       });
     }
+  });
+
+  it('puts your own edits first, then what a change to this action would reach', async () => {
+    const panel = await openTab('impact');
+    await vi.waitFor(() => {
+      expect(panel.querySelector('.impact-yours')?.textContent).toContain(
+        'Your uncommitted changes',
+      );
+      // The mocked change touches files but breaks nothing.
+      expect(panel.querySelector('.impact-yours .answer')?.textContent).toMatch(
+        /Nothing that existed/,
+      );
+    });
+    const yours = panel.querySelector('.impact-yours')!;
+    const before = panel.querySelector('.impact-before')!;
+    expect(before.textContent).toContain('Before you change');
+    expect(yours.compareDocumentPosition(before) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The file-level list is still there, folded, for what the compiler cannot judge.
+    expect(yours.querySelector('details.broad summary')?.textContent).toMatch(/Files you touched/);
+    expect(panel.textContent).not.toMatch(/Could not check/);
+  });
+
+  it('lists breaks by page and component, in plain words, each reason once', async () => {
+    const reach = {
+      features: [{ id: flows[0]!.id, title: 'Medicine detail page loads' }],
+      pages: ['/medicines/[id]'],
+      components: ['MedicineDetailPage'],
+      apis: ['GET /medicines/:param'],
+      services: [],
+    };
+    const error = (line: number) => ({
+      file: 'app/medicines/[id]/page.tsx',
+      line,
+      column: 5,
+      code: 'TS2554',
+      message: 'Expected 2-3 arguments, but got 1.',
+      explain: 'Missing `currency` — `formatCurrency` now needs it as argument 2.',
+      source: `formatCurrency(price${line})`,
+      reach,
+    });
+    const usage = (line: number) => ({
+      file: 'app/medicines/[id]/page.tsx',
+      line,
+      column: 5,
+      source: `formatCurrency(price${line})`,
+      in: 'MedicineDetailPage',
+      verdict: 'broken',
+      reason: 'The compiler reports a new error on this line.',
+      errors: [error(line)],
+      reach,
+    });
+    breakageResponse = {
+      against: 'the last commit',
+      symbols: [
+        {
+          name: 'formatCurrency',
+          kind: 'function',
+          file: 'lib/utils.ts',
+          line: 47,
+          change: 'signature',
+          details: ['New required parameter `currency: string` at position 2.'],
+          before: '(value: number) => string',
+          after: '(value: number, currency: string) => string',
+          usages: [usage(96), usage(97)],
+          errors: [],
+          reach,
+          breaks: reach,
+        },
+      ],
+      otherErrors: [],
+      totals: { symbols: 1, broken: 2, likely: 0, review: 0, errors: 2 },
+      typeChecked: true,
+      checkedFiles: 3,
+      durationMs: 1200,
+      level: 'high',
+      summary: '1 declaration changed.',
+      notes: [],
+    };
+    await loadDashboard();
+    const panel = await openTab('impact');
+    await vi.waitFor(() => {
+      expect(panel.querySelector('.impact-yours .answer')?.textContent).toContain(
+        'Your change breaks 2 places on 1 page',
+      );
+    });
+    expect(document.querySelector('#tab-impact .tab-badge')?.textContent).toBe('2 breaking');
+    const page = panel.querySelector('.broken-page')!;
+    expect(page.querySelector('.broken-page-name')?.textContent).toBe('/medicines/[id]');
+    expect(page.querySelector('.broken-component-name')?.textContent).toBe('MedicineDetailPage');
+    // Two calls failing for one reason: said once, both lines listed under it.
+    const lines = page.querySelectorAll('.broken-line');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.querySelector('.broken-text')?.textContent).toBe(
+      'Missing currency — formatCurrency now needs it as argument 2.',
+    );
+    expect(lines[0]!.querySelectorAll('.broken-sites li')).toHaveLength(2);
+    expect(lines[0]!.textContent).toContain('Expected 2-3 arguments, but got 1.');
+    // The card does not repeat the list above it: it starts folded.
+    expect(panel.querySelector('details.break-card')?.hasAttribute('open')).toBe(false);
   });
 });
 
@@ -418,16 +612,49 @@ describe('the Decisions tab', () => {
   });
 });
 
-describe('the Issues tab', () => {
-  it('shows the selected action first, then the rest of the project with filters', async () => {
-    const panel = await openTab('issues');
+describe('Issues & impact', () => {
+  it('answers its three questions up front, each opening its section', async () => {
+    const panel = await openTab('impact');
     await vi.waitFor(() => {
-      expect(panel.querySelector('.answer')).not.toBeNull();
+      expect(panel.querySelectorAll('.impact-card')).toHaveLength(3);
+      // Every card has an answer, not a placeholder.
+      for (const card of panel.querySelectorAll('.impact-card-value')) {
+        expect(card.textContent).not.toMatch(/…$/);
+      }
     });
-    expect(panel.querySelector('.answer-title')?.textContent).toMatch(/issue|No issues found/);
-    expect(panel.textContent).toContain('Everywhere else in the project');
-    expect(panel.querySelectorAll('[data-issue-severity]')).toHaveLength(3);
-    const badge = document.querySelector('#tab-issues .tab-badge')?.textContent?.trim();
+    const sections = [...panel.querySelectorAll<HTMLDetailsElement>('[data-impact-section]')].map(
+      (section) => section.dataset['impactSection'],
+    );
+    expect(sections).toEqual(['impact-yours', 'impact-issues', 'impact-before', 'impact-project']);
+
+    const yours = panel.querySelector<HTMLDetailsElement>('[data-impact-section="impact-yours"]')!;
+    yours.open = false;
+    panel.querySelector<HTMLElement>('[data-impact-jump="impact-yours"]')!.click();
+    expect(yours.open).toBe(true);
+  });
+
+  it('shows the selected action’s issues, then the rest of the project with filters', async () => {
+    const panel = await openTab('impact');
+    await vi.waitFor(() => {
+      expect(panel.querySelector('.impact-issues .answer')).not.toBeNull();
+    });
+    expect(panel.querySelector('.impact-issues .answer-title')?.textContent).toMatch(
+      /issue|No issues found/,
+    );
+    expect(panel.textContent).toContain('Issues everywhere else in the project');
+    expect(panel.querySelectorAll('#project-issues [data-issue-severity]')).toHaveLength(3);
+
+    // A filter redraws the project list and leaves the rest of the tab alone.
+    const before = panel.querySelector('.impact-overview');
+    panel.querySelector<HTMLElement>('#project-issues [data-issue-severity="low"]')!.click();
+    expect(panel.querySelector('.impact-overview')).toBe(before);
+    expect(
+      panel
+        .querySelector('#project-issues [data-issue-severity="low"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+
+    const badge = document.querySelector('#tab-impact .tab-badge')?.textContent?.trim();
     expect(badge).toBeTruthy();
     expect(badge).not.toBe('…');
   });
@@ -464,14 +691,14 @@ describe('the Performance tab', () => {
   });
 });
 
-describe('the Breaks tab', () => {
+describe('the Impact tab, before a change', () => {
   it('leads with the answer in a sentence, before any table', async () => {
     const panel = await openTab('impact');
-    const verdict = panel.querySelector('.answer');
+    const verdict = panel.querySelector('.impact-before .answer');
     expect(verdict).not.toBeNull();
     expect(verdict?.className).toMatch(/tone-(ok|warn|danger)/);
     expect((verdict?.textContent ?? '').trim().length).toBeGreaterThan(30);
-    const table = panel.querySelector('.adoc-table');
+    const table = panel.querySelector('.impact-before .adoc-table');
     if (table) {
       expect(
         verdict!.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING,
@@ -481,7 +708,7 @@ describe('the Breaks tab', () => {
 
   it('names the other features a change here would reach', async () => {
     const panel = await openTab('impact');
-    const jumps = panel.querySelectorAll('[data-goto-flow]');
+    const jumps = panel.querySelectorAll('.impact-before [data-goto-flow]');
     expect(jumps.length).toBeGreaterThan(0);
     // Never offers to jump to the feature already open.
     const current = state('selectedFlowId');
@@ -510,13 +737,13 @@ describe('the Breaks tab', () => {
 
   it('jumping to another feature switches the selection and keeps the tab', async () => {
     const panel = await openTab('impact');
-    const jump = panel.querySelector<HTMLElement>('[data-goto-flow]')!;
+    const jump = panel.querySelector<HTMLElement>('.impact-before [data-goto-flow]')!;
     const target = jump.dataset.gotoFlow;
     jump.click();
     await vi.waitFor(() => {
       expect(state('selectedFlowId')).toBe(target);
     });
-    // Still on Breaks, now for the feature that was clicked.
+    // Still on Impact, now for the feature that was clicked.
     expect(document.getElementById('tab-impact')?.getAttribute('aria-selected')).toBe('true');
     expect(
       document.querySelector('.flow-item[aria-selected="true"]')?.textContent ?? '',
@@ -664,9 +891,7 @@ describe('the Docs tab', () => {
     const before = lede();
 
     const other = flows.find((flow) => flow.title !== flows[0]?.title)!;
-    const item = [...document.querySelectorAll<HTMLElement>('.flow-item')].find(
-      (node) => node.querySelector('.label')?.textContent === other.title,
-    )!;
+    const item = document.querySelector<HTMLElement>(`.flow-item[data-flow-id="${other.id}"]`)!;
     item.click();
     await vi.waitFor(() => {
       expect(lede()).not.toBe(before);

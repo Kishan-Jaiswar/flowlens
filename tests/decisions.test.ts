@@ -644,3 +644,56 @@ describe('the decision tree shows what decides which records a query touches', (
     expect(nodes).toContainEqual(expect.objectContaining({ kind: 'ui', label: 'Go to /stock' }));
   });
 });
+
+describe('a condition is read through what its variable holds', () => {
+  const root = mkdtempSync(join(tmpdir(), 'flowlens-decisions-meaning-'));
+  const put = (rel: string, text: string): void => {
+    mkdirSync(join(root, rel, '..'), { recursive: true });
+    writeFileSync(join(root, rel), text, 'utf8');
+  };
+  put(
+    'app/api/auth/verify/route.ts',
+    `export async function POST(request) {
+       const body = await request.json();
+       const parsed = verifySchema.safeParse(body);
+       if (!parsed.success) return Response.json({ error: "Invalid input" }, { status: 422 });
+       const clinics = await findClinics(parsed.data.phone);
+       if (clinics.length === 0) return Response.json({ error: "Not registered" }, { status: 403 });
+       const ok = await verifyOtp(parsed.data.phone, parsed.data.otp);
+       if (!ok) return Response.json({ error: "Wrong code" }, { status: 401 });
+       return Response.json({ ok: true });
+     }
+     async function findClinics(phone) { return []; }
+     async function verifyOtp(phone, otp) { return true; }`,
+  );
+  put(
+    'app/login/page.tsx',
+    `"use client";
+     export default function Login() {
+       const submit = async () => {
+         const parsed = verifySchema.safeParse({ phone, otp });
+         if (!parsed.success) { setError("Check the code"); return; }
+         const res = await fetch("/api/auth/verify", { method: "POST" });
+         if (!res.ok) { setError("Failed"); return; }
+       };
+       return <button onClick={submit}>Verify</button>;
+     }`,
+  );
+  const { graph } = scan({ root });
+  const flow = resolveFlows(graph, { includeLocalOnly: true }).find((f) => f.label === 'Verify')!;
+  const labels = all(actionDecisions(graph, flow).nodes)
+    .filter((node): node is DecisionQuestion => node.type === 'decision')
+    .map((node) => node.label);
+
+  it('says what a schema check validates, on each side of the request', () => {
+    // Was `parsed succeeded?` on both sides.
+    expect(labels).toContain('Are phone and otp valid?');
+    expect(labels).toContain('Is the request body valid?');
+  });
+
+  it('names the call behind a flag, and a fetch as the request', () => {
+    expect(labels).toContain('Did verify otp succeed?');
+    expect(labels).toContain('Did the request succeed?');
+    expect(labels).toContain('Are there no clinics?');
+  });
+});

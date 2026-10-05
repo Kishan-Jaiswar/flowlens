@@ -34,7 +34,23 @@
     <main class="layout">
       <aside class="sidebar">
         <div class="search">
-          <input id="filter" type="search" placeholder="Filter features…" autocomplete="off" />
+          <div class="sidebar-head">
+            <div>
+              <h2 class="sidebar-title">Actions</h2>
+              <p id="flow-summary" class="sidebar-summary"></p>
+            </div>
+            <button id="fold-all" class="fold-all" type="button" hidden>Collapse all</button>
+          </div>
+          <div class="search-box">
+            <input
+              id="filter"
+              type="search"
+              placeholder="Search actions, pages or APIs"
+              aria-label="Search actions, pages or APIs"
+              autocomplete="off"
+            />
+            <kbd class="search-key" title="Press / to search">/</kbd>
+          </div>
         </div>
         <div id="flow-list" class="flow-list"></div>
         <div class="findings">
@@ -71,13 +87,6 @@
         ></div>
         <div id="panel-perf" class="panel" role="tabpanel" aria-labelledby="tab-perf" hidden></div>
         <div
-          id="panel-issues"
-          class="panel"
-          role="tabpanel"
-          aria-labelledby="tab-issues"
-          hidden
-        ></div>
-        <div
           id="panel-impact"
           class="panel"
           role="tabpanel"
@@ -92,13 +101,6 @@
           hidden
         ></div>
         <div id="panel-docs" class="panel" role="tabpanel" aria-labelledby="tab-docs" hidden></div>
-        <div
-          id="panel-changed"
-          class="panel"
-          role="tabpanel"
-          aria-labelledby="tab-changed"
-          hidden
-        ></div>
         <div
           id="panel-unused"
           class="panel"

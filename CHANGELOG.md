@@ -9,6 +9,60 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **What your change breaks, line by line.** The Changed view now compares
+  each changed file with its committed text declaration by declaration —
+  functions, components, hooks, methods, object-literal methods, types — and
+  says how each changed: deleted, renamed, no longer exported, signature
+  changed (parameters matched by name, so an inserted parameter is one
+  change), shape changed, or body only. Every use is found with the
+  TypeScript language service, and the project is type-checked as it is and
+  with the changed files put back, so only errors the edit introduced are
+  reported — each with its code, the compiler's message, a plain-words version
+  ("Missing `currency` — `formatCurrency` now needs it as argument 2.") and
+  the feature, page, component, API and service it sits in. Plain JavaScript
+  callers are judged against the new parameter list. Runs locally, no service.
+  Also `GET /api/changed/breakage` and `analyzeBreakage()` in
+  `@flowslens/core`.
+- **The action list is grouped by page.** The dashboard sidebar puts each
+  action under the page the user meets it on — `/medicines`, `/settings` —
+  not the folder its code lives in. A dialog or form is followed up through
+  whoever renders it (`<AddMedicineDialog>` on the medicines page), so it
+  lands on that page; a component rendered from two pages is listed on both;
+  one only a layout reaches goes under "Every page"; and actions nothing
+  renders go under "Other actions". Each page is named in words ("Medicines ›
+  Details") over its route; each row says what the action is without
+  repeating the page ("Delete", "Submit — in Add medicine dialog"), has an
+  icon for whether it runs on open, on a click or on a submit, and shows the
+  API it calls as a coloured method and path. Within a page, what runs when
+  it opens is listed apart from what the user can do. Groups fold one at a
+  time or all at once, the search matches page routes and says when nothing
+  matches, `/` jumps to it and the arrow keys walk the list. `/api/flows` now
+  gives each action its `pages`, and `flowPages()` is in `@flowslens/core`.
+
+### Changed
+
+- **Issues and Impact are one tab: Issues & impact.** Both asked "is this
+  safe?" — Issues about what is already wrong, Impact about what a change
+  would break — and a reader checking an action before an edit had to read
+  both. The tab opens with three cards, one per question (your uncommitted
+  changes, the bugs in this action, what a change to it would reach), each
+  giving its answer and opening its section. The sections follow, the most
+  urgent first, and each folds with its answer still on its heading; your
+  changes start folded when nothing breaks, since the card already says so.
+  The rest of the project's issues come last, and their filters redraw only
+  that list. The badge is the most worrying answer: "2 breaking", then
+  "3 issues", then "12 at risk". `#tab=issues` links open the merged tab.
+
+- **Changed and Breaks are one tab: Impact.** Both answered "what does my
+  change break?" — Changed after the edit, Breaks before it — and a reader had
+  to know which was which. Impact shows your uncommitted changes first (the
+  breaks grouped by page and component, each reason said once with every
+  line under it, then one card per changed declaration) and then what a
+  change to the selected action would reach. The file-level list of actions
+  is folded under the first part, since it over-counts on purpose. The tab
+  badge reads "11 breaking" when your edits break something. `#tab=changed`
+  and `#tab=breaks` links open Impact.
+
 - **A Decisions tab — every way an action can go.** The action as a
   flowchart — pills, step boxes, decision diamonds and database drums joined
   by labelled yes/no arrows, each step in plain words with its code on
@@ -24,6 +78,15 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `renderDecisionTree()` in `@flowslens/core`.
 
 ### Fixed
+
+- **Decisions say what a check means, not how it is spelled.** A condition is
+  read through the variable it tests: `if (!parsed.success)` after
+  `schema.safeParse({ phone, otp })` is "Are phone and otp valid?" (and "Is the
+  request body valid?" on the server), `if (!ok)` after `await verifyOtp(…)` is
+  "Did verify otp succeed?", `res.ok` after a `fetch` is "Did the request
+  succeed?", a confirm dialog is "Did the user confirm?". Lengths, numeric
+  comparisons, `!!x` and `x?.trim()` get plain wording too; compound
+  conditions still show their code rather than a guess.
 
 - **Queries on `db.collection<Doc>("x")` are found, and an array's `find` is
   no longer one.** A collection opened with a type argument, or across lines,

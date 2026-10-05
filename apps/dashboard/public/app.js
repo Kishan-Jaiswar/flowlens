@@ -52,6 +52,10 @@ const state = {
   selectedFlow: null,
   selectedNode: null,
   filter: '',
+  /** Page groups the user folded in the sidebar, kept across re-renders. */
+  closedPages: new Set(),
+  /** Issues & impact sections the reader folded or opened, by section. */
+  impactOpen: {},
   includeLocal: false,
   /** Which tab is showing: docs | perf | tests | changed | impact. */
   tab: 'docs',
@@ -62,6 +66,9 @@ const state = {
   /** The diff-scoped report, which is project-wide rather than per feature. */
   changed: null,
   changedLoading: false,
+  /** `/api/changed/breakage`: what the change breaks, which takes a type check. */
+  breakage: null,
+  breakageLoading: false,
   /** `/api/unused`: code nothing uses, for the whole project. */
   unused: null,
   /** The Docs tab's document for the selected action, and which action it is for. */
@@ -80,7 +87,7 @@ const state = {
   decisionsLoading: false,
   /** Project-wide findings, read once per scan. */
   findings: null,
-  /** Which severities and kinds the Issues tab shows for the rest of the project. */
+  /** Which severities and kinds Issues & impact shows for the rest of the project. */
   issueSeverities: new Set(['high', 'medium']),
   issueKind: 'all',
 };
@@ -103,15 +110,13 @@ const TABS = [
     'Decisions',
     'Every way this action can go: each check, branch and query, from the click to the database and back',
   ],
-  [
-    'issues',
-    'Issues',
-    'Bugs the code shows: missing auth, tenant leaks, mass assignment, N+1, reads that wait',
-  ],
   ['perf', 'Performance', 'Where the time goes: each step, and each database query with its code'],
   ['tests', 'Tests', 'What would catch it if you broke it'],
-  ['changed', 'Changed', 'Which actions your uncommitted changes reach'],
-  ['impact', 'Breaks', 'What else a change here would break'],
+  [
+    'impact',
+    'Issues & impact',
+    'What is wrong and what could break: bugs in this action, what your edits break, and what a change to this action would reach',
+  ],
   ['unused', 'Unused', 'Files, folders, exports and dependencies nothing uses'],
 ];
 
@@ -121,14 +126,19 @@ const LEGACY_TABS = {
   apis: ['docs', 'list'],
   timing: ['perf'],
   queries: ['perf'],
+  changed: ['impact'],
+  breaks: ['impact'],
+  issues: ['impact'],
 };
 
 /** Tabs that ignore the selected feature. */
-const PROJECT_TABS = new Set(['changed', 'unused']);
+const PROJECT_TABS = new Set(['unused']);
 
 const el = {
   subtitle: document.getElementById('subtitle'),
   flowList: document.getElementById('flow-list'),
+  flowSummary: document.getElementById('flow-summary'),
+  foldAll: document.getElementById('fold-all'),
   findings: document.getElementById('findings'),
   graph: document.getElementById('graph'),
   flowHeader: document.getElementById('flow-header'),
@@ -145,7 +155,6 @@ const el = {
     perf: document.getElementById('panel-perf'),
     impact: document.getElementById('panel-impact'),
     tests: document.getElementById('panel-tests'),
-    changed: document.getElementById('panel-changed'),
     unused: document.getElementById('panel-unused'),
   },
 };
@@ -214,7 +223,7 @@ async function load() {
       // A backend scanned on its own has no user actions; its issues are still
       // the project's, so that is where it opens.
       renderEmpty();
-      if (!tab) state.tab = 'issues';
+      if (!tab) state.tab = 'impact';
       renderTabs();
       showTab(state.tab);
     }
@@ -229,7 +238,15 @@ function filteredFlows() {
   const needle = state.filter.trim().toLowerCase();
   if (!needle) return state.flows;
   return state.flows.filter((flow) =>
-    [flow.title, flow.label, flow.screen, flow.component, flow.id, ...flow.endpoints]
+    [
+      flow.title,
+      flow.label,
+      flow.screen,
+      flow.component,
+      flow.id,
+      ...flow.endpoints,
+      ...(flow.pages ?? []).map((page) => page.route),
+    ]
       .filter(Boolean)
       .some((value) => value.toLowerCase().includes(needle)),
   );
@@ -237,36 +254,283 @@ function filteredFlows() {
 
 function renderFlowList() {
   const flows = filteredFlows();
+  const groups = pageGroups(flows);
+  const searching = state.filter.trim() !== '';
   el.flowList.innerHTML = '';
+  renderListSummary(flows, groups, searching);
 
   if (flows.length === 0) {
-    el.flowList.innerHTML = '<p class="muted" style="padding:8px">No matching features.</p>';
+    el.flowList.innerHTML = searching
+      ? `<div class="list-empty">
+           <p>No action matches <strong>“${escapeHtml(state.filter.trim())}”</strong>.</p>
+           <p class="muted">Try a button's text, a page like <code>/settings</code>, or an API path.</p>
+           <button type="button" class="clear-filter">Clear search</button>
+         </div>`
+      : '<div class="list-empty"><p class="muted">No actions were found in this project.</p></div>';
+    el.flowList.querySelector('.clear-filter')?.addEventListener('click', clearFilter);
     return;
   }
 
-  for (const flow of flows) {
-    const button = document.createElement('button');
-    button.className = 'flow-item';
-    button.setAttribute('aria-selected', String(flow.id === state.selectedFlow?.id));
-    button.onclick = () => selectFlow(flow.id);
-    const issues = issuesFor(flow.id).filter((finding) => finding.severity !== 'low');
-    const worst = issues.some((finding) => finding.severity === 'high') ? 'high' : 'medium';
-    // The mark sits beside the label, not in it: the label stays the action's name.
-    button.classList.toggle('has-issues', issues.length > 0);
-    button.innerHTML = `
-      ${
-        issues.length
-          ? `<span class="issue-mark sev-${worst}" title="${issues.length} issue${issues.length === 1 ? '' : 's'} — see the Issues tab">⚠ ${issues.length}</span>`
-          : ''
-      }
-      <div class="label">${escapeHtml(flowTitle(flow))}</div>
-      <div class="meta">${escapeHtml(
-        [eventVerb(flow.event), flow.component, flow.endpoints[0], `risk ${flow.risk.level}`]
-          .filter(Boolean)
-          .join(' · '),
-      )}</div>`;
-    el.flowList.appendChild(button);
+  for (const group of groups) {
+    const section = document.createElement('details');
+    section.className = 'page-group';
+    // A search shows every match, folded or not; a fold comes back after it.
+    section.open = searching || !state.closedPages.has(group.key);
+    section.ontoggle = () => {
+      if (searching) return;
+      if (section.open) state.closedPages.delete(group.key);
+      else state.closedPages.add(group.key);
+      renderFoldAll();
+    };
+    section.innerHTML = `
+      <summary title="${escapeHtml(group.hint)}">
+        <span class="page-icon" aria-hidden="true">${ICONS[group.icon]}</span>
+        <span class="page-text">
+          <span class="page-name">${escapeHtml(group.name)}</span>
+          ${group.sub ? `<span class="page-route">${escapeHtml(group.sub)}</span>` : ''}
+        </span>
+        <span class="page-count" title="${plural(group.flows.length, 'action')}">${group.flows.length}</span>
+      </summary>`;
+
+    const loads = group.flows.filter(isPageLoad);
+    const actions = group.flows.filter((flow) => !isPageLoad(flow));
+    const both = loads.length > 0 && actions.length > 0;
+    if (both) section.appendChild(subheading('When the page opens'));
+    for (const flow of loads) section.appendChild(flowItem(flow, group));
+    if (both) section.appendChild(subheading('What the user can do'));
+    for (const flow of actions) section.appendChild(flowItem(flow, group));
+    el.flowList.appendChild(section);
   }
+  renderFoldAll();
+}
+
+function renderListSummary(flows, groups, searching) {
+  const pages = groups.filter((group) => group.kind === 'page').length;
+  const where = pages ? ` on ${plural(pages, 'page')}` : '';
+  el.flowSummary.textContent = searching
+    ? `${flows.length} of ${plural(state.flows.length, 'action')} match`
+    : `${plural(flows.length, 'action')}${where}`;
+}
+
+/** The header button folds every group, or opens them all once they are folded. */
+function renderFoldAll() {
+  const groups = [...el.flowList.querySelectorAll('.page-group')];
+  const searching = state.filter.trim() !== '';
+  el.foldAll.hidden = groups.length < 2 || searching;
+  el.foldAll.textContent = groups.every((group) => !group.open) ? 'Expand all' : 'Collapse all';
+}
+
+/** The sidebar keys of the groups a flow is listed under. */
+function groupKeys(flow) {
+  const pages = flow.pages ?? [];
+  if (pages.length === 0) return ['none'];
+  return pages.map((page) => `${page.layout ? 'layout' : 'page'}:${page.route}`);
+}
+
+function subheading(text) {
+  const node = document.createElement('div');
+  node.className = 'page-sub';
+  node.textContent = text;
+  return node;
+}
+
+/**
+ * The sidebar, one group per page the actions are on.
+ *
+ * Pages first, by route; then actions that only a layout reaches (they are on
+ * every page under it); then the ones no page renders, such as runtime-only
+ * actions. An action on two pages is listed under both.
+ */
+function pageGroups(flows) {
+  const groups = new Map();
+  const place = (key, init, flow) => {
+    if (!groups.has(key)) groups.set(key, { key, ...init, flows: [] });
+    groups.get(key).flows.push(flow);
+  };
+  for (const flow of flows) {
+    const pages = flow.pages ?? [];
+    if (pages.length === 0) {
+      place(
+        'none',
+        {
+          kind: 'none',
+          name: 'Other actions',
+          sub: 'not placed on a page',
+          hint: 'No page renders these — seen only at runtime, or in a component nothing uses',
+          icon: 'other',
+          order: 2,
+          route: '',
+        },
+        flow,
+      );
+      continue;
+    }
+    for (const page of pages) {
+      const layout = page.layout;
+      place(
+        groupKeys({ pages: [page] })[0],
+        {
+          kind: layout ? 'layout' : 'page',
+          name: layout
+            ? page.route === '/'
+              ? 'All pages'
+              : `All pages under ${page.route}`
+            : pageName(page.route),
+          sub: layout ? 'shared layout' : page.route,
+          hint: page.file,
+          icon: layout ? 'layout' : 'page',
+          order: layout ? 1 : 0,
+          route: page.route,
+          file: page.file,
+        },
+        flow,
+      );
+    }
+  }
+  return [...groups.values()].sort((a, b) => a.order - b.order || a.route.localeCompare(b.route));
+}
+
+/**
+ * `/medicines/[id]/edit` -> `Medicines › Edit`, the way someone would say it.
+ *
+ * A route that ends on a parameter is one record's page: `/medicines/[id]` is
+ * the medicine's details.
+ */
+function pageName(route) {
+  const segments = route.split('/').filter(Boolean);
+  if (segments.length === 0) return 'Home';
+  const dynamic = (segment) => /^\[.*\]$|^:/.test(segment);
+  const words = segments.filter((segment) => !dynamic(segment)).map(humanizeSegment);
+  if (dynamic(segments[segments.length - 1])) words.push('Details');
+  return words.join(' › ') || 'Details';
+}
+
+function humanizeSegment(segment) {
+  const words = segment.replace(/[-_]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+  return words.charAt(0).toUpperCase() + words.slice(1).toLowerCase();
+}
+
+/**
+ * What the row calls the action, given the page it sits under.
+ *
+ * The page is in the heading, so `Medicines · Delete` under Medicines is just
+ * `Delete`. A label the scanner built from code (`MedicineForm onSubmit`) falls
+ * back to the composed title, which is written in words.
+ */
+function actionName(flow, group) {
+  if (isPageLoad(flow)) {
+    if (group?.file && flow.steps[0]?.file === group.file) return 'Page opens';
+    return flowTitle(flow);
+  }
+  const label = flow.label ?? '';
+  if (label && !/\bon[A-Z]\w*\b/.test(label) && !/^[A-Z][a-z]+[A-Z]\w*\b/.test(label)) return label;
+  // `Add medicine dialog submit` -> `Submit`; the dialog goes on the line below.
+  const title = flowTitle(flow);
+  const screen = flow.screen ?? '';
+  if (screen && title.toLowerCase().startsWith(`${screen.toLowerCase()} `)) {
+    const rest = title.slice(screen.length).replace(/^[\s·]+/, '');
+    if (rest) return rest.charAt(0).toUpperCase() + rest.slice(1);
+  }
+  return title;
+}
+
+/** Where on the page the action is, when it is not the page's own code. */
+function actionPlace(flow, group) {
+  const file = flow.steps[0]?.file;
+  if (!flow.screen || !file || file === group?.file) return '';
+  const name = actionName(flow, group).toLowerCase();
+  if (name.includes(flow.screen.toLowerCase())) return '';
+  return `in ${flow.screen}`;
+}
+
+function isPageLoad(flow) {
+  return flow.event === 'mount';
+}
+
+/** `load`, `submit` or `click`: what the row's icon says the user does. */
+function actionKind(flow) {
+  if (isPageLoad(flow)) return 'load';
+  if (/submit/i.test(flow.event ?? '')) return 'submit';
+  if (!flow.event) return 'runtime';
+  return 'click';
+}
+
+const KIND_TEXT = {
+  load: 'Runs by itself when this opens',
+  submit: 'Runs when the user submits a form',
+  click: 'Runs when the user clicks',
+  runtime: 'Seen while the app ran; no source found for it',
+};
+
+const ICONS = {
+  page: '<svg viewBox="0 0 16 16"><path d="M4 1.5h5.5L13 5v9.5H4z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9.5 1.5V5H13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
+  layout:
+    '<svg viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M2 6h12M6 6v7.5" stroke="currentColor" stroke-width="1.3"/></svg>',
+  other:
+    '<svg viewBox="0 0 16 16"><circle cx="4" cy="8" r="1.2" fill="currentColor"/><circle cx="8" cy="8" r="1.2" fill="currentColor"/><circle cx="12" cy="8" r="1.2" fill="currentColor"/></svg>',
+  load: '<svg viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.6-3.7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M13 2.5V5h-2.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  click:
+    '<svg viewBox="0 0 16 16"><path d="M5 2.5v9l2.3-2.1 1.6 3.6 1.6-.7-1.6-3.5H12z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
+  submit:
+    '<svg viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  runtime:
+    '<svg viewBox="0 0 16 16"><path d="M1.5 8h3l2-4.5 3 9 2-4.5h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+};
+
+function flowItem(flow, group) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'flow-item';
+  button.dataset.flowId = flow.id;
+  button.setAttribute('aria-selected', String(flow.id === state.selectedFlow?.id));
+  button.onclick = () => selectFlow(flow.id);
+  const kind = actionKind(flow);
+  const issues = issuesFor(flow.id).filter((finding) => finding.severity !== 'low');
+  const worst = issues.some((finding) => finding.severity === 'high') ? 'high' : 'medium';
+  button.title = [
+    flowTitle(flow),
+    KIND_TEXT[kind],
+    flow.component && `Component: ${flow.component}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+  const [endpoint, ...more] = flow.endpoints;
+  const [method, ...path] = (endpoint ?? '').split(' ');
+  const place = actionPlace(flow, group);
+  button.classList.toggle('has-issues', issues.length > 0);
+  button.innerHTML = `
+    <span class="kind-icon kind-${kind}" aria-hidden="true">${ICONS[kind]}</span>
+    <span class="flow-text">
+      <span class="label">${escapeHtml(actionName(flow, group))}</span>
+      ${place ? `<span class="place">${escapeHtml(place)}</span>` : ''}
+      <span class="meta">${
+        endpoint
+          ? `<span class="list-method verb-${escapeHtml(method.toLowerCase())}">${escapeHtml(method)}</span><span class="path">${escapeHtml(path.join(' '))}</span>${
+              more.length
+                ? `<span class="more-apis" title="${escapeHtml(more.join('\n'))}">+${more.length}</span>`
+                : ''
+            }`
+          : '<span class="path">stays in the browser</span>'
+      }</span>
+    </span>
+    ${
+      issues.length
+        ? `<span class="issue-mark sev-${worst}" title="${plural(issues.length, 'issue')} — see Issues & impact">⚠ ${issues.length}</span>`
+        : ''
+    }`;
+  return button;
+}
+
+/** `plural(2, 'action')` -> `2 actions`. */
+function plural(count, word) {
+  return `${count} ${word}${count === 1 ? '' : 's'}`;
+}
+
+function clearFilter() {
+  state.filter = '';
+  el.filter.value = '';
+  renderFlowList();
+  el.filter.focus();
 }
 
 function renderFindings(doctor) {
@@ -307,7 +571,12 @@ function selectFlow(id) {
   el.docLink.href = apiUrl(`/api/document?flow=${encodeURIComponent(flow.id)}`);
   state.insight = null;
   if (state.queriesFor !== flow.id) state.queries = null;
+  // Opening an action from a link or another tab shows it in the list too.
+  for (const key of groupKeys(flow)) state.closedPages.delete(key);
   renderFlowList();
+  el.flowList
+    .querySelector(`.flow-item[aria-selected="true"]`)
+    ?.scrollIntoView?.({ block: 'nearest' });
   renderFlowHeader(flow);
   renderGraph(flow);
   renderDetails(null);
@@ -410,18 +679,8 @@ function renderTabs() {
  */
 function tabBadge(id) {
   // Project-wide, so it has a badge before any feature is selected.
-  if (id === 'changed') {
-    if (state.changedLoading && !state.changed) return { text: '…', tone: 'neutral' };
-    const changed = state.changed;
-    if (!changed || changed.error) return undefined;
-    if (changed.features.length === 0) {
-      return { text: changed.files.length === 0 ? 'clean' : 'no features', tone: 'muted' };
-    }
-    return {
-      text: String(changed.features.length),
-      tone: changed.level === 'high' ? 'danger' : changed.level === 'medium' ? 'warn' : 'neutral',
-    };
-  }
+  // Your own breaking edits outrank anything about the selected action.
+  if (id === 'impact') return impactBadge();
 
   if (id === 'unused') {
     const unused = state.unused;
@@ -452,22 +711,6 @@ function tabBadge(id) {
       : { text: `${count} ${count === 1 ? 'branch' : 'branches'}`, tone: 'neutral' };
   }
 
-  if (id === 'issues') {
-    if (!state.findings) return { text: '…', tone: 'neutral' };
-    if (state.findings.error) return undefined;
-    // With an action selected, its issues; without one, the project's worst.
-    const selected = state.selectedFlow;
-    const mine = selected ? issuesFor(selected.id) : state.findings.findings;
-    if (mine.length === 0) return { text: 'none', tone: 'ok' };
-    const high = mine.filter((finding) => finding.severity === 'high').length;
-    const medium = mine.some((finding) => finding.severity === 'medium');
-    if (!selected)
-      return high
-        ? { text: `${high} high`, tone: 'danger' }
-        : { text: String(mine.length), tone: medium ? 'warn' : 'neutral' };
-    return { text: String(mine.length), tone: high ? 'danger' : medium ? 'warn' : 'neutral' };
-  }
-
   const flow = state.selectedFlow;
   if (!flow) return undefined;
   if (state.insightLoading && !state.insight) return { text: '…', tone: 'neutral' };
@@ -484,11 +727,6 @@ function tabBadge(id) {
     }
     return { text: 'not run', tone: 'muted' };
   }
-  if (id === 'impact') {
-    const count = insight.impact?.featuresAtRisk?.length ?? 0;
-    if (count === 0) return { text: 'contained', tone: 'ok' };
-    return { text: String(count), tone: insight.impact.level === 'high' ? 'danger' : 'warn' };
-  }
   if (id === 'tests') {
     const tests = insight.tests;
     if (!tests) return undefined;
@@ -499,6 +737,39 @@ function tabBadge(id) {
     };
   }
   return undefined;
+}
+
+/**
+ * One badge for Issues & impact, so the most worrying of its answers wins:
+ * your own breaking edits, then bugs in the selected action, then how far a
+ * change to it would reach.
+ */
+function impactBadge() {
+  const breaks = state.breakage?.totals;
+  if (breaks && breaks.broken + breaks.likely + breaks.errors > 0) {
+    return { text: `${breaks.broken + breaks.likely || breaks.errors} breaking`, tone: 'danger' };
+  }
+  const flow = state.selectedFlow;
+  const findings = state.findings && !state.findings.error ? state.findings.findings : undefined;
+  const mine = findings ? (flow ? issuesFor(flow.id) : findings) : [];
+  if (mine.length) {
+    const high = mine.filter((finding) => finding.severity === 'high').length;
+    const medium = mine.some((finding) => finding.severity === 'medium');
+    // Without an action, the project's worst: a total of hundreds says nothing.
+    if (!flow && high) return { text: `${high} high`, tone: 'danger' };
+    return {
+      text: plural(mine.length, 'issue'),
+      tone: high ? 'danger' : medium ? 'warn' : 'neutral',
+    };
+  }
+  if (!flow) return findings ? { text: 'none', tone: 'ok' } : { text: '…', tone: 'neutral' };
+  const impact = state.insight && !state.insight.error ? state.insight.impact : undefined;
+  if (!findings || !impact) {
+    return state.insightLoading || !state.findings ? { text: '…', tone: 'neutral' } : undefined;
+  }
+  const count = impact.featuresAtRisk?.length ?? 0;
+  if (count === 0) return { text: 'clean', tone: 'ok' };
+  return { text: `${count} at risk`, tone: impact.level === 'high' ? 'danger' : 'warn' };
 }
 
 function showTab(id) {
@@ -532,10 +803,8 @@ function showTab(id) {
 
   if (state.tab === 'decisions') openDecisionsForSelection();
   if (state.tab === 'impact') renderImpact();
-  if (state.tab === 'issues') renderIssues();
   if (state.tab === 'tests') renderTests();
   if (state.tab === 'perf') openPerfForSelection();
-  if (state.tab === 'changed') renderChanged();
   if (state.tab === 'unused') renderUnused();
   if (state.tab === 'docs') {
     openDocsForSelection();
@@ -574,7 +843,7 @@ document.addEventListener('click', (event) => {
  * clicking through features should not pay for a `git status` nobody asked
  * about.
  */
-async function loadChanged() {
+async function loadChanged({ fresh = false } = {}) {
   state.changedLoading = true;
   renderTabs();
   try {
@@ -584,7 +853,28 @@ async function loadChanged() {
   } finally {
     state.changedLoading = false;
     renderTabs();
-    if (state.tab === 'changed') renderChanged();
+    if (state.tab === 'impact') renderImpact();
+  }
+  void loadBreakage({ fresh });
+}
+
+/**
+ * Fetch what the change breaks.
+ *
+ * After the file view rather than with it: this one type-checks the project
+ * twice and takes seconds, and the file view is worth reading while it runs.
+ */
+async function loadBreakage({ fresh = false } = {}) {
+  state.breakageLoading = true;
+  if (state.tab === 'impact') renderImpact();
+  try {
+    state.breakage = await getJson(`/api/changed/breakage${fresh ? '?fresh=1' : ''}`);
+  } catch (error) {
+    state.breakage = { error: String(error.message ?? error) };
+  } finally {
+    state.breakageLoading = false;
+    renderTabs();
+    if (state.tab === 'impact') renderImpact();
   }
 }
 
@@ -1392,6 +1682,49 @@ el.filter.addEventListener('input', (event) => {
   renderFlowList();
 });
 
+el.filter.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && el.filter.value) {
+    event.preventDefault();
+    clearFilter();
+  } else if (event.key === 'ArrowDown' || event.key === 'Enter') {
+    const first = el.flowList.querySelector('.flow-item');
+    if (!first) return;
+    event.preventDefault();
+    if (event.key === 'Enter') first.click();
+    else first.focus();
+  }
+});
+
+el.foldAll.addEventListener('click', () => {
+  const groups = pageGroups(filteredFlows());
+  const open = groups.some((group) => !state.closedPages.has(group.key));
+  state.closedPages = open ? new Set(groups.map((group) => group.key)) : new Set();
+  renderFlowList();
+});
+
+// Up and down walk the visible rows, the way a list in any app does.
+el.flowList.addEventListener('keydown', (event) => {
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+  const rows = [...el.flowList.querySelectorAll('.page-group[open] .flow-item')];
+  const at = rows.indexOf(document.activeElement);
+  if (at === -1) return;
+  event.preventDefault();
+  const next = event.key === 'ArrowDown' ? at + 1 : at - 1;
+  if (next < 0) el.filter.focus();
+  else rows[Math.min(next, rows.length - 1)]?.focus();
+});
+
+// `/` jumps to the search from anywhere that is not already a text field.
+document.addEventListener('keydown', (event) => {
+  if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey) return;
+  const target = event.target;
+  if (target instanceof HTMLElement && target.closest('input, textarea, select, [contenteditable]'))
+    return;
+  event.preventDefault();
+  el.filter.focus();
+  el.filter.select();
+});
+
 el.showAll.addEventListener('change', (event) => {
   state.includeLocal = event.target.checked;
   load();
@@ -2054,134 +2387,6 @@ function bindTimingJumps(panel) {
       selectFlow(button.dataset.gotoFlow);
     });
   }
-}
-
-/** Tab 3 — what a change here would break. */
-function renderImpact() {
-  const panel = el.panels.impact;
-  if (!panel) return;
-  if (!state.insight) return panelLoading(panel, 'what depends on this');
-  if (state.insight.error) return panelError(panel, state.insight);
-
-  const impact = state.insight.impact;
-  const intro = panelIntro(
-    'Before you change this action: which other actions run through the same code or ' +
-      'write the same data. Change a shared part and you change them too.',
-  );
-  const others = impact.featuresAtRisk ?? [];
-  const contested = impact.contestedCollections ?? [];
-
-  // The verdict: one sentence about code, one about data.
-  const codeAnswer =
-    impact.shared.length === 0
-      ? answer(
-          'ok',
-          'Safe to change on its own',
-          'No other action runs through this action’s code. ' + (impact.summary ?? ''),
-        )
-      : answer(
-          impact.level === 'high' ? 'danger' : 'warn',
-          `${others.length} other action${others.length === 1 ? '' : 's'} share${others.length === 1 ? 's' : ''} code with this one`,
-          `Change risk: **${impact.level}**. ${impact.summary ?? ''}`,
-        );
-  const dataAnswer = contested.length
-    ? answer(
-        'warn',
-        `Shared data: ${contested.map((entry) => entry.collection).join(', ')}`,
-        'Other code writes the same collection' +
-          (contested.length > 1 ? 's' : '') +
-          '. Changing the shape of what this action saves can break it — and there is no compile error to warn you.',
-      )
-    : '';
-
-  const why = (impact.factors ?? []).length
-    ? heading('Why this risk level') +
-      `<ul class="plain why-list">${impact.factors.map((factor) => `<li>${escapeHtml(factor)}</li>`).join('')}</ul>`
-    : '';
-
-  const atRisk = others.length
-    ? heading('Actions that could break') +
-      renderDocTable({
-        columns: ['Action', 'Shares'],
-        rows: others.map((feature) => ({
-          cells: [
-            flowLinkCell(
-              feature.id,
-              feature.title + (feature.subtitle ? ` · ${feature.subtitle}` : ''),
-            ),
-            `${feature.viaSteps} step${feature.viaSteps > 1 ? 's' : ''}`,
-          ],
-          tone: 'warn',
-        })),
-      })
-    : '';
-
-  const shared = impact.shared.length
-    ? heading('Shared code, most-shared first') +
-      renderDocTable({
-        columns: ['Step', 'Kind', 'Also used by', 'Warnings'],
-        rows: impact.shared.map((step) => ({
-          cells: [
-            `\`${step.label}\``,
-            step.kind.replace('-', ' '),
-            {
-              html: step.otherFlows
-                .map(
-                  (other) =>
-                    `<button class="pill" data-goto-flow="${escapeHtml(other.id)}">${escapeHtml(other.title)}</button>`,
-                )
-                .join(' '),
-            },
-            step.warnings.join(' '),
-          ],
-          ...(step.file ? { at: { file: step.file, line: step.line } } : {}),
-          tone: step.level === 'high' ? 'error' : 'warn',
-        })),
-      })
-    : '';
-
-  const data = contested.length
-    ? heading('Shared data') +
-      renderDocTable({
-        columns: ['Collection', 'Also written by'],
-        rows: contested.map((entry) => ({
-          cells: [
-            `**${entry.collection}**`,
-            entry.writers.map((writer) => `\`${writer}\``).join(', '),
-          ],
-          tone: 'warn',
-        })),
-      })
-    : '';
-
-  const exclusive = impact.exclusive.length
-    ? heading(
-        'Only this action uses these — safe to change',
-        `${impact.exclusive.length} step${impact.exclusive.length === 1 ? '' : 's'} nothing else runs through.`,
-      ) +
-      renderDocTable({
-        columns: ['Step', 'Kind'],
-        rows: impact.exclusive.map((step) => ({
-          cells: [`\`${step.label}\``, (step.kind ?? '').replace('-', ' ')],
-          ...(step.file ? { at: { file: step.file, line: step.line } } : {}),
-          tone: 'ok',
-        })),
-      })
-    : '';
-
-  panel.innerHTML =
-    intro +
-    `<div class="answer-row">${codeAnswer}${dataAnswer}</div>` +
-    atRisk +
-    shared +
-    data +
-    why +
-    exclusive +
-    renderInfrastructure(impact);
-
-  bindFlowJumps(panel);
-  bindStepSelection(panel);
-  bindTableFolds(panel);
 }
 
 /**
@@ -3561,7 +3766,7 @@ function flowchartSvg(out, width, height) {
   );
 }
 
-/** Findings, read once per scan: the flow list marks and the Issues tab both need them. */
+/** Findings, read once per scan: the flow list marks and Issues & impact both need them. */
 async function loadIssues() {
   try {
     state.findings = await getJson('/api/findings');
@@ -3570,7 +3775,7 @@ async function loadIssues() {
   }
   renderFlowList();
   renderTabs();
-  if (state.tab === 'issues') renderIssues();
+  if (state.tab === 'impact') renderImpact();
 }
 
 function issuesFor(flowId) {
@@ -3587,44 +3792,63 @@ const ISSUE_KINDS = {
 };
 
 /**
- * The Issues tab: bugs the graph and the source can show, each with the line
- * to open, why it matters and how to fix it. The selected action's issues
- * first, then the rest of the project, filterable — a real codebase has
- * hundreds, and the high ones must not drown in the low ones.
+ * Bugs the graph and the source can show, each with the line to open, why it
+ * matters and how to fix it: the selected action's first, then the rest of
+ * the project, filterable — a real codebase has hundreds, and the high ones
+ * must not drown in the low ones.
  */
-function renderIssues() {
-  const panel = el.panels.issues;
-  if (!panel) return;
+function actionIssuesHtml(number) {
+  const flow = state.selectedFlow;
   const data = state.findings;
-  if (!data) return panelLoading(panel, 'the whole project for bugs');
-  if (data.error) {
-    panel.innerHTML = `<p class="error">${escapeHtml(String(data.error))}</p>`;
-    return;
+  const title = flow ? `Issues in <em>${escapeHtml(flowTitle(flow))}</em>` : 'Issues in an action';
+  let body;
+  if (!flow) {
+    body = `<p class="tab-note">Pick an action on the left to see the bugs in the code it runs through.</p>`;
+  } else if (!data) {
+    body = `<p class="muted">Reading the whole project for bugs…</p>`;
+  } else if (data.error) {
+    body = `<p class="error">${escapeHtml(String(data.error))}</p>`;
+  } else {
+    const mine = issuesFor(flow.id);
+    body = mine.length
+      ? answer(
+          issueTone(mine),
+          `${plural(mine.length, 'issue')} in the code this action runs through`,
+          'Each one names the line to open and how to fix it.',
+        ) +
+        `<ol class="issue-list">${mine.map((finding) => renderIssue(finding, true)).join('')}</ol>`
+      : answer(
+          'ok',
+          'No issues found in this action',
+          'Checked for missing auth, missing tenant filters, mass assignment, queries in loops and reads that wait for each other.',
+        );
   }
+  return impactSection(number, title, body, 'impact-issues');
+}
+
+/** The rest of the project's issues, in a box of its own so a filter redraws only it. */
+function projectIssuesHtml(number) {
+  const title = state.selectedFlow
+    ? 'Issues everywhere else in the project'
+    : 'Issues across the project';
+  return impactSection(
+    number,
+    title,
+    `<div id="project-issues">${projectIssuesBody()}</div>`,
+    'impact-project',
+  );
+}
+
+function projectIssuesBody() {
+  const data = state.findings;
+  if (!data) return `<p class="muted">Reading the whole project for bugs…</p>`;
+  if (data.error) return `<p class="error">${escapeHtml(String(data.error))}</p>`;
   const flow = state.selectedFlow;
   const mine = flow ? issuesFor(flow.id) : [];
   const others = data.findings.filter((finding) => !mine.includes(finding));
-
-  const intro = panelIntro(
-    'Bugs the code shows, each with the line to open: routes with no auth, queries that forget the tenant, the request body written as is, queries in loops, and reads that wait for each other. Read from the source — nothing is run.',
-  );
-  const summary = flow
-    ? mine.length
-      ? answer(
-          mine.some((finding) => finding.severity === 'high')
-            ? 'danger'
-            : mine.some((finding) => finding.severity === 'medium')
-              ? 'warn'
-              : 'neutral',
-          `${mine.length} issue${mine.length === 1 ? '' : 's'} in ${flowTitle(flow)}`,
-          'The code this action runs through has the problems below.',
-        )
-      : answer(
-          'ok',
-          `No issues found in ${flowTitle(flow)}`,
-          `The ${data.findings.length} found elsewhere in the project are listed below.`,
-        )
-    : '';
+  if (others.length === 0) {
+    return `<p class="tab-note">No other issues in the project. Checked ${data.checked.routes} routes and ${data.checked.queries} queries.</p>`;
+  }
 
   const counts = { high: 0, medium: 0, low: 0 };
   for (const finding of others) counts[finding.severity] += 1;
@@ -3653,39 +3877,48 @@ function renderIssues() {
     </div>`;
 
   const scope = [
-    `Checked ${data.checked.routes} routes and ${data.checked.queries} queries`,
+    `${plural(others.length, 'issue')} in other actions and routes`,
+    `checked ${data.checked.routes} routes and ${data.checked.queries} queries`,
     data.tenantKey ? `tenant field: \`${data.tenantKey}\`` : 'no tenant field found',
   ].join(' · ');
 
-  panel.innerHTML =
-    intro +
-    summary +
-    (mine.length
-      ? `<ol class="issue-list">${mine.map((finding) => renderIssue(finding, true)).join('')}</ol>`
-      : '') +
-    heading(
-      `${flow ? 'Everywhere else in the project' : 'Across the project'} (${others.length})`,
-      `${scope}. Showing ${shown.length}.`,
-    ) +
+  return (
+    `<p class="tab-note">${richText(scope)}. Showing ${shown.length}.</p>` +
     filters +
     (shown.length
       ? `<ol class="issue-list">${shown.map((finding) => renderIssue(finding, false)).join('')}</ol>`
       : '<p class="muted">Nothing at the chosen severity.</p>') +
-    notesList(data.notes);
+    notesList(data.notes)
+  );
+}
 
-  for (const button of panel.querySelectorAll('[data-issue-severity]')) {
+/** Wire the filters inside the project list; they redraw it and nothing else. */
+function bindProjectIssues(panel) {
+  const box = panel.querySelector('#project-issues');
+  if (!box) return;
+  const redraw = () => {
+    box.innerHTML = projectIssuesBody();
+    bindProjectIssues(panel);
+  };
+  for (const button of box.querySelectorAll('[data-issue-severity]')) {
     button.addEventListener('click', () => {
       const severity = button.dataset.issueSeverity;
       if (state.issueSeverities.has(severity)) state.issueSeverities.delete(severity);
       else state.issueSeverities.add(severity);
-      renderIssues();
+      redraw();
     });
   }
-  panel.querySelector('.issue-kind')?.addEventListener('change', (event) => {
+  box.querySelector('.issue-kind')?.addEventListener('change', (event) => {
     state.issueKind = event.target.value;
-    renderIssues();
+    redraw();
   });
-  bindIssueJumps(panel);
+  bindIssueJumps(box);
+}
+
+function issueTone(findings) {
+  if (findings.some((finding) => finding.severity === 'high')) return 'danger';
+  if (findings.some((finding) => finding.severity === 'medium')) return 'warn';
+  return 'neutral';
 }
 
 /** One finding: the headline always; why, fix, code and the actions it reaches when opened. */
@@ -3734,11 +3967,11 @@ function renderIssue(finding, open) {
     </li>`;
 }
 
-/** An action named under an issue opens that action, staying on Issues. */
+/** An action named under an issue opens that action, staying on this tab. */
 function bindIssueJumps(panel) {
   for (const button of panel.querySelectorAll('[data-issue-flow]')) {
     button.addEventListener('click', () => {
-      state.tab = 'issues';
+      state.tab = 'impact';
       selectFlow(button.dataset.issueFlow);
     });
   }
@@ -3969,106 +4202,6 @@ function splitSite(site) {
   return match ? [match[1], Number(match[2])] : [site, undefined];
 }
 
-/** Tab 6 — what your uncommitted changes put at risk. */
-function renderChanged() {
-  const panel = el.panels.changed;
-  if (!panel) return;
-  if (!state.changed) return panelLoading(panel, 'what you have changed');
-
-  const changed = state.changed;
-  const intro = panelIntro(
-    'Your uncommitted changes, seen through the app: which user actions run through the ' +
-      'files you edited. Git shows the lines; this shows who is affected. It is about the ' +
-      'whole project, not the selected action.',
-  );
-
-  if (changed.error) {
-    panel.innerHTML =
-      intro +
-      answer(
-        'neutral',
-        'Could not read your changes',
-        `${changed.error} — this view needs a git repository.`,
-      );
-    return;
-  }
-
-  const refresh = `<p><button class="button ghost small" id="changed-refresh">Re-read changes</button></p>`;
-  const files = renderDocTable({
-    columns: ['Changed file', 'Status', 'Steps of the app in it'],
-    rows: changed.files.map((entry) => ({
-      cells: [
-        { html: fileLink(entry.file) },
-        entry.status ?? 'modified',
-        entry.steps > 0
-          ? `**${entry.steps}**`
-          : entry.importedBy > 0
-            ? `none of its own — imported by **${entry.importedBy}** file${entry.importedBy === 1 ? '' : 's'}`
-            : '_none — config, styles, or not analysed_',
-      ],
-      tone: entry.steps === 0 && !entry.importedBy ? 'muted' : 'warn',
-    })),
-  });
-
-  if (changed.features.length === 0) {
-    panel.innerHTML =
-      intro +
-      answer(
-        changed.files.length === 0 ? 'ok' : 'ok',
-        changed.files.length === 0 ? 'Nothing has changed' : 'Your changes reach no user action',
-        changed.summary,
-      ) +
-      (changed.files.length ? heading('Changed files') + files : '') +
-      refresh +
-      notesList(changed.notes);
-    bindChangedRefresh(panel);
-    bindTableFolds(panel);
-    return;
-  }
-
-  panel.innerHTML =
-    intro +
-    answer(
-      changed.level === 'high' ? 'danger' : changed.level === 'medium' ? 'warn' : 'neutral',
-      `Your changes reach ${changed.features.length} action${changed.features.length === 1 ? '' : 's'}` +
-        (changed.untested.length ? ` — ${changed.untested.length} with no test` : ''),
-      `Risk: **${changed.level}**. ${changed.summary}` +
-        (changed.collections.length
-          ? ` Data touched: ${changed.collections.map((c) => `\`${c}\``).join(', ')}.`
-          : ''),
-    ) +
-    heading('Actions affected, most-touched first', 'Click an action to open it.') +
-    renderDocTable({
-      columns: ['Action', 'Changed steps it runs through', 'Tests'],
-      rows: changed.features.map((feature) => ({
-        cells: [
-          flowLinkCell(
-            feature.id,
-            feature.title + (feature.subtitle ? ` · ${feature.subtitle}` : ''),
-          ),
-          [
-            feature.touchedSteps.map((step) => `\`${step.label}\``).join(', '),
-            (feature.through ?? []).length
-              ? `through an import of ${feature.through.map((file) => `\`${file}\``).join(', ')}`
-              : '',
-          ]
-            .filter(Boolean)
-            .join(' · '),
-          feature.testCases === 0 ? '**none**' : `${feature.testCases}`,
-        ],
-        tone: feature.testCases === 0 ? 'error' : 'ok',
-      })),
-    }) +
-    heading('Changed files') +
-    files +
-    refresh +
-    notesList(changed.notes);
-
-  bindFlowJumps(panel);
-  bindChangedRefresh(panel);
-  bindTableFolds(panel);
-}
-
 /** Copy-to-clipboard for any element carrying `data-copy`. */
 function bindCopy(panel) {
   for (const button of panel.querySelectorAll('[data-copy]')) {
@@ -4088,8 +4221,796 @@ function bindCopy(panel) {
   }
 }
 
-function bindChangedRefresh(panel) {
-  panel.querySelector('#changed-refresh')?.addEventListener('click', () => {
-    void loadChanged();
+// ---------------------------------------------------------------------------
+// The Impact tab
+//
+// One question at two moments: "what does my change break?" asked after the
+// edit (your uncommitted changes, checked by the compiler, whole project) and
+// before it (what a change to the selected action would reach, from the
+// graph). Two labelled sections rather than one blended list, because they
+// have different scopes and a reader must always know why a line is there.
+// ---------------------------------------------------------------------------
+
+const CHANGE_LABELS = {
+  removed: 'deleted',
+  unexported: 'no longer exported',
+  renamed: 'renamed',
+  signature: 'signature changed',
+  shape: 'shape changed',
+  body: 'body changed',
+  added: 'new',
+};
+
+const VERDICT_LABELS = {
+  broken: ['danger', 'breaks'],
+  likely: ['warn', 'likely breaks'],
+  review: ['muted', 'check'],
+};
+
+/**
+ * Tab — what is wrong and what could break. Three answers at the top, one per
+ * question, each a link to its section; then the sections, the most urgent
+ * first: your own breaking edits, the selected action's bugs, what a change
+ * to it would reach, and last the long list of the rest of the project.
+ */
+function renderImpact() {
+  const panel = el.panels.impact;
+  if (!panel) return;
+  panel.innerHTML =
+    panelIntro(
+      'What is wrong and what could break: the edits you have already made, checked by the ' +
+        'compiler across the whole project; the bugs in the selected action; and what a change ' +
+        'to it would reach. Read from the source — nothing is run.',
+    ) +
+    impactOverviewHtml() +
+    yourChangesHtml() +
+    actionIssuesHtml(2) +
+    beforeYouChangeHtml() +
+    projectIssuesHtml(4);
+
+  for (const card of panel.querySelectorAll('[data-impact-jump]')) {
+    card.addEventListener('click', () => {
+      const section = panel.querySelector(`[data-impact-section="${card.dataset.impactJump}"]`);
+      if (!section) return;
+      section.open = true;
+      state.impactOpen[card.dataset.impactJump] = true;
+      section.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    });
+  }
+  for (const section of panel.querySelectorAll('[data-impact-section]')) {
+    section.addEventListener('toggle', () => {
+      state.impactOpen[section.dataset.impactSection] = section.open;
+    });
+  }
+  bindProjectIssues(panel);
+  bindIssueJumps(panel.querySelector('.impact-issues') ?? panel);
+  bindFlowJumps(panel);
+  bindStepSelection(panel);
+  bindTableFolds(panel);
+  panel.querySelector('#impact-recheck')?.addEventListener('click', () => {
+    void loadChanged({ fresh: true });
   });
+}
+
+/** The three answers, side by side: each says its verdict and opens its section. */
+function impactOverviewHtml() {
+  const card = (target, label, verdict) =>
+    `<button type="button" class="impact-card tone-${escapeHtml(verdict.tone)}" data-impact-jump="${target}">
+      <span class="impact-card-label">${escapeHtml(label)}</span>
+      <span class="impact-card-value">${escapeHtml(verdict.text)}</span>
+      ${verdict.note ? `<span class="impact-card-note">${escapeHtml(verdict.note)}</span>` : ''}
+    </button>`;
+  return `<div class="impact-overview">
+      ${card('impact-yours', 'Your uncommitted changes', changesVerdict())}
+      ${card('impact-issues', 'Bugs in this action', issuesVerdict())}
+      ${card('impact-before', 'If you change this action', reachVerdict())}
+    </div>`;
+}
+
+function changesVerdict() {
+  const changed = state.changed;
+  if (!changed) return { text: 'Reading…', tone: 'neutral' };
+  if (changed.error) return { text: 'Needs git', tone: 'muted', note: 'Not a git repository' };
+  if (changed.files.length === 0)
+    return { text: 'No changes', tone: 'ok', note: 'Since the last commit' };
+  const files = plural(changed.files.length, 'changed file');
+  const report = state.breakage;
+  if (!report || (!report.error && !Array.isArray(report.symbols))) {
+    return { text: 'Checking…', tone: 'neutral', note: files };
+  }
+  if (report.error) return { text: 'Not checked', tone: 'muted', note: files };
+  const breaks = breakItems(report).length;
+  if (breaks) return { text: `Breaks ${plural(breaks, 'place')}`, tone: 'danger', note: files };
+  if (report.totals.review) {
+    return { text: `${report.totals.review} to check`, tone: 'warn', note: `Compiles · ${files}` };
+  }
+  return { text: 'Compiles', tone: 'ok', note: files };
+}
+
+function issuesVerdict() {
+  const flow = state.selectedFlow;
+  if (!flow) return { text: 'Pick an action', tone: 'muted' };
+  const data = state.findings;
+  if (!data) return { text: 'Reading…', tone: 'neutral' };
+  if (data.error) return { text: 'Not checked', tone: 'muted' };
+  const mine = issuesFor(flow.id);
+  if (mine.length === 0) return { text: 'None found', tone: 'ok' };
+  const high = mine.filter((finding) => finding.severity === 'high').length;
+  return {
+    text: plural(mine.length, 'issue'),
+    tone: issueTone(mine),
+    note: high ? `${high} high` : undefined,
+  };
+}
+
+function reachVerdict() {
+  if (!state.selectedFlow) return { text: 'Pick an action', tone: 'muted' };
+  const insight = state.insight;
+  if (!insight) return { text: 'Working out…', tone: 'neutral' };
+  if (insight.error || !insight.impact) return { text: 'Not checked', tone: 'muted' };
+  const impact = insight.impact;
+  const others = impact.featuresAtRisk?.length ?? 0;
+  const shared = impact.contestedCollections?.length ?? 0;
+  const data = shared ? `Shares data: ${plural(shared, 'collection')}` : undefined;
+  if (impact.shared.length === 0) {
+    return { text: 'Safe on its own', tone: shared ? 'warn' : 'ok', note: data };
+  }
+  return {
+    text: `${plural(others, 'action')} share code`,
+    tone: impact.level === 'high' ? 'danger' : 'warn',
+    note: data ?? `Change risk: ${impact.level}`,
+  };
+}
+
+/** Which section each card describes, so a folded section still says its answer. */
+const IMPACT_VERDICTS = {
+  'impact-yours': () => changesVerdict(),
+  'impact-issues': () => issuesVerdict(),
+  'impact-before': () => reachVerdict(),
+};
+
+/**
+ * One foldable section. It starts open unless `open` says otherwise, and once
+ * the reader folds or opens it, that choice holds across actions.
+ */
+function impactSection(number, title, body, extraClass = '', { open = true } = {}) {
+  const key = extraClass.split(' ')[0];
+  const shown = state.impactOpen[key] ?? open;
+  const verdict = IMPACT_VERDICTS[key]?.();
+  return `<details class="impact-section ${extraClass}" data-impact-section="${key}"${shown ? ' open' : ''}>
+      <summary class="impact-title">
+        <span class="impact-step">${number}</span>
+        <span class="impact-title-text">${title}</span>
+        ${verdict ? `<span class="chip small ${escapeHtml(verdict.tone)} impact-verdict">${escapeHtml(verdict.text)}</span>` : ''}
+      </summary>
+      <div class="impact-body">${body}</div>
+    </details>`;
+}
+
+/** Section 1 — the uncommitted changes. */
+function yourChangesHtml() {
+  const title = 'Your uncommitted changes';
+  const changed = state.changed;
+  const recheck = `<button class="button ghost small" id="impact-recheck"${
+    state.changedLoading || state.breakageLoading ? ' disabled' : ''
+  }>${state.changedLoading || state.breakageLoading ? 'Checking…' : 'Check again'}</button>`;
+
+  if (!changed) {
+    return impactSection(1, title, `<p class="muted">Reading your changes…</p>`, 'impact-yours');
+  }
+  if (changed.error) {
+    return impactSection(
+      1,
+      title,
+      `<p class="tab-note">Could not read your changes: ${escapeHtml(changed.error)} — this part needs a git repository.</p>`,
+      'impact-yours',
+    );
+  }
+  if (changed.files.length === 0) {
+    return impactSection(
+      1,
+      title,
+      `<p class="tab-note">Nothing has changed since the last commit. Edit some code and press <strong>Check again</strong>, ` +
+        `or read below what a change to the selected action would break.</p><p>${recheck}</p>`,
+      'impact-yours is-clean',
+    );
+  }
+
+  const report = state.breakage;
+  const ready = report && !report.error && Array.isArray(report.symbols);
+  let body;
+  if (!report || (!report.error && !ready)) {
+    body =
+      answer(
+        'neutral',
+        'Checking what your change breaks…',
+        `${changed.files.length} changed file${changed.files.length === 1 ? '' : 's'}. ` +
+          'Type-checking every place that uses what you changed, before and after your edit.',
+      ) + broadHtml(changed);
+  } else if (report.error) {
+    body =
+      answer('neutral', 'Could not check what your change breaks', report.error) +
+      broadHtml(changed);
+  } else {
+    const changedSymbols = report.symbols.filter((symbol) => symbol.change !== 'added');
+    const added = report.symbols.filter((symbol) => symbol.change === 'added');
+    const breaks = breakItems(report);
+    body =
+      headlineHtml(report, breaks) +
+      (breaks.length ? brokenInAppHtml(breaks) : '') +
+      (changedSymbols.length
+        ? heading(
+            'What you changed',
+            'One card per function, component, hook or type you changed: how it changed, and every ' +
+              'place that uses it. Click a card to open it.',
+          ) +
+          changedSymbols
+            // The breaks are listed above already; with none, the places to
+            // check are the news, so those cards start open.
+            .map((symbol) =>
+              symbolCard(symbol, {
+                open: breaks.length === 0 && symbol.usages.some((u) => u.verdict === 'review'),
+              }),
+            )
+            .join('')
+        : '') +
+      (added.length
+        ? `<p class="tab-note">New, so nothing depends on them yet: ${added
+            .map((symbol) => `<code>${escapeHtml(symbol.name)}</code>`)
+            .join(', ')}.</p>`
+        : '') +
+      broadHtml(changed) +
+      notesList(report.notes);
+  }
+  // A report with nothing breaking is long and not news: folded, the card
+  // above and the heading still say so.
+  const breaking = ready && breakItems(report).length > 0;
+  return impactSection(1, title, body + `<p>${recheck}</p>`, 'impact-yours', {
+    open: !ready || breaking,
+  });
+}
+
+/** The one sentence a reader who stops here should leave with. */
+function headlineHtml(report, breaks) {
+  const pages = new Set(breaks.map((item) => item.page).filter((page) => page.startsWith('/')));
+  const features = new Set(breaks.flatMap((item) => item.reach.features.map((f) => f.id)));
+  const { totals } = report;
+  const how = report.typeChecked
+    ? `Checked with the TypeScript compiler — ${report.checkedFiles} file${report.checkedFiles === 1 ? '' : 's'}, ` +
+      `before and after your edit, in ${(report.durationMs / 1000).toFixed(1)}s. Only errors your edit introduced are shown.`
+    : 'Not type-checked: verdicts come from comparing each use with the new declaration.';
+
+  if (breaks.length > 0) {
+    return answer(
+      'danger',
+      `Your change breaks ${breaks.length} place${breaks.length === 1 ? '' : 's'}` +
+        (pages.size ? ` on ${pages.size} page${pages.size === 1 ? '' : 's'}` : '') +
+        (features.size ? `, in ${features.size} action${features.size === 1 ? '' : 's'}` : ''),
+      `Fix these before you commit. ${how}`,
+    );
+  }
+  if (totals.symbols === 0) {
+    return answer('ok', 'Nothing that existed before changed', `${report.summary} ${how}`);
+  }
+  if (totals.review > 0) {
+    return answer(
+      'warn',
+      `Your change compiles — ${totals.review} place${totals.review === 1 ? '' : 's'} to check`,
+      `Nothing breaks, but ${totals.review === 1 ? 'one place relies' : 'these places rely'} on ` +
+        `behaviour you changed. Open the cards below to read ${totals.review === 1 ? 'it' : 'them'}. ${how}`,
+    );
+  }
+  return answer('ok', 'Your change compiles, and nothing else uses what you changed', how);
+}
+
+/**
+ * Every break, flattened: compiler errors at uses, uses that will fail in
+ * plain JavaScript, errors inside the changed code and errors elsewhere.
+ */
+function breakItems(report) {
+  const items = [];
+  const place = (reach) => reach.pages[0] ?? (reach.apis[0] ? `API ${reach.apis[0]}` : '');
+  for (const symbol of report.symbols) {
+    for (const usage of symbol.usages) {
+      if (usage.verdict === 'review') continue;
+      const base = {
+        symbol: symbol.name,
+        file: usage.file,
+        line: usage.line,
+        in: usage.in,
+        source: usage.source,
+        reach: usage.reach,
+        page: place(usage.reach),
+      };
+      if (usage.errors.length) {
+        for (const error of usage.errors) {
+          items.push({ ...base, text: error.explain ?? error.message, error });
+        }
+      } else {
+        items.push({ ...base, text: usage.reason, likely: true });
+      }
+    }
+    for (const error of symbol.errors) {
+      items.push({
+        symbol: symbol.name,
+        file: error.file,
+        line: error.line,
+        in: undefined,
+        source: error.source,
+        reach: error.reach,
+        page: place(error.reach),
+        text: error.explain ?? error.message,
+        error,
+        inside: true,
+      });
+    }
+  }
+  for (const error of report.otherErrors) {
+    items.push({
+      symbol: undefined,
+      file: error.file,
+      line: error.line,
+      in: undefined,
+      source: error.source,
+      reach: error.reach,
+      page: place(error.reach),
+      text: error.explain ?? error.message,
+      error,
+      from: error.from,
+    });
+  }
+  return items;
+}
+
+/**
+ * The breaks, the way the app is used rather than the way the code is laid
+ * out: page, then the component on it, then each broken line in plain words.
+ */
+function brokenInAppHtml(items) {
+  const pages = new Map();
+  for (const item of items) {
+    const key = item.page || 'Not on a traced page';
+    if (!pages.has(key)) pages.set(key, []);
+    pages.get(key).push(item);
+  }
+  const ordered = [...pages].sort(
+    ([a, x], [b, y]) =>
+      y.length - x.length || Number(b.startsWith('/')) - Number(a.startsWith('/')),
+  );
+
+  const groups = ordered
+    .map(([page, list]) => {
+      const features = new Map();
+      for (const item of list) for (const f of item.reach.features) features.set(f.id, f);
+      const featureList = [...features.values()];
+      const components = new Map();
+      for (const item of list) {
+        const key = item.in?.split(' › ')[0] ?? item.reach.components[0] ?? item.file;
+        if (!components.has(key)) components.set(key, []);
+        components.get(key).push(item);
+      }
+      const shownFeatures = featureList
+        .slice(0, 4)
+        .map(
+          (f) =>
+            `<button class="link" data-goto-flow="${escapeHtml(f.id)}">${escapeHtml(f.title)}</button>`,
+        )
+        .join(', ');
+      return `<div class="broken-page">
+          <div class="broken-page-head">
+            <span class="broken-page-name">${page.startsWith('/') ? `<code>${escapeHtml(page)}</code>` : escapeHtml(page)}</span>
+            <span class="chip small danger">${list.length} break${list.length === 1 ? '' : 's'}</span>
+            ${
+              featureList.length
+                ? `<span class="broken-page-features">affects ${shownFeatures}${
+                    featureList.length > 4
+                      ? ` <span class="muted">+${featureList.length - 4} more</span>`
+                      : ''
+                  }</span>`
+                : ''
+            }
+          </div>
+          ${[...components]
+            .map(
+              ([component, rows]) => `<div class="broken-component">
+                <div class="broken-component-name"><code>${escapeHtml(component)}</code></div>
+                <ul class="broken-lines">${sameError(rows).map(brokenLineHtml).join('')}</ul>
+              </div>`,
+            )
+            .join('')}
+        </div>`;
+    })
+    .join('');
+
+  return (
+    heading(
+      'Broken in the app',
+      'Page, then the component on it, then each line that no longer works — in plain words, ' +
+        'with the compiler’s message underneath.',
+    ) + `<div class="broken-in-app">${groups}</div>`
+  );
+}
+
+/**
+ * Seven calls failing for the same reason are one problem, said once, with
+ * the seven lines under it — not the same sentence seven times.
+ */
+function sameError(rows) {
+  const groups = new Map();
+  for (const item of rows) {
+    const key = `${item.error?.code ?? 'likely'}\0${item.text}\0${item.symbol ?? ''}`;
+    if (!groups.has(key)) groups.set(key, { ...item, sites: [] });
+    groups.get(key).sites.push(item);
+  }
+  return [...groups.values()];
+}
+
+function brokenLineHtml(group) {
+  const cause = group.symbol
+    ? group.inside
+      ? `inside your change to <code>${escapeHtml(group.symbol)}</code>`
+      : `uses <code>${escapeHtml(group.symbol)}</code>`
+    : group.from?.length
+      ? `imports ${group.from.map((file) => `<code>${escapeHtml(file)}</code>`).join(', ')}`
+      : '';
+  const meta = [
+    group.error ? `<span class="chip small danger">${escapeHtml(group.error.code)}</span>` : '',
+    group.likely ? `<span class="chip small warn">likely, at runtime</span>` : '',
+    cause,
+    group.sites.length > 1 ? `<strong>${group.sites.length} places</strong>` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const compiler =
+    group.error && group.error.explain
+      ? `<div class="broken-compiler">${escapeHtml(group.error.message.split('\n')[0])}</div>`
+      : '';
+  const sites = group.sites
+    .map(
+      (site) =>
+        `<li>${fileLink(site.file, site.line)}${
+          site.source ? `<pre class="usage-src">${escapeHtml(site.source)}</pre>` : ''
+        }</li>`,
+    )
+    .join('');
+  return `<li class="broken-line">
+      <div class="broken-text">${richText(group.text)}</div>
+      ${compiler}
+      <div class="broken-meta">${meta}</div>
+      <ul class="broken-sites">${sites}</ul>
+    </li>`;
+}
+
+function symbolCard(symbol, { open = false } = {}) {
+  const counts = { broken: 0, likely: 0, review: 0 };
+  for (const usage of symbol.usages) counts[usage.verdict] += 1;
+  const failing = counts.broken + counts.likely + symbol.errors.length;
+  const tone = failing > 0 ? 'danger' : counts.review > 0 ? 'warn' : 'ok';
+  const tally = [
+    failing
+      ? `<span class="chip small danger">${failing} break${failing === 1 ? '' : 's'}</span>`
+      : '',
+    counts.review ? `<span class="chip small warn">${counts.review} to check</span>` : '',
+    symbol.usages.length === 0 && !symbol.errors.length
+      ? `<span class="chip small ok">nothing else uses it</span>`
+      : '',
+  ].join('');
+
+  const signature =
+    symbol.before && symbol.after
+      ? `<div class="sig-diff"><div class="sig-before"><span>before</span><code>${escapeHtml(
+          symbol.name,
+        )}${escapeHtml(symbol.before)}</code></div><div class="sig-after"><span>after</span><code>${escapeHtml(
+          symbol.name,
+        )}${escapeHtml(symbol.after)}</code></div></div>`
+      : '';
+
+  const reach = failing > 0 ? symbol.breaks : symbol.reach;
+  const reachTitle = failing > 0 ? 'Where it breaks' : 'Where it is used';
+
+  const usages = symbol.usages.length
+    ? renderDocTable({
+        columns: ['Where it is used', 'Verdict', 'What happens there', 'In the app'],
+        rows: symbol.usages.map((usage) => {
+          const [verdictTone, verdictText] = VERDICT_LABELS[usage.verdict];
+          return {
+            cells: [
+              {
+                html:
+                  fileLink(usage.file, usage.line) +
+                  (usage.in
+                    ? `<div class="muted small">in <code>${escapeHtml(usage.in)}</code></div>`
+                    : '') +
+                  (usage.approximate
+                    ? `<div class="muted small">line from the committed text</div>`
+                    : ''),
+              },
+              { html: `<span class="chip small ${verdictTone}">${verdictText}</span>` },
+              {
+                html:
+                  (usage.errors.length
+                    ? usage.errors.map(errorHtml).join('')
+                    : `<div>${richText(usage.reason)}</div>`) +
+                  (usage.source ? `<pre class="usage-src">${escapeHtml(usage.source)}</pre>` : ''),
+              },
+              { html: reachHtml(usage.reach, true) },
+            ],
+            tone: usage.verdict === 'broken' ? 'error' : usage.verdict === 'likely' ? 'warn' : '',
+          };
+        }),
+      })
+    : '';
+
+  return `<details class="break-card tone-${tone}"${open ? ' open' : ''}>
+      <summary>
+        <code class="break-name">${escapeHtml(symbol.name)}</code>
+        <span class="chip small">${escapeHtml(symbol.kind)}</span>
+        <span class="chip small ${symbol.change === 'body' ? '' : 'warn'}">${escapeHtml(
+          CHANGE_LABELS[symbol.change] ?? symbol.change,
+        )}</span>
+        ${tally}
+        <span class="break-file">${fileLink(symbol.file, symbol.line)}</span>
+      </summary>
+      <div class="break-body">
+        <ul class="break-details">${symbol.details.map((line) => `<li>${richText(line)}</li>`).join('')}</ul>
+        ${signature}
+        ${reachIsEmpty(reach) ? '' : `<div class="break-reach"><div class="break-reach-title">${reachTitle}</div>${reachHtml(reach, false)}</div>`}
+        ${usages}
+      </div>
+    </details>`;
+}
+
+/**
+ * The file-level view, folded away: every action that runs through or imports
+ * a changed file. Kept because it sees changes the compiler cannot (a config,
+ * a query string) — and folded because it over-counts on purpose.
+ */
+function broadHtml(changed) {
+  const files = renderDocTable({
+    columns: ['Changed file', 'Status', 'Steps of the app in it'],
+    rows: changed.files.map((entry) => ({
+      cells: [
+        { html: fileLink(entry.file) },
+        entry.status ?? 'modified',
+        entry.steps > 0
+          ? `**${entry.steps}**`
+          : entry.importedBy > 0
+            ? `none of its own — imported by **${entry.importedBy}** file${entry.importedBy === 1 ? '' : 's'}`
+            : '_none — config, styles, or not analysed_',
+      ],
+      tone: entry.steps === 0 && !entry.importedBy ? 'muted' : '',
+    })),
+  });
+  const actions = changed.features.length
+    ? renderDocTable({
+        columns: ['Action', 'Changed steps it runs through', 'Tests'],
+        rows: changed.features.map((feature) => ({
+          cells: [
+            flowLinkCell(
+              feature.id,
+              feature.title + (feature.subtitle ? ` · ${feature.subtitle}` : ''),
+            ),
+            [
+              feature.touchedSteps.map((step) => `\`${step.label}\``).join(', '),
+              (feature.through ?? []).length
+                ? `through an import of ${feature.through.map((file) => `\`${file}\``).join(', ')}`
+                : '',
+            ]
+              .filter(Boolean)
+              .join(' · '),
+            feature.testCases === 0 ? 'none' : `${feature.testCases}`,
+          ],
+        })),
+      })
+    : '';
+  const count = changed.features.length;
+  return `<details class="more broad">
+      <summary>Files you touched (${changed.files.length}) and every action that imports them (${count}) — the broad view</summary>
+      <p class="panel-intro">An over-estimate on purpose: an action is listed if any file it runs through
+        changed at all, or imports one that did. Useful for changes the compiler cannot judge — a config,
+        a stylesheet, a query — and to see which of these actions have no test.
+        ${changed.collections.length ? ` Data the changed code reaches: ${changed.collections.map((c) => `<code>${escapeHtml(c)}</code>`).join(', ')}.` : ''}</p>
+      ${files}
+      ${actions}
+      ${notesList(changed.notes)}
+    </details>`;
+}
+
+/** Section 2 — what a change to the selected action would reach. */
+function beforeYouChangeHtml() {
+  const flow = state.selectedFlow;
+  const title = flow
+    ? `Before you change <em>${escapeHtml(flow.title ?? flow.label)}</em>`
+    : 'Before you change an action';
+  if (!flow) {
+    return impactSection(
+      3,
+      title,
+      `<p class="tab-note">Pick an action on the left to see what else runs through its code.</p>`,
+      'impact-before',
+    );
+  }
+  if (!state.insight) {
+    return impactSection(
+      3,
+      title,
+      `<p class="muted">Working out what depends on this…</p>`,
+      'impact-before',
+    );
+  }
+  if (state.insight.error) {
+    return impactSection(
+      3,
+      title,
+      `<p class="error">Could not load this part: ${escapeHtml(String(state.insight.error))}</p>`,
+      'impact-before',
+    );
+  }
+
+  const impact = state.insight.impact;
+  const others = impact.featuresAtRisk ?? [];
+  const contested = impact.contestedCollections ?? [];
+
+  // The verdict: one sentence about code, one about data.
+  const codeAnswer =
+    impact.shared.length === 0
+      ? answer(
+          'ok',
+          'Safe to change on its own',
+          'No other action runs through this action’s code. ' + (impact.summary ?? ''),
+        )
+      : answer(
+          impact.level === 'high' ? 'danger' : 'warn',
+          `${others.length} other action${others.length === 1 ? '' : 's'} share${others.length === 1 ? 's' : ''} code with this one`,
+          `Change risk: **${impact.level}**. ${impact.summary ?? ''}`,
+        );
+  const dataAnswer = contested.length
+    ? answer(
+        'warn',
+        `Shared data: ${contested.map((entry) => entry.collection).join(', ')}`,
+        'Other code writes the same collection' +
+          (contested.length > 1 ? 's' : '') +
+          '. Changing the shape of what this action saves can break it — and there is no compile error to warn you.',
+      )
+    : '';
+
+  const atRisk = others.length
+    ? heading('Actions that would feel it') +
+      renderDocTable({
+        columns: ['Action', 'Shares'],
+        rows: others.map((feature) => ({
+          cells: [
+            flowLinkCell(
+              feature.id,
+              feature.title + (feature.subtitle ? ` · ${feature.subtitle}` : ''),
+            ),
+            `${feature.viaSteps} step${feature.viaSteps > 1 ? 's' : ''}`,
+          ],
+          tone: 'warn',
+        })),
+      })
+    : '';
+
+  const shared = impact.shared.length
+    ? heading('Shared code, most-shared first') +
+      renderDocTable({
+        columns: ['Step', 'Kind', 'Also used by', 'Warnings'],
+        rows: impact.shared.map((step) => ({
+          cells: [
+            `\`${step.label}\``,
+            step.kind.replace('-', ' '),
+            {
+              html: step.otherFlows
+                .map(
+                  (other) =>
+                    `<button class="pill" data-goto-flow="${escapeHtml(other.id)}">${escapeHtml(other.title)}</button>`,
+                )
+                .join(' '),
+            },
+            step.warnings.join(' '),
+          ],
+          ...(step.file ? { at: { file: step.file, line: step.line } } : {}),
+          tone: step.level === 'high' ? 'error' : 'warn',
+        })),
+      })
+    : '';
+
+  const data = contested.length
+    ? heading('Shared data') +
+      renderDocTable({
+        columns: ['Collection', 'Also written by'],
+        rows: contested.map((entry) => ({
+          cells: [
+            `**${entry.collection}**`,
+            entry.writers.map((writer) => `\`${writer}\``).join(', '),
+          ],
+          tone: 'warn',
+        })),
+      })
+    : '';
+
+  const why = (impact.factors ?? []).length
+    ? `<details class="more"><summary>Why this risk level</summary><ul class="plain why-list">${impact.factors
+        .map((factor) => `<li>${escapeHtml(factor)}</li>`)
+        .join('')}</ul></details>`
+    : '';
+
+  const exclusive = impact.exclusive.length
+    ? `<details class="more"><summary>${impact.exclusive.length} step${
+        impact.exclusive.length === 1 ? '' : 's'
+      } only this action uses — safe to change</summary>` +
+      renderDocTable({
+        columns: ['Step', 'Kind'],
+        rows: impact.exclusive.map((step) => ({
+          cells: [`\`${step.label}\``, (step.kind ?? '').replace('-', ' ')],
+          ...(step.file ? { at: { file: step.file, line: step.line } } : {}),
+          tone: 'ok',
+        })),
+      }) +
+      `</details>`
+    : '';
+
+  return impactSection(
+    3,
+    title,
+    `<p class="tab-note">Planning an edit: which other actions run through the same code or write the same data. ` +
+      `Change a shared part and you change them too.</p>` +
+      `<div class="answer-row">${codeAnswer}${dataAnswer}</div>` +
+      atRisk +
+      shared +
+      data +
+      why +
+      exclusive +
+      renderInfrastructure(impact),
+    'impact-before',
+  );
+}
+
+function errorHtml(error) {
+  return `<div class="break-error">${
+    error.explain ? `<div>${richText(error.explain)}</div>` : ''
+  }<div class="${error.explain ? 'broken-compiler' : ''}"><span class="chip small danger">${escapeHtml(
+    error.code,
+  )}</span> ${escapeHtml(error.message.split('\n')[0])}</div></div>`;
+}
+
+function reachIsEmpty(reach) {
+  return (
+    !reach ||
+    (!reach.features.length &&
+      !reach.pages.length &&
+      !reach.components.length &&
+      !reach.apis.length &&
+      !reach.services.length)
+  );
+}
+
+/** Feature, page, component, API and service, one labelled row each. */
+function reachHtml(reach, compact) {
+  if (reachIsEmpty(reach)) return '<span class="muted">not part of any traced feature</span>';
+  const limit = compact ? 3 : 12;
+  const list = (items, render) => {
+    const shown = items.slice(0, limit).map(render).join(', ');
+    return items.length > limit
+      ? `${shown} <span class="muted">+${items.length - limit} more</span>`
+      : shown;
+  };
+  const rows = [
+    [
+      'Feature',
+      reach.features,
+      (f) =>
+        `<button class="link" data-goto-flow="${escapeHtml(f.id)}">${escapeHtml(f.title)}</button>`,
+    ],
+    ['Page', reach.pages, (p) => `<code>${escapeHtml(p)}</code>`],
+    ['Component', reach.components, (c) => `<code>${escapeHtml(c)}</code>`],
+    ['API', reach.apis, (a) => `<code>${escapeHtml(a)}</code>`],
+    ['Service', reach.services, (v) => `<code>${escapeHtml(v)}</code>`],
+  ].filter(([, items]) => items.length);
+  const via = reach.via?.length
+    ? `<div class="muted small">through ${reach.via.map((name) => `<code>${escapeHtml(name)}</code>`).join(' → ')}</div>`
+    : '';
+  return `<dl class="reach${compact ? ' compact' : ''}">${rows
+    .map(([label, items, render]) => `<dt>${label}</dt><dd>${list(items, render)}</dd>`)
+    .join('')}</dl>${via}`;
 }

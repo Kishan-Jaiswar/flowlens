@@ -5,6 +5,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { isIP } from 'node:net';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import {
+  analyzeBreakage,
   analyzeChanged,
   analyzeFlowImpact,
   analyzeImpact,
@@ -27,15 +28,17 @@ import {
   renderFeatureDocument,
   renderScreenDocument,
   resolveFlows,
+  flowPages,
   scan,
   SourceReader,
   testsForFlow,
   planTests,
   projectUnused,
+  type BreakageReport,
   type FlowGraph,
   type TestIndex,
 } from '@flowslens/core';
-import { changedFiles } from '../changedfiles.js';
+import { changedFiles, withCommittedText } from '../changedfiles.js';
 import { artifactPaths, existingConfigFiles, guardArtifacts } from '../gitignore.js';
 import { browserTracerFile, dashboardDir, graphPath, saveGraph, tracePath } from '../paths.js';
 import { color } from '../ui.js';
@@ -214,6 +217,8 @@ export function runServe(args: ServeArgs): number {
    */
   let tests: TestIndex = indexTests(testRoots(root, args));
   let lastScan = new Date();
+  /** The last breakage report, and the state of the tree it was worked out on. */
+  let breakage: { fingerprint: string; report: BreakageReport } | undefined;
   /** Source files read for action documents; dropped on rescan. */
   let reader: SourceReader | undefined;
   /** Findings read the whole project; computed once per scan. */
@@ -340,9 +345,12 @@ export function runServe(args: ServeArgs): number {
     }
 
     if (path === '/api/flows') {
+      const flows = resolveFlows(graph, { includeLocalOnly: url.searchParams.get('all') === '1' });
+      reader ??= new SourceReader(graph);
+      const pages = flowPages(graph, flows, { reader });
       sendJson(
         response,
-        resolveFlows(graph, { includeLocalOnly: url.searchParams.get('all') === '1' }),
+        flows.map((flow) => ({ ...flow, pages: pages.get(flow.id) ?? [] })),
       );
       return;
     }
@@ -420,6 +428,46 @@ export function runServe(args: ServeArgs): number {
         against: found.against,
         ...analyzeChanged(graph, found.files, { tests }),
       });
+      return;
+    }
+
+    /**
+     * What the uncommitted changes break: declaration by declaration, each use
+     * of what changed, and the new compiler errors placed in the app.
+     *
+     * Its own endpoint because it type-checks the project twice, which takes
+     * seconds where `/api/changed` takes milliseconds — the tab shows the file
+     * view at once and fills this in when it arrives. Cached on the exact set
+     * of changed files and their modification times, so switching tabs does
+     * not run the compiler again over a tree that has not moved.
+     */
+    if (path === '/api/changed/breakage') {
+      const base = url.searchParams.get('base') ?? undefined;
+      const found = changedFiles(root, base);
+      if (found.error !== undefined) {
+        sendJson(response, { against: found.against, error: found.error });
+        return;
+      }
+      const fingerprint = JSON.stringify([
+        base ?? '',
+        graph.meta.scannedAt,
+        found.files.map((entry) => [entry.file, entry.status, mtimeOf(join(root, entry.file))]),
+      ]);
+      if (breakage?.fingerprint !== fingerprint || url.searchParams.has('fresh')) {
+        try {
+          breakage = {
+            fingerprint,
+            report: analyzeBreakage(graph, withCommittedText(root, found.files, base), { root }),
+          };
+        } catch (error) {
+          sendJson(response, {
+            against: found.against,
+            error: `the type check failed: ${error instanceof Error ? error.message : String(error)}`,
+          });
+          return;
+        }
+      }
+      sendJson(response, { against: found.against, ...breakage.report });
       return;
     }
 
@@ -524,7 +572,7 @@ export function runServe(args: ServeArgs): number {
     }
 
     /**
-     * Bugs the graph and the source can show — the Issues tab. Project-wide,
+     * Bugs the graph and the source can show — Issues & impact. Project-wide,
      * computed on first request and kept until the next scan.
      */
     if (path === '/api/findings') {
@@ -820,4 +868,13 @@ function headerOf(request: IncomingMessage, name: string): string | undefined {
 
 function summarize(node: { id: string; label: string; source?: unknown; meta?: unknown }) {
   return { id: node.id, label: node.label, source: node.source, meta: node.meta };
+}
+
+/** A file's modification time, or 0 when it is gone. */
+function mtimeOf(path: string): number {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return 0;
+  }
 }

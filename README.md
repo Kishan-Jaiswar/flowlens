@@ -495,8 +495,8 @@ each with the line to open, why it matters in this code, and what to change:
 | Reads that wait               | Independent awaits run one after another instead of together.           |
 
 `--fail-on high` (or `medium`, `low`) exits 1 when a finding at that severity
-exists, for CI; `--json` gives the full list. The Issues tab in the dashboard
-shows the same findings, filtered to the action you have open.
+exists, for CI; `--json` gives the full list. The dashboard's Issues & impact
+tab shows the same findings, the action you have open first.
 
 ### Ask your AI assistant, answered from the graph
 
@@ -820,29 +820,27 @@ node packages/cli/bin/flowlens.mjs trace examples/crud --trace /tmp/demo-trace.j
 
 ---
 
-## The dashboard's eight tabs
+## The dashboard's six tabs
 
-`flowlens serve` opens one action at a time and asks eight questions, none
+`flowlens serve` opens one action at a time and asks its questions, none
 repeating another. Each tab carries its own headline number, so the worrying
 one is visible before you open it:
 
 ```text
-Docs · 7 steps   Decisions · 12 branches   Issues · 2   Performance · not run   Tests · none   Changed · 5   Breaks · 3   Unused · 14
+Docs · 7 steps   Decisions · 12 branches   Performance · not run   Tests · none   Issues & impact · 11 breaking   Unused · 14
 ```
 
-| Tab             | The question                              | Where the answer comes from                                          |
-| --------------- | ----------------------------------------- | -------------------------------------------------------------------- |
-| **Docs**        | What does this action do, end to end?     | The static graph, stage by stage — as a list, or as a diagram        |
-| **Decisions**   | Which way can it go, and what decides?    | The source of every function it runs, from the handler to the query  |
-| **Issues**      | What is already wrong in it?              | `flowlens findings`, narrowed to this action                         |
-| **Performance** | Where does the time go?                   | Runtime spans only: each step, and each database query with its code |
-| **Tests**       | What would catch it if you broke it?      | Which test files import its files, and the cases still to write      |
-| **Changed**     | What do my uncommitted edits put at risk? | `git status` crossed with the graph — project-wide, not per action   |
-| **Breaks**      | What else would a change here break?      | The graph walked backwards from every step of this action            |
-| **Unused**      | What does nothing use?                    | `flowlens unused` — project-wide                                     |
+| Tab                 | The question                               | Where the answer comes from                                                              |
+| ------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| **Docs**            | What does this action do, end to end?      | The static graph, stage by stage — as a list, or as a diagram                            |
+| **Decisions**       | Which way can it go, and what decides?     | The source of every function it runs, from the handler to the query                      |
+| **Performance**     | Where does the time go?                    | Runtime spans only: each step, and each database query with its code                     |
+| **Tests**           | What would catch it if you broke it?       | Which test files import its files, and the cases still to write                          |
+| **Issues & impact** | What is wrong in it, and what could break? | Your edits, type-checked before and after; `flowlens findings`; then this action's graph |
+| **Unused**          | What does nothing use?                     | `flowlens unused` — project-wide                                                         |
 
 Links to the tabs this set replaced — `#tab=flow`, `apis`, `timing`,
-`queries` — still land in the right place.
+`queries`, `changed`, `breaks`, `issues` — still land in the right place.
 
 **Docs** opens with _At a glance_: one line per stage, each opening in place to
 its detail, all closed at first. Only the stages the action has are numbered;
@@ -972,22 +970,56 @@ involved, and nothing is sent anywhere — so it says only what the code says an
 reads the same on every run. Drop `&format=markdown` for the same document as
 JSON.
 
-**Changed** is the one to reach for mid-edit. It ignores the selected feature and
-asks the project-wide question instead — what have I touched, and what runs
-through it:
+**Issues & impact** answers "what is wrong, and what does my change break?".
+It opens with three cards — your uncommitted changes, the bugs in this action,
+and what a change to it would reach — each giving its answer and opening its
+section below; a section folds, and its heading still shows the answer. Then
+come the sections, the most urgent first: your edits, this action's issues,
+_before you change_ it, and the rest of the project's issues with severity and
+kind filters. The tab's badge is the most worrying of the three.
+
+Its first part is about the edits you have already made, across the whole
+project. Every function, component, hook, method and type you changed is
+compared with its committed text, every place that uses it is found with the
+TypeScript language service, and the project is type-checked twice — as it is,
+and with your files put back — so only the errors _your edit_ introduced are
+shown. Each one is placed in the app and said in plain words:
 
 ```text
-high risk   1 changed file is used by 5 features; 5 of them have no test.
+Your change breaks 11 places on 3 pages, in 27 actions
 
-Features affected, most-touched first
-  Products · Delete   ProductsView        no test
-    DELETE /products/:param             app/api/products/[id]/route.ts:1
-  Products · Delete   ProductDetailPage   no test
-    DELETE /products/:param             app/api/products/[id]/route.ts:38
+/medicines/[id]   7 breaks   affects Medicine detail page loads, Medicines · Delete, …
+  MedicineDetailPage
+    Missing `currency` — `formatCurrency` now needs it as argument 2.
+    TS2554 Expected 2-3 arguments, but got 1.          7 places
+      app/(app)/medicines/[id]/page.tsx:96   formatCurrency(medicine.sellingPrice)
+      …
+/dashboard        2 breaks   affects Dashboard page loads
+  DashboardInsights
+    Passes a `boolean` where `formatCurrency` now expects a `string`.
+    TS2345 …                                           2 places
+
+What you changed
+  formatCurrency   signature changed   11 breaks
+    New required parameter `currency: string` at position 2.
+    Parameter `compact` moved from position 2 to 3 — a call that passes it
+    by position now passes its value as `currency`.
+  getStockLevel    body changed        1 to check
 ```
 
-Unlike Performance it needs no instrumentation, and unlike Tests it says something
-useful on a project with none — so it works from the first minute. Every
+A use the compiler still accepts is _to check_, not a break — the body it calls
+changed. Plain JavaScript (no `checkJs`) is judged by comparing each call with
+the new parameter list. A use inside a helper that is not itself a step is
+followed to its callers until one is, so a break in `formatPrice` lands on the
+screen that shows the price. The older file-level view — every action that
+runs through or imports a file you touched — is folded underneath, for changes
+no compiler can judge: a config, a stylesheet, a query. The check runs locally
+on the TypeScript that ships with Flowslens; on medistock (about 100 files) it
+takes about 4 seconds, and is cached until a file changes. Also
+`GET /api/changed/breakage` and `analyzeBreakage()` in `@flowslens/core`.
+
+Like Docs it needs no instrumentation, and unlike Tests it says something useful
+on a project with none — so it works from the first minute. Every
 `file:line` in every tab opens your editor (`?editor=vscode`, `cursor`, `idea`,
 `zed`, …).
 
@@ -1085,12 +1117,13 @@ shape — NestJS DTO classes today — so a Next.js route that validates with Zo
 reports "no DTO to check" rather than guessing, and a body built from a variable
 rather than an object literal is reported as unreadable rather than as absent.
 
-**Breaks** is the one that changes how you work. A flow read on its own is
+The _before you change_ part — what a change to the selected action reaches — is the one
+that changes how you work. A flow read on its own is
 quietly misleading: it shows a chain as though it belonged to this feature, when
 most of the chain is shared. Editing `CustomersService.findOne` because one
 screen needs an extra field is a five-minute change that breaks four other
 screens — and the flow view gives you no hint, because every step looks equally
-yours. The Breaks tab splits the same steps into two lists:
+yours. This part splits the same steps into two lists:
 
 ```text
 medium risk   8 steps of this feature are shared with 3 other features,

@@ -2039,10 +2039,11 @@ function decision(
   otherwise?: string,
 ): DecisionQuestion {
   walk.size += 1;
+  const condition = at ? conditionOf(at) : undefined;
   return {
     type: 'decision',
     question,
-    label: '',
+    label: (condition && meaningOf(condition, frame.side)) ?? '',
     code: condense(code, 120),
     side: frame.side,
     ...(at ? { at: walk.reader.point(at) } : {}),
@@ -2275,6 +2276,162 @@ function groupLabel(node: DecisionGroup): string {
   }
 }
 
+/** The condition a decision was built from: the `if`'s test, the `?:`'s, the left of `&&`. */
+function conditionOf(at: Node): Node | undefined {
+  if (Node.isIfStatement(at)) return at.getExpression();
+  if (Node.isConditionalExpression(at)) return at.getCondition();
+  if (Node.isBinaryExpression(at)) return at.getLeft();
+  return undefined;
+}
+
+/**
+ * A condition read through what its variable holds.
+ *
+ * `if (!parsed.success)` says nothing until you know `parsed` came from
+ * `verifyOtpSchema.safeParse({ phone, otp })` — then it says "are phone and otp
+ * valid?". The same goes for `if (!ok)` after `const ok = await verifyOtp(…)`
+ * and `res.ok` after a `fetch`. Only the assignment in scope is used; a
+ * variable whose origin cannot be read keeps the generic phrasing.
+ */
+function meaningOf(condition: Node, side: DecisionSide): string | undefined {
+  let inner = unwrap(condition);
+  while (
+    Node.isPrefixUnaryExpression(inner) &&
+    inner.getOperatorToken() === SyntaxKind.ExclamationToken
+  ) {
+    inner = unwrap(inner.getOperand());
+  }
+
+  // `parsed.success`, `parsed.error`, `res.ok`
+  if (Node.isPropertyAccessExpression(inner)) {
+    const member = inner.getName();
+    const target = unwrap(inner.getExpression());
+    if (!Node.isIdentifier(target)) return undefined;
+    const origin = originOf(target);
+    if (member === 'success' || member === 'error') {
+      const parse = origin && validationOf(origin, side);
+      if (parse)
+        return member === 'success'
+          ? `${parse.verb} ${parse.what} valid?`
+          : `${parse.verb} ${parse.what} invalid?`;
+      if (member === 'success' && /^pars/i.test(target.getText())) return 'Is the input valid?';
+    }
+    if (member === 'ok' || member === 'success') {
+      if (origin && isFetch(origin)) return 'Did the request succeed?';
+      const name = origin && calledName(origin);
+      if (name) return `Did ${words(name)} succeed?`;
+    }
+    return undefined;
+  }
+
+  // `ok`, `success`, `result` — a flag that holds a call's answer.
+  if (
+    Node.isIdentifier(inner) &&
+    /^(ok|success|succeeded|done|result|res|response)$/i.test(inner.getText())
+  ) {
+    const origin = originOf(inner);
+    if (origin && isFetch(origin)) return 'Did the request succeed?';
+    if (origin && isConfirm(origin)) return 'Did the user confirm?';
+    const name = origin && calledName(origin);
+    if (name) return `Did ${words(name)} succeed?`;
+  }
+
+  // `clinics.length === 0`
+  if (Node.isBinaryExpression(inner)) {
+    const empty = /^([\w$.]+)\.length\s*(===|==)\s*0$/.exec(inner.getText().replace(/\s+/g, ' '));
+    if (empty) return `Are there no ${words(empty[1]!.split('.').pop()!)}?`;
+  }
+  return undefined;
+}
+
+/** The initializer of the variable an identifier names, from its declaration in scope. */
+function originOf(identifier: Node): Node | undefined {
+  const name = identifier.getText();
+  let declaration: Node | undefined;
+  try {
+    declaration = identifier
+      .getSymbol()
+      ?.getDeclarations()
+      .find((candidate) => Node.isVariableDeclaration(candidate));
+  } catch {
+    declaration = undefined;
+  }
+  if (!declaration) {
+    // Without a binder answer, the nearest declaration above in the same function.
+    const scope = identifier.getFirstAncestor(
+      (node) => Node.isBlock(node) || Node.isSourceFile(node),
+    );
+    declaration = scope
+      ?.getDescendantsOfKind(SyntaxKind.VariableDeclaration)
+      .filter(
+        (candidate) => candidate.getName() === name && candidate.getStart() < identifier.getStart(),
+      )
+      .at(-1);
+  }
+  if (!declaration || !Node.isVariableDeclaration(declaration)) return undefined;
+  const value = declaration.getInitializer();
+  return value ? unwrap(value) : undefined;
+}
+
+/** `schema.safeParse(x)` and friends: what is being validated, in words. */
+function validationOf(
+  origin: Node,
+  side: DecisionSide,
+): { verb: string; what: string } | undefined {
+  if (!Node.isCallExpression(origin)) return undefined;
+  const callee = origin.getExpression();
+  if (!Node.isPropertyAccessExpression(callee)) return undefined;
+  if (!/^(safeParse|safeParseAsync|validate|spa)$/.test(callee.getName())) return undefined;
+  const arg = origin.getArguments()[0];
+  if (!arg) return { verb: 'Is', what: 'the input' };
+  const value = unwrap(arg);
+  if (Node.isObjectLiteralExpression(value)) {
+    const names = value
+      .getProperties()
+      .map((property) =>
+        Node.isShorthandPropertyAssignment(property) || Node.isPropertyAssignment(property)
+          ? words(property.getName())
+          : undefined,
+      )
+      .filter((name): name is string => Boolean(name));
+    if (names.length === 1) return { verb: 'Is', what: `the ${names[0]}` };
+    if (names.length > 1 && names.length <= 4) {
+      return { verb: 'Are', what: `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` };
+    }
+    return { verb: 'Is', what: 'the form' };
+  }
+  const text = value.getText();
+  if (/(^|\.)(body|json\(\))$|request\.json|req\.body|^payload$|^input$/.test(text)) {
+    return { verb: 'Is', what: side === 'server' ? 'the request body' : 'the form' };
+  }
+  if (/searchParams|query|params/.test(text)) return { verb: 'Are', what: 'the query parameters' };
+  if (Node.isIdentifier(value)) {
+    const what = words(text);
+    return { verb: /s$/.test(what) && !/ss$/.test(what) ? 'Are' : 'Is', what: `the ${what}` };
+  }
+  return { verb: 'Is', what: 'the input' };
+}
+
+/** `const ok = await confirmDelete(…)` asks a person, not the code. */
+function isConfirm(origin: Node): boolean {
+  return (
+    Node.isCallExpression(origin) && /(^|\.)confirm\w*$/i.test(origin.getExpression().getText())
+  );
+}
+
+function isFetch(origin: Node): boolean {
+  return (
+    Node.isCallExpression(origin) && /^(window\.)?fetch$/.test(origin.getExpression().getText())
+  );
+}
+
+/** `verifyOtp` for `verifyOtp(phone, otp)` or `api.users.verifyOtp(...)`. */
+function calledName(origin: Node): string | undefined {
+  if (!Node.isCallExpression(origin)) return undefined;
+  const name = origin.getExpression().getText().split('.').pop() ?? '';
+  return /^[A-Za-z_$][\w$]*$/.test(name) ? name : undefined;
+}
+
 /**
  * A condition in plain words, for the shapes that have one:
  * `"error" in ctx` -> `ctx has error?`, `parsed.success` -> `parsed succeeded?`,
@@ -2282,6 +2439,8 @@ function groupLabel(node: DecisionGroup): string {
  */
 function questionLabel(code: string, question: string): string {
   const flat = code.replace(/\s+/g, ' ').trim();
+  const doubled = /^!!\s*([\w$.]+)$/.exec(flat);
+  if (doubled) return `Has ${words(doubled[1]!.split('.').pop()!)}?`;
   const negated = /^!\s*\(?(.+?)\)?$/.exec(flat);
   const inner = negated && !flat.startsWith('!!') && !/[&|]/.test(flat) ? negated[1]! : flat;
   const has = /^["'`](\w+)["'`] in ([\w$.]+)$/.exec(inner);
@@ -2289,7 +2448,19 @@ function questionLabel(code: string, question: string): string {
   const success = /^([\w$.]+)\.(success|ok)$/.exec(inner);
   if (success) return `${success[1]} succeeded?`;
   const length = /^([\w$.]+)\.length( > 0)?$/.exec(inner);
-  if (length) return `${length[1]} is not empty?`;
+  if (length) return `Are there any ${words(length[1]!.split('.').pop()!)}?`;
+  const filled = /^([\w$]+\??\.)*([\w$]+)\?\.trim\(\)$/.exec(inner);
+  if (filled) return `Is ${words(filled[2]!)} filled in?`;
+  // `addQty > 0` -> `Is add qty more than 0?` — only a name against a number or a name.
+  const compare = /^([\w$]+(?:\.[\w$]+)*) (>=|<=|>|<) ([\w$.]+|-?\d+(?:\.\d+)?)$/.exec(inner);
+  if (compare && !negated) {
+    const side = (text: string) =>
+      /^-?\d/.test(text) ? text : words(text.split('.').slice(-2).join(' '));
+    const op = { '>': 'more than', '<': 'less than', '>=': 'at least', '<=': 'at most' }[
+      compare[2]!
+    ];
+    return `Is ${side(compare[1]!)} ${op} ${side(compare[3]!)}?`;
+  }
   // Code that has no safe reading stays as written — `addQty > 0?`, not `AddQty > 0?`.
   if (/&&|\|\||\?\?/.test(inner)) return question;
   const equal = /^([\w$.]+) (===|!==|==|!=) ([^=<>!]+)$/.exec(inner);

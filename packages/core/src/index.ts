@@ -49,6 +49,19 @@ export {
   type ChangedReport,
 } from './impact/changed.js';
 export {
+  analyzeBreakage,
+  type BreakError,
+  type BreakageInput,
+  type BreakageOptions,
+  type BreakageReport,
+  type ChangedSymbol,
+  type Reach,
+  type SymbolChange,
+  type SymbolKind,
+  type SymbolUsage,
+  type UsageVerdict,
+} from './impact/breakage.js';
+export {
   findUnused,
   projectUnused,
   type BrokenImport,
@@ -124,6 +137,7 @@ export {
   type SchemaField,
   type SourcePoint,
 } from './flow/actionsource.js';
+export { flowPages, type FlowPage, type FlowPagesOptions } from './flow/pages.js';
 export {
   explainScreen,
   listScreens,

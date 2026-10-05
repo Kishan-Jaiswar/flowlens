@@ -116,7 +116,7 @@ _already been built_, and they are worth more than any new feature.
 - [x] **`flowlens findings`** — routes with no auth check, queries missing the
       tenant filter or taking it from the request, mass assignment, queries in
       loops and reads that wait for each other, each with the line to open.
-      `--fail-on` for CI; the Issues tab shows the same list per action.
+      `--fail-on` for CI; the dashboard shows the same list per action.
 - [x] **`flowlens unused`** — files, folders, exports and dependencies no entry
       point reaches, imports that point at nothing, and endpoints no frontend
       calls.
@@ -159,7 +159,7 @@ _already been built_, and they are worth more than any new feature.
 
 Still open here, and worth stating precisely because parts of it are done:
 
-The Breaks tab covers the "what else depends on this" half of this milestone.
+The Impact tab's "before you change" part covers the "what else depends on this" half of this milestone.
 What is left below is the part that needs either spans or a rule engine.
 
 - [x] **N+1 detection, from source.** A query inside a loop, and independent
