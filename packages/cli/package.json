@@ -1,7 +1,7 @@
 {
   "name": "@flowslens/cli",
-  "version": "1.2.0",
-  "description": "Trace any user action from the UI to the database. Maps React/Next + NestJS/Express + Prisma/Mongoose features, shows what a change would break, and serves a local dashboard.",
+  "version": "1.3.0",
+  "description": "Trace any user action from the UI to the database. Maps every click through React/Next.js, NestJS/Express, Prisma and Mongoose, flowcharts its decisions, shows what a change breaks, finds dead code, and serves a local dashboard.",
   "type": "module",
   "bin": {
     "flowlens": "bin/flowlens.mjs"
@@ -26,37 +26,69 @@
   },
   "license": "MIT",
   "author": "Kishan Jaiswar",
+  "homepage": "https://github.com/Kishan-Jaiswar/flowlens/tree/main/packages/cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues",
+    "email": "jaiswarkishan78@gmail.com"
+  },
   "keywords": [
+    "flowlens",
+    "flowslens",
     "cli",
     "devtools",
     "developer-tools",
+    "code-flow",
+    "user-flow",
+    "request-flow",
+    "end-to-end",
+    "full-stack",
     "code-navigation",
     "codebase-onboarding",
+    "codebase-visualization",
+    "code-map",
+    "flowchart",
+    "architecture",
     "static-analysis",
     "code-analysis",
     "impact-analysis",
     "blast-radius",
+    "breaking-changes",
+    "change-impact",
+    "dead-code",
+    "unused-code",
+    "unused-exports",
     "data-lineage",
     "dependency-graph",
     "call-graph",
     "legacy-code",
     "refactoring",
-    "api-mapping",
+    "code-review",
+    "pull-request",
+    "ci",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "ai-tools",
     "dashboard",
     "react",
     "nextjs",
     "nestjs",
     "express",
+    "fastify",
+    "nuxt",
     "mongoose",
     "mongodb",
     "prisma",
-    "typescript"
+    "typescript",
+    "javascript",
+    "nodejs"
   ],
   "publishConfig": {
     "access": "public"
-  },
-  "bugs": {
-    "email": "jaiswarkishan78@gmail.com"
-  },
-  "homepage": "https://www.npmjs.com/package/@flowslens/cli"
+  }
 }

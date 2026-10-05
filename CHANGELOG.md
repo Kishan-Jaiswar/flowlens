@@ -41,6 +41,17 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The npm pages describe what the packages do today, and link back to the
+  repository.** The repository is public again, so `repository`, `homepage`
+  and `bugs` point at GitHub (with the email kept for bug reports), and each
+  README links to the source, issues and changelog. The `@flowslens/cli` page
+  documents the six tabs, the page-grouped action list, Decisions and the
+  type-checked breakage check; `@flowslens/core` documents `actionDecisions`,
+  `analyzeBreakage` and `flowPages`. Descriptions and keywords now name what
+  developers search for — flowchart, breaking changes, dead code, MCP, Nuxt,
+  Fastify, the MongoDB driver. Prisma, read since 1.1.0, was still listed as
+  "not yet" in two tables; it is listed as read.
+
 - **Issues and Impact are one tab: Issues & impact.** Both asked "is this
   safe?" — Issues about what is already wrong, Impact about what a change
   would break — and a reader checking an action before an edit had to read

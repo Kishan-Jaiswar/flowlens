@@ -2,6 +2,21 @@
 
 **Trace any user action from the UI to the database.**
 
+[![npm version](https://img.shields.io/npm/v/@flowslens/cli)](https://www.npmjs.com/package/@flowslens/cli)
+[![npm downloads](https://img.shields.io/npm/dm/@flowslens/cli)](https://www.npmjs.com/package/@flowslens/cli)
+[![CI](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml/badge.svg)](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/Kishan-Jaiswar/flowlens/blob/main/LICENSE)
+
+A free, local code-flow explorer for full-stack JavaScript and TypeScript. Point
+it at a **React / Next.js** frontend and a **NestJS, Express, Fastify or
+Next.js API** backend, and it shows every user action end to end — the click,
+the handler, the HTTP request, the route, the service, and the **Mongoose,
+MongoDB or Prisma** query — as a tree, a flowchart of every decision, and a
+local dashboard. It also tells you **what an edit breaks** before you commit
+it, finds **unused code**, and answers questions for your AI assistant over
+**MCP**.
+
 You join a project. You need to change one screen. So you start clicking through
 files: which handler runs, which endpoint it calls, which service answers, which
 collection it writes. Eight tools and an afternoon later you still do not know
@@ -23,15 +38,16 @@ never writes anything into your project.
 Flowslens reads a specific set of stacks. Check here before installing — if your
 stack is on the right, you will get a file count and little else.
 
-| It reads today                                                              | Not yet                             |
-| --------------------------------------------------------------------------- | ----------------------------------- |
-| **React** and **Next.js** (`pages/` and App Router)                         | Vue, Svelte, Angular, Astro         |
-| **NestJS**, **Express**, **Fastify**                                        | Django, Rails, Go, Java, .NET, PHP  |
-| Next.js `pages/api` + App Router handlers, **Nuxt** `server/api`            | GraphQL and tRPC resolvers          |
-| **MongoDB** via Mongoose, and the native driver                             | Prisma, TypeORM, Sequelize, raw SQL |
-| TypeScript **or** plain JavaScript with JSX (`.js`, `.jsx`, `.mjs`, `.cjs`) | Queues, cron jobs, websockets       |
+| It reads today                                                              | Not yet                            |
+| --------------------------------------------------------------------------- | ---------------------------------- |
+| **React** and **Next.js** (`pages/` and App Router)                         | Vue, Svelte, Angular, Astro        |
+| **NestJS**, **Express**, **Fastify**                                        | Django, Rails, Go, Java, .NET, PHP |
+| Next.js `pages/api` + App Router handlers, **Nuxt** `server/api`            | GraphQL and tRPC resolvers         |
+| **MongoDB** via Mongoose or the native driver, and **Prisma**               | TypeORM, Sequelize, raw SQL        |
+| TypeScript **or** plain JavaScript with JSX (`.js`, `.jsx`, `.mjs`, `.cjs`) | Queues, cron jobs, websockets      |
 
-So the sweet spot is **React/Next + NestJS or Express + Mongoose**. Any _folder
+So the sweet spot is **React/Next + NestJS, Express or Next.js API routes +
+Mongoose, MongoDB or Prisma**. Any _folder
 layout_ of those works — Flowslens decides what a file is by reading it, not by
 which directory it sits in, and a frontend and backend in separate repositories
 is a first-class case.
@@ -134,30 +150,88 @@ DATABASE
 flowlens serve
 ```
 
-A local dashboard on `http://127.0.0.1:4177`, which asks seven questions about
-the action you have open. Each tab carries its own headline number, so the
-worrying one is visible before you open it:
+A local dashboard on `http://127.0.0.1:4177`. On the left, every action in the
+app, **grouped by the page the user meets it on** — `/customers`, `/orders` —
+rather than the folder its code lives in: a form or dialog is followed up to
+the page that renders it, and each row shows whether it runs on open, on a
+click or on a submit, and the API it calls. `/` jumps to the search.
+
+On the right, six tabs ask questions about the action you have open. Each
+carries its own headline number, so the worrying one is visible before you
+open it:
 
 ```text
-Docs · 7 steps   Issues · 2   Performance · not run   Tests · none   Changed · 5   Breaks · 3   Unused · 14
+Docs · 7 steps   Decisions · 12 branches   Performance · not run   Tests · none   Issues & impact · 11 breaking   Unused · 14
 ```
 
-| Tab             | The question                              | Where the answer comes from                                       |
-| --------------- | ----------------------------------------- | ----------------------------------------------------------------- |
-| **Docs**        | What does this action do, end to end?     | click → handler → request → route → service → collection          |
-| **Issues**      | What is already wrong in it?              | missing auth, tenant leaks, mass assignment, N+1, reads that wait |
-| **Performance** | Where does the time go?                   | runtime spans only — each step, and each query with its code      |
-| **Tests**       | What would catch it if you broke it?      | which test files import its files, and the cases still to write   |
-| **Changed**     | What do my uncommitted edits put at risk? | `git status` crossed with the graph                               |
-| **Breaks**      | What else would a change here break?      | the graph walked backwards from every step                        |
-| **Unused**      | What does nothing use?                    | files, exports, dependencies and endpoints nothing reaches        |
+| Tab                 | The question                               | Where the answer comes from                                         |
+| ------------------- | ------------------------------------------ | ------------------------------------------------------------------- |
+| **Docs**            | What does this action do, end to end?      | click → handler → request → route → service → collection            |
+| **Decisions**       | Which way can it go, and what decides?     | the source of every function it runs, from the handler to the query |
+| **Performance**     | Where does the time go?                    | runtime spans only — each step, and each query with its code        |
+| **Tests**           | What would catch it if you broke it?       | which test files import its files, and the cases still to write     |
+| **Issues & impact** | What is wrong in it, and what could break? | your edits type-checked before and after, findings, the graph       |
+| **Unused**          | What does nothing use?                     | files, exports, dependencies and endpoints nothing reaches          |
 
-**Breaks** is the one that changes how you work. A flow read on its own is
-quietly misleading: most of the chain is shared, and editing one service because
-one screen needs a field is a five-minute change that breaks four other screens.
-Breaks splits the same steps into "shared with other features" and "only this
-one uses", and keeps infrastructure — a toast hook, a cache, an audit trail —
-out of the way so the real findings are not competing with wallpaper.
+**Issues & impact** is the one that changes how you work. It opens with three
+cards — your uncommitted changes, the bugs in this action, what a change to it
+would reach. For your edits, every function, component, hook, method and type
+you changed is compared with its committed text, every use is found with the
+TypeScript language service, and the project is type-checked as it is and with
+your files put back — so only the errors _your edit_ introduced are shown, each
+placed on the page it breaks and said in plain words:
+
+```text
+Your change breaks 11 places on 3 pages, in 27 actions
+
+/medicines/[id]   7 breaks   affects Medicine detail page loads, Medicines · Delete, …
+  MedicineDetailPage
+    Missing `currency` — `formatCurrency` now needs it as argument 2.
+    TS2554 Expected 2-3 arguments, but got 1.          7 places
+
+What you changed
+  formatCurrency   signature changed   11 breaks
+  getStockLevel    body changed        1 to check
+```
+
+Before an edit, the same tab walks the graph backwards from every step and
+splits it into "shared with other features" and "only this one uses" — because
+editing one service for one screen is a five-minute change that can break four
+other screens. Infrastructure (a toast hook, a cache, an audit trail) is kept
+out of the way so the real findings are not competing with wallpaper. It needs
+no instrumentation and no tests, so it works on the first run.
+
+**Decisions** draws the action as a flowchart, read from the code: a diamond
+for every `if`, `switch`, `?:`, `try`/`catch` and early `return` or `throw`, a
+box for each step in plain words, a drum for each query, and every way out
+labelled with what the caller gets (`422 Respond: Validation failed`). Your own
+helpers and `this.service.method()` calls are followed into the class that
+answers; library calls are left out. **Copy as text** gives the same tree for a
+pull request — this is the example app's _Submit Order_:
+
+```text
+▸ OrderForm.handleSubmit()
+  ⇄ POST /orders  → api/src/orders/orders.controller.ts:9
+    ▸ this.ordersService.create(dto)
+      ▸ this.customersService.findById(dto.customerId)
+        ⛁ customers.findById (read)
+        ◆ customer?
+        ├─ no
+        │  ■ throws new NotFoundException('customer not found') [404]
+        └─ yes ↓ continues
+      ▸ this.productsService.assertAvailable(…)
+        ⛁ products.countDocuments (read)
+        ◆ count !== productIds.length?
+        ├─ yes
+        │  ■ throws new BadRequestException('one or more products are out of stock') [400]
+        └─ no ↓ continues
+      ⛁ orders.create (create)
+      ▸ this.auditService.record('order.created', order._id)
+        ⛁ auditlogs.create (create)
+    ■ responds this.ordersService.create(dto) [201]
+  • setProducts([])
+  • setNote('')
+```
 
 **Docs** is the action end to end: _At a glance_ first, one line per stage that
 opens in place, then only the stages the action has, with the rest named under
@@ -165,14 +239,8 @@ _Not in this action_ and the reason. The request step carries the body, guards,
 DTO check, the code it runs and a `curl`; _Diagram_ shows the same steps as
 numbered cards. Generated from the graph by template, with no model in the
 loop, so it cannot invent a step; **Copy as Markdown** gives you the same text
-for a wiki or a handover note. Old `#tab=flow|apis|timing|queries` links still
-land in the right place.
-
-**Changed** needs no instrumentation and no tests, so it works on the first run:
-
-```text
-high risk   1 changed file is used by 5 features; 5 of them have no test.
-```
+for a wiki or a handover note. Old `#tab=flow|apis|timing|queries|changed|breaks|issues`
+links still land in the right place.
 
 An action that makes several requests is shown as a sequence, and the shapes are
 told apart rather than lumped together:
@@ -373,8 +441,12 @@ took. Entirely optional; the CLI works without it. On a Next.js App Router app,
 
 ## Documentation
 
-Full README, architecture notes and roadmap:
-This page is the documentation. Questions and bug reports:
+This page covers everything you need to use the CLI. The full README,
+architecture notes, roadmap and changelog are on GitHub:
+**[github.com/Kishan-Jaiswar/flowlens](https://github.com/Kishan-Jaiswar/flowlens)**.
+
+Bug reports and feature requests:
+[GitHub issues](https://github.com/Kishan-Jaiswar/flowlens/issues), or
 **jaiswarkishan78@gmail.com**.
 
 ## Licence

@@ -2,12 +2,19 @@
 
 **Trace any user action from the UI to the database.**
 
+A free, local, open-source CLI and dashboard for full-stack JavaScript and
+TypeScript: it maps every button, form and page load in a **React / Next.js**
+app through its API calls to the **NestJS / Express / Next.js route** that
+answers, the services it calls, and the **Mongoose, MongoDB or Prisma** queries
+it runs — then flowcharts every decision on the way, tells you what an edit
+breaks before you commit it, and finds the code nothing uses.
+
 [![CI](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml/badge.svg)](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@flowslens/cli?label=npm)](https://www.npmjs.com/package/@flowslens/cli)
 [![npm downloads](https://img.shields.io/npm/dm/@flowslens/cli?label=downloads)](https://www.npmjs.com/package/@flowslens/cli)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-482%20passing-brightgreen)](tests)
+[![Tests](https://img.shields.io/badge/tests-696%20passing-brightgreen)](tests)
 
 > Flowslens helps developers understand and safely modify unfamiliar applications
 > by tracing a feature from the user's UI action through frontend state and
@@ -25,14 +32,14 @@ codebase:
 
 **v1.2.0, published on npm as `@flowslens/*`.** Honest summary of what is and is not proven:
 
-|                        | State                                                                                                                                                                                                                         |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Static analysis        | Verified against a real production codebase — ~1,500 files, 204 API calls, 197 matched to backend routes                                                                                                                      |
-| Structure independence | Every layout in the table below has a fixture, hostile inputs included                                                                                                                                                        |
-| Operating systems      | Windows, macOS and Linux: unit suite, every CLI command, and a from-scratch launcher run, all three in CI                                                                                                                     |
-| Runtime tracing        | **Proven live for HTTP and method spans**: a real server, real sockets, a real trace file, merged into a real scan and asserted `confirmed`. The Mongoose plugin is still driven by fakes — a real database is the last piece |
-| Stacks read            | React/Next, NestJS/Express, Mongoose, the MongoDB driver and Prisma. Vue, Svelte, TypeORM, GraphQL and raw SQL are not read yet, and `flowlens stack` tells you so before you spend the afternoon                             |
-| Test suite             | 642 tests across 31 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                                                     |
+|                        | State                                                                                                                                                                                                                                                                                        |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Static analysis        | Verified against a real production codebase — ~1,500 files, 204 API calls, 197 matched to backend routes                                                                                                                                                                                     |
+| Structure independence | Every layout in the table below has a fixture, hostile inputs included                                                                                                                                                                                                                       |
+| Operating systems      | Windows, macOS and Linux: unit suite, every CLI command, and a from-scratch launcher run, all three in CI                                                                                                                                                                                    |
+| Runtime tracing        | **Proven live for HTTP and method spans**: a real server, real sockets, a real trace file, merged into a real scan and asserted `confirmed`. Next.js App Router + the native MongoDB driver traced against a real app (Next 16, MongoDB Atlas). The Mongoose plugin is still driven by fakes |
+| Stacks read            | React/Next, NestJS/Express, Mongoose, the MongoDB driver and Prisma. Vue, Svelte, TypeORM, GraphQL and raw SQL are not read yet, and `flowlens stack` tells you so before you spend the afternoon                                                                                            |
+| Test suite             | 696 tests across 34 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                                                                                                                    |
 
 `docs/ROADMAP.md` leads with what is missing rather than what is planned.
 
@@ -330,7 +337,7 @@ count, honestly reported rather than silently:
 | Vue, Svelte, Astro (`.vue`, `.svelte`) | Files counted and named in the output; not parsed |
 | Angular                                | Components not detected (no JSX)                  |
 | Django, Rails, Go, Java, .NET, PHP     | Counted and named; not parsed                     |
-| Prisma, TypeORM, Sequelize, raw SQL    | Queries not detected — Mongoose only              |
+| TypeORM, Sequelize, raw SQL            | Queries not detected — Mongoose, MongoDB, Prisma  |
 | GraphQL / tRPC                         | Resolvers are not routes yet                      |
 | Queues, cron, websockets               | Not modelled                                      |
 
@@ -839,6 +846,17 @@ Docs · 7 steps   Decisions · 12 branches   Performance · not run   Tests · n
 | **Issues & impact** | What is wrong in it, and what could break? | Your edits, type-checked before and after; `flowlens findings`; then this action's graph |
 | **Unused**          | What does nothing use?                     | `flowlens unused` — project-wide                                                         |
 
+Beside the tabs, the action list is **grouped by the page the user meets each
+action on** — `/medicines`, `/settings` — not the folder its code lives in. A
+dialog or form is followed up through whoever renders it, so
+`<AddMedicineDialog>` lands on the medicines page; a component two pages render
+is listed on both, one only a layout reaches goes under _Every page_, and
+actions nothing renders under _Other actions_. Each row says what it is
+("Delete", "Submit — in Add medicine dialog"), whether it runs on open, on a
+click or on a submit, and the API it calls. Search matches routes too, `/`
+jumps to it, and the arrow keys walk the list. `/api/flows` gives each action
+its `pages`; `flowPages()` is in `@flowslens/core`.
+
 Links to the tabs this set replaced — `#tab=flow`, `apis`, `timing`,
 `queries`, `changed`, `breaks`, `issues` — still land in the right place.
 
@@ -1240,9 +1258,12 @@ The MVP targets one stack properly rather than five badly:
 | HTTP     | `fetch`, `axios`, configured clients, and named wrapper functions        |
 | URLs     | literals, template strings, endpoint constants, interpolated base URLs   |
 | Backend  | NestJS (decorators, DI, global prefixes), Express/Fastify routers        |
+| Routes   | Next.js `pages/api` and App Router `route.ts`, Nuxt `server/api`         |
 | Database | MongoDB via Mongoose (`@Schema`/`@Prop`, `new Schema()`, `@InjectModel`) |
+|          | The native MongoDB driver (`db.collection('x')`, typed or not)           |
+|          | Prisma (`schema.prisma`, `@@map`, `@relation`, client operations)        |
 
-Adapters are separate modules, so adding Prisma, PostgreSQL, or Vue is additive
+Adapters are separate modules, so adding TypeORM, raw SQL, or Vue is additive
 rather than a rewrite. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ---
@@ -1257,7 +1278,7 @@ flowlens/
 │   └── flowlens.mjs      installs and builds on first use, then hands over
 ├── packages/
 │   ├── core/             graph engine, analyzers, flow resolver, impact, lineage
-│   ├── runtime/          zero-dependency tracer (HTTP, Mongoose, browser)
+│   ├── runtime/          zero-dependency tracer (HTTP, Next.js, MongoDB, Mongoose, browser)
 │   └── cli/              the flowlens command
 ├── apps/
 │   └── dashboard/        dependency-free web UI, served by the CLI
@@ -1289,7 +1310,7 @@ node --version       # expect the version in .nvmrc
 ```bash
 npm install          # also builds, via the prepare script
 npm run build        # compile all three packages
-npm test             # build, then run the suite — 540 tests, ~10s
+npm test             # build, then run the suite — 696 tests, ~20s
 npm run test:watch
 npm run smoke        # run every CLI command for real, on this OS
 npm run test:package # pack, install into a throwaway project, drive over HTTP

@@ -1,7 +1,7 @@
 {
   "name": "@flowslens/core",
-  "version": "1.2.0",
-  "description": "The graph engine behind Flowslens: static analyzers that map a UI action to the API, the service and the database, with field-level data lineage and impact analysis.",
+  "version": "1.3.0",
+  "description": "Static analysis engine for full-stack TypeScript and JavaScript: maps each UI action to its API route, service and database query, with decision flowcharts, field-level data lineage, impact and breaking-change analysis.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -22,36 +22,58 @@
   },
   "license": "MIT",
   "author": "Kishan Jaiswar",
+  "homepage": "https://github.com/Kishan-Jaiswar/flowlens/tree/main/packages/core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues",
+    "email": "jaiswarkishan78@gmail.com"
+  },
   "keywords": [
+    "flowlens",
+    "flowslens",
     "static-analysis",
     "ast",
     "ts-morph",
+    "typescript-compiler",
     "code-graph",
+    "flow-graph",
     "dependency-graph",
     "call-graph",
+    "control-flow",
+    "flowchart",
     "data-lineage",
     "impact-analysis",
     "blast-radius",
+    "breaking-changes",
+    "type-check",
+    "dead-code",
+    "unused-code",
     "code-analysis",
     "code-navigation",
     "codebase-onboarding",
     "developer-tools",
     "refactoring",
     "architecture",
+    "api-mapping",
+    "full-stack",
     "react",
     "nextjs",
     "nestjs",
     "express",
+    "fastify",
+    "nuxt",
     "mongoose",
     "mongodb",
     "prisma",
-    "typescript"
+    "typescript",
+    "javascript",
+    "nodejs"
   ],
   "publishConfig": {
     "access": "public"
-  },
-  "bugs": {
-    "email": "jaiswarkishan78@gmail.com"
-  },
-  "homepage": "https://www.npmjs.com/package/@flowslens/core"
+  }
 }

@@ -1,6 +1,12 @@
 # @flowslens/runtime
 
-Optional, development-only tracer for
+[![npm version](https://img.shields.io/npm/v/@flowslens/runtime)](https://www.npmjs.com/package/@flowslens/runtime)
+[![npm downloads](https://img.shields.io/npm/dm/@flowslens/runtime)](https://www.npmjs.com/package/@flowslens/runtime)
+[![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/Kishan-Jaiswar/flowlens/blob/main/LICENSE)
+
+Zero-dependency, development-only request tracer for **Node.js, Next.js,
+Express, NestJS, Mongoose and the native MongoDB driver**. Optional companion to
 [Flowslens](https://www.npmjs.com/package/@flowslens/cli). Records what a request
 _actually did_, so a path Flowslens found in your source can be confirmed rather
 than assumed.
@@ -327,9 +333,11 @@ leave in place.
 [`@flowslens/cli`](https://www.npmjs.com/package/@flowslens/cli) documents the
 commands that read what this package records, and
 [`@flowslens/core`](https://www.npmjs.com/package/@flowslens/core) documents the
-graph the spans are merged into.
+graph the spans are merged into. Source and changelog:
+**[github.com/Kishan-Jaiswar/flowlens](https://github.com/Kishan-Jaiswar/flowlens)**.
 
-Questions and bug reports: **jaiswarkishan78@gmail.com**.
+Bug reports: [GitHub issues](https://github.com/Kishan-Jaiswar/flowlens/issues),
+or **jaiswarkishan78@gmail.com**.
 
 ## Licence
 

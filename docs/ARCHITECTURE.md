@@ -43,11 +43,14 @@ work:
 | Table relations    | `core/analyzer/relations`          | Which collections link to which, and how |
 | Screen documents   | `core/flow/explain`                | One screen in plain English, no model    |
 | Action documents   | `core/flow/action`                 | One action stage by stage: the Docs tab  |
+| Decision trees     | `core/flow/decisions`              | Every branch an action can take          |
+| Page placement     | `core/flow/pages`                  | Which page each action is met on         |
 | Query timing       | `core/flow/queries`                | Each query an action runs, with its code |
 | Test plans         | `core/flow/testplan`               | The cases to write, as `it.todo`s        |
 | Findings           | `core/flow/findings`               | Auth, tenant scope, mass assignment, N+1 |
 | Unused code        | `core/analyzer/unused`             | What no entry point reaches              |
 | Diff-scoped risk   | `core/impact/changed`              | What the working tree puts at risk       |
+| Breakage           | `core/impact/breakage`             | What an edit breaks, type-checked twice  |
 | Branch diff        | `core/impact/diff`                 | Two graphs compared, for a PR comment    |
 | MCP server         | `cli/commands/mcp`                 | The graph as read-only assistant tools   |
 | Runtime tracer     | `runtime`                          | Record what actually ran                 |

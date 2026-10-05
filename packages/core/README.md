@@ -1,8 +1,16 @@
 # @flowslens/core
 
+[![npm version](https://img.shields.io/npm/v/@flowslens/core)](https://www.npmjs.com/package/@flowslens/core)
+[![npm downloads](https://img.shields.io/npm/dm/@flowslens/core)](https://www.npmjs.com/package/@flowslens/core)
+[![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/Kishan-Jaiswar/flowlens/blob/main/LICENSE)
+
 The graph engine behind [Flowslens](https://www.npmjs.com/package/@flowslens/cli):
-static analyzers, the flow resolver, field-level data lineage and impact
-analysis.
+a static analyzer for full-stack TypeScript and JavaScript that maps every
+user action in a **React / Next.js** app to the **NestJS, Express, Fastify or
+Next.js** route that answers it, the services it calls and the **Mongoose,
+MongoDB or Prisma** queries it runs — with decision flowcharts, field-level
+data lineage, impact analysis and type-checked breaking-change detection.
 
 ## Do you want this package?
 
@@ -18,7 +26,7 @@ report — an editor extension, a CI check that fails a PR, a custom dashboard, 
 script that answers a question the CLI does not.
 
 It reads source files only. Nothing here connects to a database or runs the code
-it analyses.
+it analyses, and nothing is sent anywhere.
 
 ---
 
@@ -177,6 +185,81 @@ blastRadius, level, warnings }` — or `undefined` if the id is not in the graph
 
 ---
 
+## Every way an action can go
+
+`actionDecisions` reads the source of every function an action runs — the
+handler, the request, the route, your own helpers and the injected service —
+and returns each `if`, `switch`, `?:`, `try`/`catch` and early `return` or
+`throw` as a decision, with what runs on each answer and the status each exit
+responds with. `renderDecisionTree` prints it as text:
+
+```js
+import {
+  actionDecisions,
+  renderDecisionTree,
+  resolveFlows,
+} from '@flowslens/core';
+
+const flow = resolveFlows(graph).find((f) => f.id === 'orderform-submit-order');
+const tree = actionDecisions(graph, flow);
+
+console.log(tree.counts); // { decisions, outcomes, queries, requests }
+console.log(renderDecisionTree(tree));
+```
+
+```text
+⇄ POST /orders  → api/src/orders/orders.controller.ts:9
+  ▸ this.ordersService.create(dto)
+    ▸ this.customersService.findById(dto.customerId)
+      ⛁ customers.findById (read)
+      ◆ customer?
+      ├─ no
+      │  ■ throws new NotFoundException('customer not found') [404]
+      └─ yes ↓ continues
+```
+
+## What an edit breaks
+
+`analyzeBreakage` takes the files you changed with their committed text,
+compares them declaration by declaration — deleted, renamed, no longer
+exported, signature changed, shape changed, body only — finds every use with
+the TypeScript language service, and type-checks the project with and without
+your edits so only the errors you introduced are reported, each placed on the
+page, component, API and service it sits in:
+
+```js
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { analyzeBreakage, scan } from '@flowslens/core';
+
+const root = './my-app';
+const { graph } = scan({ root });
+const file = 'src/lib/format.ts';
+const before = execFileSync('git', ['show', `HEAD:${file}`], {
+  cwd: root,
+  encoding: 'utf8',
+});
+
+const report = analyzeBreakage(graph, [{ file, status: 'modified', before }], {
+  root,
+});
+
+console.log(report.summary);
+for (const s of report.symbols) console.log(s.name, s.change, s.usages.length);
+```
+
+Returns `{ symbols, otherErrors, totals, typeChecked, level, summary, notes }`;
+each error carries its `TS` code, the compiler's message and, for the common
+ones, a plain-words `explain`.
+
+## Which page an action is on
+
+`flowPages(graph, flows)` follows each action's component up through whoever
+renders it to a page or layout file and returns a `Map` of flow id →
+`{ route, file, layout }[]` — the grouping the dashboard's action list uses.
+
+---
+
 ## Failing a CI job on findings
 
 Each finding function takes the graph and returns an array, which makes this a
@@ -277,6 +360,9 @@ scanned graph, which is what turns `static` into `confirmed`.
 | `projectUnused`                                            | Files, exports, dependencies and endpoints nothing uses.              |
 | `diffGraphs` / `introducesAtLeast`                         | What a branch changes about the app, and whether it adds an issue.    |
 | `explainAction` / `renderActionDocument`                   | One action, stage by stage — the dashboard's Docs tab.                |
+| `actionDecisions` / `renderDecisionTree`                   | Every branch an action can take — the Decisions tab.                  |
+| `analyzeBreakage`                                          | What an edit breaks, type-checked before and after.                   |
+| `flowPages`                                                | Which page each action is met on.                                     |
 | `explainScreen` / `renderScreenDocument`                   | A whole screen in plain English.                                      |
 | `actionQueries`                                            | Every database query one action runs, with its code and timing.       |
 | `planTests`                                                | The test cases to write for an action.                                |
@@ -302,9 +388,11 @@ Ships its own TypeScript types — no `@types` package needed.
 
 This page is the reference for the package. The CLI that wraps it —
 [`@flowslens/cli`](https://www.npmjs.com/package/@flowslens/cli) — documents the
-commands, the dashboard and the runtime tracer.
+commands, the dashboard and the runtime tracer. Source, architecture notes and
+changelog: **[github.com/Kishan-Jaiswar/flowlens](https://github.com/Kishan-Jaiswar/flowlens)**.
 
-Questions and bug reports: **jaiswarkishan78@gmail.com**.
+Bug reports: [GitHub issues](https://github.com/Kishan-Jaiswar/flowlens/issues),
+or **jaiswarkishan78@gmail.com**.
 
 ## Licence
 

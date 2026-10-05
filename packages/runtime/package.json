@@ -1,7 +1,7 @@
 {
   "name": "@flowslens/runtime",
-  "version": "1.2.0",
-  "description": "Zero-dependency runtime tracer for Flowslens: HTTP, Next.js, MongoDB driver, Mongoose and browser spans that turn a statically analysed flow into a confirmed one.",
+  "version": "1.3.0",
+  "description": "Zero-dependency, development-only request tracer for Node.js, Next.js, Express, NestJS, Mongoose and the MongoDB driver: links a browser click to the API calls and database queries it caused, with per-step timings.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -23,31 +23,52 @@
   },
   "license": "MIT",
   "author": "Kishan Jaiswar",
+  "homepage": "https://github.com/Kishan-Jaiswar/flowlens/tree/main/packages/runtime#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
+    "directory": "packages/runtime"
+  },
+  "bugs": {
+    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues",
+    "email": "jaiswarkishan78@gmail.com"
+  },
   "keywords": [
+    "flowlens",
+    "flowslens",
     "tracing",
+    "tracer",
     "request-tracing",
+    "distributed-tracing",
     "observability",
     "instrumentation",
     "spans",
-    "developer-tools",
-    "devtools",
+    "zero-dependency",
     "middleware",
+    "express-middleware",
+    "mongoose-plugin",
+    "mongodb-driver",
+    "nextjs-instrumentation",
+    "click-tracking",
     "performance",
     "profiling",
+    "query-timing",
+    "developer-tools",
+    "devtools",
     "react",
     "nextjs",
     "nestjs",
     "express",
+    "fastify",
+    "nuxt",
     "mongoose",
     "mongodb",
     "prisma",
-    "typescript"
+    "typescript",
+    "javascript",
+    "nodejs"
   ],
   "publishConfig": {
     "access": "public"
-  },
-  "bugs": {
-    "email": "jaiswarkishan78@gmail.com"
-  },
-  "homepage": "https://www.npmjs.com/package/@flowslens/runtime"
+  }
 }
