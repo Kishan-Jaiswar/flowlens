@@ -7,6 +7,21 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-05
+
+### Fixed
+
+- **`@flowslens/cli` 1.3.0 failed on every command.** The release bumped all
+  three versions but left the CLI pinned to `@flowslens/core` 1.2.0, so an
+  install pulled the previous core and the first import stopped with "does not
+  provide an export named 'actionDecisions'". The pin is 1.3.1, the lockfile
+  links the workspace core again instead of a published copy, and the CLI's
+  `prepack` now refuses to pack when the pin and the core version differ —
+  `npm publish` stops before anything is uploaded. `tests/release.test.ts`
+  checks the same in `npm run verify`.
+
+## [1.3.0] - 2026-10-05
+
 ### Added
 
 - **What your change breaks, line by line.** The Changed view now compares
@@ -1253,7 +1268,9 @@ Recorded because each one shaped the design, and the reasoning is in
 - Chained Mongoose modifiers (`.lean()`, `.sort()`) were counted as separate
   database operations.
 
-[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.2.0...HEAD
+[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.3.0...v1.3.1
+[1.3.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.1.0...v1.1.1

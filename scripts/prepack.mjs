@@ -21,7 +21,7 @@
  * Everything it writes is build output: gitignored, and removed by
  * `npm run clean`.
  */
-import { copyFileSync, cpSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -40,6 +40,21 @@ function mustExist(path, what) {
   process.stderr.write(
     `prepack: ${what} is missing at ${path}\n` +
       'Run `npm run build` first — packing now would publish a broken CLI.\n',
+  );
+  process.exit(1);
+}
+
+// The CLI pins `@flowslens/core` exactly. Bump the versions and miss the pin,
+// and the published CLI installs the previous core and fails on its first
+// import — which is how 1.3.0 shipped. Stop the pack instead.
+const version = (name) =>
+  JSON.parse(readFileSync(join(root, 'packages', name, 'package.json'), 'utf8'));
+const pinned = version('cli').dependencies['@flowslens/core'];
+if (pinned !== version('core').version) {
+  process.stderr.write(
+    `prepack: @flowslens/cli depends on @flowslens/core ${pinned}, ` +
+      `but packages/core is ${version('core').version}.\n` +
+      'Set the dependency in packages/cli/package.json to match, then `npm install`.\n',
   );
   process.exit(1);
 }
