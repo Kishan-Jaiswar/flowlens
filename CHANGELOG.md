@@ -7,6 +7,8 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-15
+
 ### Added
 
 - **A card that only shows data has its six tabs too.** "97% Stock health" is
@@ -193,7 +195,7 @@ MyClinic</title>` (or App Router `metadata.title`) makes `/billing` "Bills",
 
 - **Popups written as their own component are features too.** Some buttons
   open a dialog that lives in another file: `<AddMedicineDialog
-  open={addOpen} />`, `<ImportDialog>`, `<AdjustStockDialog>`. Each is now one
+open={addOpen} />`, `<ImportDialog>`, `<AdjustStockDialog>`. Each is now one
   row whose flow runs from the click through the dialog's save request.
   Before, these rows read "stays in the browser". A wizard's earlier step
   ("Continue" to a preview) is drawn before its main one ("Import rows"). The
@@ -1669,7 +1671,8 @@ Recorded because each one shaped the design, and the reasoning is in
 - Chained Mongoose modifiers (`.lean()`, `.sort()`) were counted as separate
   database operations.
 
-[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.3.1...HEAD
+[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.1.2...v1.2.0
