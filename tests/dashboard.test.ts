@@ -20,6 +20,7 @@ import {
   renderActionDocument,
   resolveFlows,
   scan,
+  scopeSummary,
   testsForFlow,
   type SerializedGraph,
 } from '@flowslens/core';
@@ -49,13 +50,75 @@ const pagesByFlow = flowPages(scanned.graph, resolved);
 // The server adds each action's pages to `/api/flows`; so does this answer.
 const flows = resolved.map((flow) => ({ ...flow, pages: pagesByFlow.get(flow.id) ?? [] }));
 
+/** Set by a test to answer `/api/flows` with a list of its own. */
+let flowsResponse: unknown;
+
+/** Set by a test to answer `/api/navigation` with a menu; none by default. */
+let navigationResponse: unknown;
+
+/** The actions on an entry's screen, the way the server gathers them. */
+function entryActions(entry: { actions: string[]; children: Array<{ kind: string }> }): string[] {
+  return [
+    ...entry.actions,
+    ...(entry.children as Array<{ kind: string; actions: string[]; children: never[] }>)
+      .filter((child) => child.kind === 'section' || child.kind === 'tab')
+      .flatMap(entryActions),
+  ];
+}
+
+function findEntry(entries: unknown[], key: string): Record<string, unknown> | undefined {
+  for (const entry of entries as Array<{ key: string; children: unknown[] }>) {
+    if (entry.key === key) return entry as unknown as Record<string, unknown>;
+    const found = findEntry(entry.children, key);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** Set by a test to answer `/api/card` — what a card shows; none by default. */
+let cardResponse: ((path: string) => unknown) | undefined;
+
 /** Set by a test to answer `/api/changed/breakage` with a report of its own. */
 let breakageResponse: unknown;
+
+/** Set by a test to answer `/api/decisions` with a tree of its own. */
+let decisionsResponse: ((path: string) => unknown) | undefined;
+
+/** Set by a test to answer `/api/decisions/shared`: none shared by default. */
+let sharedResponse: unknown;
 
 /** What the real server answers, from a real graph. */
 function apiResponse(path: string): unknown {
   if (path.startsWith('/api/graph')) return graph;
-  if (path.startsWith('/api/flows')) return flows;
+  if (path.startsWith('/api/flows')) return flowsResponse ?? flows;
+  // The example app writes no menu down, as the server would report.
+  if (path.startsWith('/api/navigation')) return navigationResponse ?? null;
+  if (path.startsWith('/api/card')) {
+    if (!cardResponse) throw new Error('unknown entry');
+    return cardResponse(path);
+  }
+  if (path.startsWith('/api/scope')) {
+    // The real summary of the entry, from the real scan.
+    const params = new URL(path, 'http://x').searchParams;
+    const key = params.get('entry') ?? '';
+    const loads = params.get('loads') === '1';
+    const nav = navigationResponse as { entries: unknown[] } | undefined;
+    const entry = nav ? findEntry(nav.entries, key) : undefined;
+    if (!entry) throw new Error('unknown entry');
+    return {
+      key,
+      label: entry['label'],
+      kind: entry['kind'],
+      route: entry['route'],
+      ...scopeSummary(
+        scanned.graph,
+        resolved,
+        entryActions(entry as never).filter(
+          (id) => !loads || resolved.find((flow) => flow.id === id)?.event === 'mount',
+        ),
+      ),
+    };
+  }
   if (path.startsWith('/api/doctor')) {
     return { brokenCalls: [], deadEndpoints: [], sharedWrites: [] };
   }
@@ -88,6 +151,8 @@ function apiResponse(path: string): unknown {
     );
     return flow ? actionQueries(scanned.graph, flow) : { error: 'unknown flow' };
   }
+  if (path.startsWith('/api/decisions/shared')) return sharedResponse ?? [];
+  if (path.startsWith('/api/decisions') && decisionsResponse) return decisionsResponse(path);
   if (path.startsWith('/api/decisions')) {
     const flow = flows.find(
       (candidate) => candidate.id === new URL(path, 'http://x').searchParams.get('flow'),
@@ -151,6 +216,8 @@ async function loadDashboard(): Promise<void> {
 
 beforeEach(async () => {
   breakageResponse = undefined;
+  flowsResponse = undefined;
+  navigationResponse = undefined;
   await loadDashboard();
 });
 
@@ -239,21 +306,19 @@ describe('the dashboard renders a real graph', () => {
     document.querySelector<HTMLButtonElement>('#flow-list .clear-filter')!.click();
     expect(filter.value).toBe('');
 
+    // Every group starts folded, and the button opens them all, then folds them.
+    const groups = () => [
+      ...document.querySelectorAll<HTMLDetailsElement>('#flow-list .page-group'),
+    ];
+    expect(groups().some((group) => group.open)).toBe(false);
     const fold = document.getElementById('fold-all') as HTMLButtonElement;
     expect(fold.hidden).toBe(false);
-    fold.click();
-    expect(
-      [...document.querySelectorAll<HTMLDetailsElement>('#flow-list .page-group')].some(
-        (group) => group.open,
-      ),
-    ).toBe(false);
     expect(fold.textContent).toBe('Expand all');
     fold.click();
-    expect(
-      [...document.querySelectorAll<HTMLDetailsElement>('#flow-list .page-group')].every(
-        (group) => group.open,
-      ),
-    ).toBe(true);
+    expect(groups().every((group) => group.open)).toBe(true);
+    expect(fold.textContent).toBe('Collapse all');
+    fold.click();
+    expect(groups().some((group) => group.open)).toBe(false);
   });
 
   it('selects the first flow and draws its layers in execution order', () => {
@@ -289,6 +354,910 @@ describe('the dashboard renders a real graph', () => {
     // The whole page came from JSON; no unescaped angle bracket may survive.
     const scripts = document.querySelectorAll('#graph script, #flow-list script');
     expect(scripts).toHaveLength(0);
+  });
+});
+
+describe('finding an action in a big app', () => {
+  /**
+   * The example app is small, so the shapes a large one has are made from its
+   * real flows: a form rendered on three pages, a page that loads data by
+   * itself, and a page whose tab title is not its route.
+   */
+  const reshaped = () =>
+    flows.map((flow) => {
+      if (flow.id === 'orderform-print-order') {
+        return {
+          ...flow,
+          pages: ['/orders', '/customers', '/reports'].map((route) => ({
+            route,
+            file: `web/src/pages${route}.tsx`,
+            layout: false,
+          })),
+        };
+      }
+      if (flow.id === 'customerspage-search') return { ...flow, event: 'mount' };
+      return {
+        ...flow,
+        pages: flow.pages.map((page) =>
+          page.route === '/customers' ? { ...page, title: 'Customer list' } : page,
+        ),
+      };
+    });
+
+  async function reload(): Promise<void> {
+    vi.unstubAllGlobals();
+    flowsResponse = reshaped();
+    await loadDashboard();
+  }
+
+  const group = (key: string) =>
+    document.querySelector<HTMLDetailsElement>(`#flow-list .page-group[data-key="${key}"]`);
+
+  it('lists a component on three pages once, under its own name, and links to it from each', async () => {
+    await reload();
+    const shared = group('shared:OrderForm');
+    expect(shared).not.toBeNull();
+    expect(shared!.querySelector('.page-name')?.textContent).toBe('Order form');
+    expect(shared!.querySelector('.page-route')?.textContent).toBe('shared · on 3 pages');
+    expect(shared!.querySelector('[data-flow-id="orderform-print-order"]')).not.toBeNull();
+    // Not repeated under the pages it is on.
+    expect(
+      document.querySelectorAll('#flow-list [data-flow-id="orderform-print-order"]').length,
+    ).toBe(1);
+    // A page with nothing of its own still gets a heading to link from.
+    const reports = group('page:/reports');
+    expect(reports?.querySelector('.page-count')?.textContent).toBe('0');
+    const link = reports!.querySelector<HTMLButtonElement>('.page-shared .shared-link');
+    expect(link?.textContent).toBe('Order form');
+    shared!.open = false;
+    shared!.dispatchEvent(new Event('toggle'));
+    link!.click();
+    expect(group('shared:OrderForm')?.open).toBe(true);
+  });
+
+  it('puts what the user can do first and folds what runs by itself', async () => {
+    await reload();
+    const customers = group('page:/customers')!;
+    const fold = customers.querySelector<HTMLDetailsElement>('.page-loads');
+    expect(fold).not.toBeNull();
+    expect(fold!.open).toBe(false);
+    expect(fold!.querySelector('summary')?.textContent).toMatch(/When the page opens\s*1/);
+    expect(fold!.querySelector('[data-flow-id="customerspage-search"]')).not.toBeNull();
+    const first = customers.querySelector<HTMLElement>('.flow-item');
+    expect(first?.closest('.page-loads')).toBeNull();
+    // The count is every action under the heading, folded or not.
+    expect(customers.querySelector('.page-count')?.textContent).toBe(
+      String(customers.querySelectorAll('.flow-item').length),
+    );
+  });
+
+  it('opens the fold when the selected action is in it', async () => {
+    await reload();
+    document.querySelector<HTMLButtonElement>('[data-flow-id="customerspage-search"]')!.click();
+    expect(group('page:/customers')!.querySelector<HTMLDetailsElement>('.page-loads')!.open).toBe(
+      true,
+    );
+  });
+
+  it('names a page by its tab title and finds it by that name', async () => {
+    await reload();
+    expect(group('page:/customers')?.querySelector('.page-name')?.textContent).toBe(
+      'Customer list',
+    );
+    expect(group('page:/customers')?.querySelector('.page-route')?.textContent).toBe('/customers');
+    const filter = document.getElementById('filter') as HTMLInputElement;
+    filter.value = 'customer list';
+    filter.dispatchEvent(new Event('input'));
+    const rows = [...document.querySelectorAll<HTMLElement>('#flow-list .flow-item')];
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((row) => row.closest('.page-group[data-key="page:/customers"]'))).toBe(true);
+    // A page listed only for its links has nothing to show a search.
+    expect(group('page:/reports')).toBeNull();
+  });
+});
+
+describe("the sidebar copies the app's own", () => {
+  /**
+   * The server's answer for an app whose side menu lists Orders and Customers,
+   * with a sign-in page, a button in the menu itself, and a detail screen that
+   * Customers links to.
+   */
+  const sidebar = {
+    file: 'web/src/components/SideMenu.tsx',
+    line: 4,
+    entries: [
+      {
+        key: 'nav:auth/Login',
+        label: 'Login',
+        kind: 'auth',
+        route: '/login',
+        actions: [],
+        children: [],
+      },
+      {
+        key: 'nav:sidebar',
+        label: 'Menu',
+        kind: 'sidebar',
+        actions: ['orderform-print-order'],
+        children: [],
+        flat: true,
+      },
+      {
+        key: 'nav:menu/Orders',
+        label: 'Orders',
+        kind: 'menu',
+        route: '/orders',
+        actions: ['orderform-submit-order'],
+        children: [],
+      },
+      {
+        key: 'nav:menu/Customers',
+        label: 'Customers',
+        kind: 'menu',
+        route: '/customers',
+        // Screen order: what runs as it opens, then top to bottom.
+        actions: ['customerspage-search', 'customerspage-archive', 'customerspage-delete'],
+        children: [
+          {
+            key: 'nav:menu/Customers/New customer form',
+            label: 'New customer form',
+            kind: 'tab',
+            route: '/customers',
+            actions: ['customerform-create-customer'],
+            children: [],
+          },
+          {
+            key: 'nav:menu/Customers//customers/[id]',
+            label: 'Customers › Details',
+            kind: 'page',
+            route: '/customers/[id]',
+            actions: [],
+            children: [],
+          },
+        ],
+      },
+    ],
+  };
+
+  async function reload(navigation: unknown): Promise<void> {
+    vi.unstubAllGlobals();
+    navigationResponse = navigation;
+    await loadDashboard();
+    // The app's sidebar is read after the first paint.
+    await vi.waitFor(() => {
+      expect(document.querySelector('#flow-list .nav-entry')).not.toBeNull();
+    });
+  }
+
+  const entry = (key: string) =>
+    document.querySelector<HTMLDetailsElement>(`#flow-list .page-group[data-key="${key}"]`);
+  const topLevel = () =>
+    [...document.querySelectorAll<HTMLElement>('#flow-list > .page-group')].map(
+      (group) => group.querySelector(':scope > summary .page-name')?.textContent,
+    );
+  const rowsOf = (group: Element) =>
+    [...group.querySelectorAll<HTMLElement>(':scope > .flow-item')].map(
+      (row) => row.dataset['flowId'],
+    );
+
+  it('lists the entries in the order the app shows them, and nothing beside them', async () => {
+    await reload(sidebar);
+    // Two parts: the pages the app's menu shows, then every other page.
+    expect(topLevel()).toEqual(['Orders', 'Customers', 'Login']);
+    const parts = [...document.querySelectorAll<HTMLElement>('#flow-list > .nav-part')];
+    expect(parts.map((part) => part.textContent?.replace(/\d+$/, '').trim())).toEqual([
+      'In the app’s menu',
+      'Other pages',
+    ]);
+    expect(parts.map((part) => part.querySelector('.nav-part-count')?.textContent)).toEqual([
+      '2',
+      '2',
+    ]);
+    // The menu's pages sit between the first heading and the second.
+    expect(parts[0]!.nextElementSibling?.getAttribute('data-key')).toBe('nav:menu/Orders');
+    expect(parts[1]!.nextElementSibling?.getAttribute('data-key')).toBe('nav:auth/Login');
+    expect(entry('nav:auth/Login')!.querySelector('.page-route')?.textContent).toBe('/login');
+    // No by-page groups, and no leftovers heading: every action has its place.
+    expect(document.querySelector('#flow-list .page-group[data-key^="page:"]')).toBeNull();
+    expect(document.querySelector('#flow-list .page-group[data-key^="shared:"]')).toBeNull();
+    expect(document.querySelector('.nav-divider')).toBeNull();
+    // An entry whose screen calls nothing still has its place, and says so.
+    expect(entry('nav:auth/Login')!.querySelector('.page-count')?.textContent).toBe('0');
+    expect(entry('nav:auth/Login')!.querySelector('.nav-empty')).not.toBeNull();
+  });
+
+  it("shows the menu's own buttons as rows, where the menu has them", async () => {
+    await reload(sidebar);
+    const rows = document.querySelector('#flow-list > .nav-flat');
+    expect(rows).not.toBeNull();
+    expect(rows!.previousElementSibling?.getAttribute('data-key')).toBe('nav:auth/Login');
+    expect(rowsOf(rows!)).toEqual(['orderform-print-order']);
+  });
+
+  it("lists a screen's actions in screen order, with no folds in between", async () => {
+    await reload(sidebar);
+    const customers = entry('nav:menu/Customers')!;
+    expect(rowsOf(customers)).toEqual([
+      'customerspage-search',
+      'customerspage-archive',
+      'customerspage-delete',
+    ]);
+    expect(customers.querySelector(':scope > .page-loads')).toBeNull();
+    expect(customers.querySelector(':scope > .page-sub')).toBeNull();
+  });
+
+  it("keeps a page's own load off the list, and tells it in the page's summary with its code", async () => {
+    const search = flows.find((flow) => flow.id === 'customerspage-search')!;
+    flowsResponse = flows.map((flow) => (flow === search ? { ...flow, event: 'mount' } : flow));
+    await reload({
+      ...sidebar,
+      entries: sidebar.entries.map((navEntry) =>
+        navEntry.key === 'nav:menu/Customers'
+          ? { ...navEntry, file: search.steps[0]!.file }
+          : navEntry,
+      ),
+    });
+    const customers = entry('nav:menu/Customers')!;
+    expect(rowsOf(customers)).toEqual(['customerspage-archive', 'customerspage-delete']);
+    customers.querySelector<HTMLElement>(':scope > summary')!.click();
+    const call = search.steps.find((step) => step.kind === 'api-call')!;
+    await vi.waitFor(() => {
+      const opens = document.querySelector<HTMLElement>(
+        '#panel-docs .story-step[data-open-flow="customerspage-search"]',
+      )!;
+      expect(opens.textContent).toContain('When it opens');
+      const calls = opens.nextElementSibling!.querySelector('.story-calls')!;
+      expect(calls.textContent).toContain(call.label.split(' ')[0]);
+      expect(calls.querySelector('[data-editor-href]')).not.toBeNull();
+    });
+  });
+
+  it("draws what a page's actions share with the rest of the app once, and each action names it", async () => {
+    const step = {
+      type: 'step',
+      kind: 'shared',
+      label: 'Run require auth',
+      text: 'requireAuth(req)',
+      side: 'server',
+      at: { file: 'api/src/orders.ts', line: 4 },
+      shared: {
+        id: 'abc',
+        actions: 5,
+        ends: [
+          { label: 'Return { user }' },
+          { label: 'Return a 401 error to the caller · Unauthorized', statuses: [401] },
+        ],
+      },
+    };
+    decisionsResponse = (path) => ({
+      flowId: new URL(path, 'http://x').searchParams.get('flow'),
+      title: 'x',
+      nodes: [
+        {
+          type: 'step',
+          kind: 'trigger',
+          label: 'The user clicks',
+          text: 'clicks',
+          side: 'browser',
+        },
+        step,
+      ],
+      counts: { decisions: 1, outcomes: 1, queries: 0, requests: 1 },
+      limits: [],
+      shared: ['abc'],
+    });
+    sharedResponse = [
+      {
+        id: 'abc',
+        flowId: 'shared:abc',
+        title: 'requireAuth(req)',
+        here: 3,
+        actions: 5,
+        nodes: [
+          {
+            type: 'group',
+            kind: 'function',
+            label: 'Run require auth',
+            title: 'requireAuth(req)',
+            side: 'server',
+            nodes: [
+              {
+                type: 'decision',
+                question: 'user?',
+                label: 'Has user?',
+                code: 'user',
+                side: 'server',
+                branches: [
+                  {
+                    label: 'no',
+                    ends: true,
+                    nodes: [
+                      {
+                        type: 'end',
+                        outcome: 'return',
+                        label: 'Return a 401 error to the caller · Unauthorized',
+                        text: 'returns 401',
+                        statuses: [401],
+                        side: 'server',
+                      },
+                    ],
+                  },
+                ],
+                otherwise: 'yes',
+              },
+            ],
+          },
+        ],
+        counts: { decisions: 1, outcomes: 0, queries: 0, requests: 0 },
+        limits: [],
+      },
+    ];
+    try {
+      await reload(sidebar);
+      document.querySelector<HTMLElement>('[data-flow-id="customerspage-archive"]')!.click();
+      const panel = await openTab('decisions');
+      await vi.waitFor(() => {
+        expect(panel.querySelector('.fc-step.kind-shared')).not.toBeNull();
+      });
+      const box = panel.querySelector('.fc-step.kind-shared')!;
+      expect(box.textContent).toContain('The same in 4 other actions');
+      // Failures first, with their status; then what it hands back when it works.
+      const ends = [...box.querySelectorAll('.fc-shared-ends li')];
+      expect(ends.map((end) => end.className)).toEqual(['fails', 'works']);
+      expect(ends[0]!.querySelector('.fc-status')?.textContent).toBe('401');
+      expect(ends[0]!.textContent).toContain('Unauthorized');
+      box.querySelector<HTMLButtonElement>('.fc-shared-open')!.click();
+      // The page's own summary, with the part unfolded and drawn.
+      expect(document.querySelector('#flow-header h2')?.textContent).toBe('Customers');
+      const story = document.querySelector<HTMLElement>('#panel-docs')!;
+      await vi.waitFor(() => {
+        const part = story.querySelector<HTMLDetailsElement>('.story-shared #shared-part-abc')!;
+        expect(part.open).toBe(true);
+        expect(part.querySelector('.shared-part-title')?.textContent).toBe('requireAuth(req)');
+        expect(part.textContent).toContain('3 actions here · 5 in the app · 1 decision');
+        expect(part.querySelector('.fc-diamond-text')?.textContent).toContain('Has user?');
+      });
+      expect(story.querySelector('.story-shared .story-heading')?.textContent).toBe(
+        'The same in other actions',
+      );
+    } finally {
+      decisionsResponse = undefined;
+      sharedResponse = undefined;
+    }
+  });
+
+  it('draws a card with links like the cards beside it, with a fold for what is in it', async () => {
+    await reload({
+      ...sidebar,
+      entries: sidebar.entries.map((navEntry) =>
+        navEntry.key === 'nav:menu/Orders'
+          ? {
+              ...navEntry,
+              children: [
+                {
+                  key: 'nav:menu/Orders/Needs attention',
+                  label: 'Needs attention',
+                  kind: 'section',
+                  actions: [],
+                  items: [
+                    { link: { label: 'Low', to: '/customers', href: '/customers?filter=low' } },
+                    { link: { label: 'Out', to: '/customers', href: '/customers?filter=out' } },
+                  ],
+                  children: [],
+                },
+              ],
+            }
+          : navEntry,
+      ),
+    });
+    const card = entry('nav:menu/Orders/Needs attention')!;
+    expect(card.classList.contains('nav-card-fold')).toBe(true);
+    const summary = card.querySelector(':scope > summary')!;
+    expect(summary.querySelector('.kind-icon.kind-card')).not.toBeNull();
+    expect(summary.querySelector('.label')?.textContent).toBe('Needs attention');
+    expect(summary.querySelector('.meta')?.textContent).toBe('shows data · 2 links');
+    expect(summary.querySelector('.page-count')?.textContent).toBe('2');
+    expect(card.querySelectorAll(':scope > .nav-card-body > .nav-link').length).toBe(2);
+  });
+
+  it('nests tabs and the screens an entry leads to, and counts them in its total', async () => {
+    await reload(sidebar);
+    const customers = entry('nav:menu/Customers')!;
+    const form = entry('nav:menu/Customers/New customer form')!;
+    const detail = entry('nav:menu/Customers//customers/[id]')!;
+    expect(form.parentElement?.closest('.page-group')).toBe(customers);
+    expect(detail.parentElement?.closest('.page-group')).toBe(customers);
+    expect(detail.querySelector('.page-route')?.textContent).toBe('/customers/[id]');
+    expect(customers.querySelector(':scope > summary .page-count')?.textContent).toBe('4');
+  });
+
+  it('starts folded, and opens the entries an action is under when it is selected', async () => {
+    await reload(sidebar);
+    expect(entry('nav:menu/Orders')!.open).toBe(false);
+    expect(entry('nav:menu/Customers')!.open).toBe(false);
+    document
+      .querySelector<HTMLButtonElement>('[data-flow-id="customerform-create-customer"]')!
+      .click();
+    expect(entry('nav:menu/Customers')!.open).toBe(true);
+    expect(entry('nav:menu/Customers/New customer form')!.open).toBe(true);
+  });
+
+  it('selects the action in the address again on a reload, with every entry still folded', async () => {
+    vi.unstubAllGlobals();
+    navigationResponse = sidebar;
+    await loadDashboard();
+    window.history.replaceState(null, '', '/#flow=customerform-create-customer');
+    vi.resetModules();
+    await import(resolve(publicDir, 'app.js') + '?linked-entry');
+    await vi.waitFor(() => {
+      expect(entry('nav:menu/Customers')).not.toBeNull();
+      expect(document.querySelector('#flow-header h2')?.textContent).toBe('Create Customer');
+    });
+    const groups = [...document.querySelectorAll<HTMLDetailsElement>('#flow-list .page-group')];
+    expect(groups.some((group) => group.open)).toBe(false);
+  });
+
+  it('selects the page in the address again on a reload, still folded', async () => {
+    vi.unstubAllGlobals();
+    navigationResponse = sidebar;
+    await loadDashboard();
+    window.history.replaceState(null, '', '/#tab=docs&entry=nav%3Amenu%2FCustomers');
+    vi.resetModules();
+    await import(resolve(publicDir, 'app.js') + '?linked-page');
+    await vi.waitFor(() => {
+      expect(entry('nav:menu/Customers')?.classList.contains('selected')).toBe(true);
+    });
+    expect(entry('nav:menu/Customers')!.open).toBe(false);
+    expect(document.querySelector('#flow-header h2')?.textContent).toBe('Customers');
+  });
+
+  it('lays a screen out top to bottom: its load, its cards, and links that lead on', async () => {
+    const withCards = {
+      ...sidebar,
+      entries: sidebar.entries.map((entry) =>
+        entry.key === 'nav:menu/Orders'
+          ? {
+              ...entry,
+              actions: ['orderform-submit-order'],
+              items: [
+                { action: 'orderform-submit-order' },
+                { section: 'nav:menu/Orders/§Recent customers' },
+              ],
+              children: [
+                {
+                  key: 'nav:menu/Orders/§Recent customers',
+                  label: 'Recent customers',
+                  kind: 'section',
+                  actions: [],
+                  items: [
+                    { link: { label: 'View all', to: '/customers', href: '/customers?recent=1' } },
+                  ],
+                  children: [],
+                },
+              ],
+            }
+          : entry,
+      ),
+    };
+    await reload(withCards);
+    const orders = entry('nav:menu/Orders')!;
+    const card = entry('nav:menu/Orders/§Recent customers')!;
+    // The card sits after the row above it on the screen, inside the page.
+    expect(card.parentElement).toBe(orders);
+    expect(card.previousElementSibling?.getAttribute('data-flow-id')).toBe(
+      'orderform-submit-order',
+    );
+    // A card of links is not empty: the link counts, and says where it goes.
+    expect(card.querySelector('.page-count')?.textContent).toBe('1');
+    expect(card.querySelector('.nav-empty')).toBeNull();
+    const link = card.querySelector<HTMLButtonElement>('.nav-link')!;
+    expect(link.textContent).toContain('View all');
+    expect(link.textContent).toContain('Customers');
+    expect(link.textContent).toContain('/customers?recent=1');
+    // A link is a child like any other: clicking it opens its own six tabs,
+    // about the screen it opens and what that screen runs as it opens.
+    link.click();
+    expect(link.isConnected).toBe(false); // the list re-drew around the selection
+    const selected = document.querySelector<HTMLElement>('.nav-link[aria-selected="true"]');
+    expect(selected?.dataset['linkKey']).toBe('nav:menu/Orders/§Recent customers#link0');
+    await vi.waitFor(() => {
+      expect(document.querySelector('#flow-header h2')?.textContent).toBe('View all');
+    });
+    expect(document.querySelector('#flow-header')?.textContent).toContain('→ Customers');
+    expect(document.querySelectorAll('#tabs .tab').length).toBe(6);
+    expect(window.location.hash).toContain('link0');
+    await vi.waitFor(() => {
+      expect(document.querySelector('#panel-docs')?.textContent).toContain(
+        '“View all” on Recent customers opens Customers',
+      );
+    });
+    // The page itself stays one click away, and is not opened by the link.
+    expect(entry('nav:menu/Customers')!.open).toBe(false);
+    document
+      .querySelector<HTMLElement>('#panel-docs [data-open-entry="nav:menu/Customers"]')!
+      .click();
+    expect(entry('nav:menu/Customers')!.open).toBe(true);
+  });
+
+  it('explains a page in plain words when it is clicked, with no tabs of its own', async () => {
+    await reload(sidebar);
+    entry('nav:menu/Customers')!.querySelector<HTMLElement>(':scope > summary')!.click();
+    // It unfolds, and is the selection.
+    expect(entry('nav:menu/Customers')!.open).toBe(true);
+    expect(entry('nav:menu/Customers')!.classList.contains('selected')).toBe(true);
+    expect(document.querySelector('#flow-header h2')?.textContent).toBe('Customers');
+    expect(window.location.hash).toContain('entry=nav%3Amenu%2FCustomers');
+    // The tabs belong to what is on the page, not the page.
+    expect(document.getElementById('tabs')?.hidden).toBe(true);
+    const story = () => document.querySelector('#panel-docs .page-story')!;
+    expect(story().querySelector('.story-lead')?.textContent).toBe(
+      'This is the Customers page, opened from the app’s menu.',
+    );
+    // Every action on it, top to bottom, its tab's included.
+    expect(
+      [...story().querySelectorAll<HTMLElement>('[data-open-flow]')].map(
+        (step) => step.dataset['openFlow'],
+      ),
+    ).toEqual([
+      'customerspage-search',
+      'customerspage-archive',
+      'customerspage-delete',
+      'customerform-create-customer',
+    ]);
+    // Told from each action's own document once it has been read.
+    await vi.waitFor(() => {
+      const create = story().querySelector('[data-open-flow="customerform-create-customer"]');
+      expect(create?.textContent).toContain('You fill in');
+      expect(create?.textContent).toContain('It then sends this to the server.');
+    });
+    // No developer words: no endpoints, no file names.
+    expect(story().textContent).not.toMatch(/\/api\/|\.tsx?\b/);
+    // The pages it leads to are named.
+    expect(story().textContent).toContain('Pages you can go to from here');
+  });
+
+  it('gives what is on a page — an action, a tab, a card — the six tabs', async () => {
+    await reload(sidebar);
+    entry('nav:menu/Customers')!.querySelector<HTMLElement>(':scope > summary')!.click();
+    document
+      .querySelector<HTMLElement>('#panel-docs [data-open-flow="customerspage-delete"]')!
+      .click();
+    expect(document.getElementById('tabs')?.hidden).toBe(false);
+    expect(document.querySelectorAll('#tabs .tab').length).toBe(6);
+    expect(document.querySelector('#flow-header h2')?.textContent).toBe('Customers · Delete');
+    // A tab of the page is a child too: its own six tabs, its actions' in full.
+    entry('nav:menu/Customers/New customer form')!
+      .querySelector<HTMLElement>(':scope > summary')!
+      .click();
+    expect(document.getElementById('tabs')?.hidden).toBe(false);
+    expect(
+      [...document.querySelectorAll<HTMLElement>('#panel-docs .stack-item')].map(
+        (item) => item.dataset['flowId'],
+      ),
+    ).toEqual(['customerform-create-customer']);
+    for (const tab of ['decisions', 'perf', 'tests', 'impact']) {
+      document.querySelector<HTMLButtonElement>(`#tab-${tab}`)!.click();
+      expect(document.querySelectorAll(`#panel-${tab} .stack-item`).length).toBe(1);
+    }
+  });
+
+  it('shows what a link sets off as the link’s own tabs: the flow its screen runs as it opens', async () => {
+    vi.unstubAllGlobals();
+    // The Customers screen loads its list by itself as it opens.
+    flowsResponse = flows.map((flow) =>
+      flow.id === 'customerspage-search' ? { ...flow, event: 'mount' } : flow,
+    );
+    navigationResponse = {
+      ...sidebar,
+      entries: sidebar.entries.map((entry) =>
+        entry.key === 'nav:menu/Orders'
+          ? {
+              ...entry,
+              items: [
+                { action: 'orderform-submit-order' },
+                { link: { label: 'Low', to: '/customers', href: '/customers?filter=low' } },
+              ],
+            }
+          : entry,
+      ),
+    };
+    await loadDashboard();
+    await vi.waitFor(() => {
+      expect(document.querySelector('#flow-list .nav-link')).not.toBeNull();
+    });
+    document.querySelector<HTMLButtonElement>('#flow-list .nav-link')!.click();
+    // The link is the selection; the tabs are the flow it sets off, in full.
+    expect(document.querySelector('.nav-link[aria-selected="true"]')).not.toBeNull();
+    expect(document.querySelector('.flow-item[aria-selected="true"]:not(.nav-link)')).toBeNull();
+    expect(document.querySelector('#flow-header h2')?.textContent).toBe('Low');
+    expect(document.querySelector('#flow-header')?.textContent).toContain('/customers?filter=low');
+    expect(window.location.hash).toContain('link1');
+    await vi.waitFor(() => {
+      const docs = document.querySelector('#panel-docs')!;
+      expect(docs.textContent).toContain('Clicking “Low” on Orders opens Customers');
+      expect(docs.querySelector('[data-stage]')).not.toBeNull();
+    });
+    // No page was opened to get there.
+    expect(entry('nav:menu/Customers')!.open).toBe(false);
+    expect(document.querySelector('.page-group.selected')).toBeNull();
+  });
+
+  it("points a card fed by its page's own load to the page, where every step is told once", async () => {
+    const search = flows.find((flow) => flow.id === 'customerspage-search')!;
+    flowsResponse = flows.map((flow) => (flow === search ? { ...flow, event: 'mount' } : flow));
+    cardResponse = () => ({
+      key: 'nav:menu/Customers/§Stock',
+      label: 'Stock',
+      data: {
+        file: 'web/src/components/Stats.tsx',
+        line: 12,
+        component: 'Stats',
+        values: [],
+        calculations: [],
+        sources: [
+          {
+            hook: 'useStats',
+            file: 'web/src/pages/Customers.tsx',
+            line: 5,
+            flows: ['customerspage-search'],
+            endpoints: search.endpoints,
+            fields: ['lowStockCount'],
+          },
+        ],
+        fields: [],
+        conditions: [],
+      },
+      sharedWith: [],
+    });
+    await reload({
+      ...sidebar,
+      entries: sidebar.entries.map((top) =>
+        top.key === 'nav:menu/Customers'
+          ? {
+              ...top,
+              file: search.steps[0]!.file,
+              children: [
+                {
+                  key: 'nav:menu/Customers/§Stock',
+                  label: 'Stock',
+                  kind: 'section',
+                  file: 'web/src/components/Stats.tsx',
+                  line: 12,
+                  actions: [],
+                  children: [],
+                },
+                ...top.children,
+              ],
+            }
+          : top,
+      ),
+    });
+    entry('nav:menu/Customers')!.querySelector<HTMLElement>(':scope > summary')!.click();
+    await vi.waitFor(() => {
+      expect(document.querySelector('#panel-docs .story-path .card-path')).not.toBeNull();
+    });
+    const server = search.steps.find((step) => step.layer === 'backend')!;
+    expect(document.querySelector('#panel-docs .story-path')!.textContent).toContain(server.label);
+    document
+      .querySelector<HTMLButtonElement>(
+        '#flow-list .nav-card[data-key="nav:menu/Customers/§Stock"]',
+      )!
+      .click();
+    await vi.waitFor(() => {
+      const path = document.querySelector('#panel-docs .card-data .card-path')!;
+      expect(path.textContent).toContain('Customers page’s own request');
+      expect(path.textContent).toContain('lowStockCount');
+      expect(path.textContent).not.toContain('The server runs');
+    });
+    // Its Decisions tab is the card's own: the load's tree is on the page.
+    const decisions = await openTab('decisions');
+    await vi.waitFor(() => {
+      expect(decisions.textContent).toContain('drawn once, on the page');
+    });
+    expect(decisions.querySelector('.stack-item[data-flow-id="customerspage-search"]')).toBeNull();
+    // The badge counts what the tab draws: the page's load is not the card's.
+    expect(document.querySelector('#tab-decisions .tab-badge')?.textContent?.trim()).toBe(
+      'straight',
+    );
+    await openTab('docs');
+    document
+      .querySelector<HTMLButtonElement>('#panel-docs [data-open-entry="nav:menu/Customers"]')!
+      .click();
+    expect(document.querySelector('#flow-header h2')?.textContent).toBe('Customers');
+  });
+
+  it('gives a card that only shows data the six tabs: where each value comes from, then its load', async () => {
+    const stats = {
+      file: 'web/src/components/Stats.tsx',
+      line: 12,
+      component: 'Stats',
+      values: [
+        {
+          label: 'value',
+          code: 'formatNumber(total)',
+          file: 'web/src/components/Stats.tsx',
+          line: 14,
+          fields: ['lowStockCount'],
+          uses: ['total'],
+          format: ['formatNumber'],
+          hooks: ['useStats'],
+        },
+      ],
+      calculations: [
+        {
+          name: 'total',
+          code: 'total = data.lowStockCount + 1',
+          file: 'web/src/components/Stats.tsx',
+          line: 8,
+          fields: ['lowStockCount'],
+        },
+      ],
+      sources: [
+        {
+          hook: 'useStats',
+          file: 'web/src/pages/Customers.tsx',
+          line: 5,
+          flows: ['customerspage-search'],
+          endpoints: ['GET /api/customers'],
+          fields: ['lowStockCount'],
+        },
+      ],
+      fields: [
+        {
+          field: 'lowStockCount',
+          endpoint: 'GET /api/customers',
+          made: [
+            {
+              code: 'lowStockCount: totals.low',
+              file: 'api/src/stats.ts',
+              line: 30,
+              how: 'returned',
+            },
+          ],
+        },
+      ],
+      conditions: [
+        {
+          code: 'isLoading',
+          file: 'web/src/pages/Customers.tsx',
+          line: 9,
+          outcomes: ['Skeleton', 'the card'],
+          where: 'around',
+        },
+        {
+          code: 'pct >= 70 · pct >= 40',
+          file: 'web/src/components/Stats.tsx',
+          line: 18,
+          outcomes: ['“Good”', '“Fair”', '“Low”'],
+          where: 'card',
+        },
+      ],
+    };
+    cardResponse = (path) => {
+      const link = new URL(path, 'http://x').searchParams.get('link');
+      return {
+        key: 'nav:menu/Customers/§Stock',
+        label: 'Stock',
+        data: link === null ? stats : { ...stats, calculations: [] },
+        sharedWith: [],
+      };
+    };
+    await reload({
+      ...sidebar,
+      entries: sidebar.entries.map((top) =>
+        top.key === 'nav:menu/Customers'
+          ? {
+              ...top,
+              children: [
+                {
+                  key: 'nav:menu/Customers/§Stock',
+                  label: 'Stock',
+                  kind: 'section',
+                  file: 'web/src/components/Stats.tsx',
+                  line: 12,
+                  actions: [],
+                  items: [{ link: { label: 'Low', to: '/orders', href: '/orders?filter=low' } }],
+                  children: [],
+                },
+                {
+                  key: 'nav:menu/Customers/§Worth',
+                  label: 'Worth',
+                  kind: 'section',
+                  file: 'web/src/components/Stats.tsx',
+                  line: 30,
+                  actions: [],
+                  children: [],
+                },
+                ...top.children,
+              ],
+            }
+          : top,
+      ),
+    });
+    entry('nav:menu/Customers')!.querySelector<HTMLElement>(':scope > summary')!.click();
+    // A card with nothing in it is a row, not a fold; it still opens its tabs.
+    expect(entry('nav:menu/Customers/§Worth')).toBeNull();
+    const worth = document.querySelector<HTMLButtonElement>(
+      '#flow-list .nav-card[data-key="nav:menu/Customers/§Worth"]',
+    )!;
+    expect(worth.textContent).toContain('shows data');
+    worth.click();
+    expect(document.querySelector('#flow-header h2')?.textContent).toBe('Worth');
+    expect(document.querySelectorAll('#tabs .tab').length).toBe(6);
+    expect(
+      document
+        .querySelector('#flow-list .nav-card[data-key="nav:menu/Customers/§Worth"]')
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
+    entry('nav:menu/Customers/§Stock')!.querySelector<HTMLElement>(':scope > summary')!.click();
+    expect(document.getElementById('tabs')?.hidden).toBe(false);
+    expect(document.querySelectorAll('#tabs .tab').length).toBe(6);
+    await vi.waitFor(() => {
+      const docs = document.querySelector('#panel-docs')!;
+      expect(docs.textContent).toContain('Stock shows data from GET /api/customers');
+      expect(docs.textContent).toContain('How the data gets here');
+      expect(docs.textContent).toContain('Where the server makes each field');
+      expect(docs.textContent).toContain('lowStockCount: totals.low');
+      expect(docs.textContent).toContain('Worked out in the browser');
+      expect(docs.textContent).toContain('formatNumber(total)');
+    });
+    // The load that brings the data is stacked under it, in every tab.
+    expect(document.querySelector('#panel-docs .stack-card')?.textContent).toBe(
+      'Where its data comes from',
+    );
+    for (const tab of ['decisions', 'perf', 'tests', 'impact']) {
+      document.querySelector<HTMLButtonElement>(`#tab-${tab}`)!.click();
+      expect(
+        [...document.querySelectorAll<HTMLElement>(`#panel-${tab} .stack-item`)].map(
+          (item) => item.dataset['flowId'],
+        ),
+      ).toEqual(['customerspage-search']);
+      expect(document.querySelector(`#panel-${tab} .card-data`)).not.toBeNull();
+    }
+    // The card's own checks are a chart: the screen around it waits on `isLoading` first.
+    const chart = document.querySelector('#panel-decisions .card-chart')!;
+    expect(chart.querySelector('.fc-diamond-text')?.textContent).toContain('isLoading?');
+    expect(chart.textContent).toContain('Shows Skeleton instead — Stock is not drawn yet');
+    expect(chart.textContent).toContain('Stock is drawn');
+    expect(chart.querySelector('[data-fc="copy"]')).toBeNull();
+    // A chain is one test inside the other, as it runs; every way carries on to the card.
+    // (Boxes are made inner first, so the page order is not the reading order.)
+    expect(
+      [...chart.querySelectorAll('.fc-diamond-text .fc-label')].map((n) => n.textContent).sort(),
+    ).toEqual(['isLoading?', 'pct >= 40?', 'pct >= 70?']);
+    for (const word of ['The value is “Good”', 'The value is “Fair”', 'The value is “Low”'])
+      expect(chart.textContent).toContain(word);
+
+    // A link in the card is read for the number it shows first.
+    document.querySelector<HTMLButtonElement>('#tab-docs')!.click();
+    document.querySelector<HTMLButtonElement>('#flow-list .nav-link')!.click();
+    await vi.waitFor(() => {
+      const docs = document.querySelector('#panel-docs')!;
+      expect(docs.textContent).toContain('“Low” shows lowStockCount from GET /api/customers');
+      expect(docs.textContent).toContain('What clicking it does');
+    });
+    cardResponse = undefined;
+  });
+
+  it('keeps the list where it is when a row is clicked', async () => {
+    await reload(sidebar);
+    const scroller = document.querySelector<HTMLElement>('.sidebar')!;
+    entry('nav:menu/Customers')!.querySelector<HTMLElement>(':scope > summary')!.click();
+    scroller.scrollTop = 40;
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    document.querySelector<HTMLButtonElement>('[data-flow-id="customerspage-archive"]')!.click();
+    expect(scrolled).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(40);
+  });
+
+  it("finds everything under an entry by the entry's name", async () => {
+    await reload(sidebar);
+    const filter = document.getElementById('filter') as HTMLInputElement;
+    filter.value = 'new customer';
+    filter.dispatchEvent(new Event('input'));
+    const rows = [...document.querySelectorAll<HTMLElement>('#flow-list .flow-item')];
+    expect(rows.map((row) => row.dataset['flowId'])).toEqual(['customerform-create-customer']);
   });
 });
 
@@ -411,10 +1380,14 @@ describe('the tabs', () => {
       window.history.replaceState(null, '', `/#tab=${legacy}&flow=${flows[0]!.id}`);
       vi.resetModules();
       await import(resolve(publicDir, 'app.js') + `?legacy-${legacy}`);
+      // All together: the tab can already be selected from the load before.
+      // Waiting out the insight request too leaves this load idle, so it cannot
+      // rewrite the URL while the next one is being imported.
       await vi.waitFor(() => {
         expect(document.getElementById(`tab-${tab}`)?.getAttribute('aria-selected')).toBe('true');
+        expect(document.getElementById('graph')?.hidden).toBe(!diagram);
+        expect(document.querySelector('#tab-tests .tab-badge')?.textContent).not.toBe('…');
       });
-      expect(document.getElementById('graph')?.hidden).toBe(!diagram);
     }
   });
 
@@ -838,6 +1811,20 @@ describe('the Docs tab', () => {
     expect(panel.querySelector('.adoc-stage .glance-title')?.textContent).toBe('User opens page');
   });
 
+  it('names no missing steps for what loads by itself as the page opens', async () => {
+    vi.unstubAllGlobals();
+    flowsResponse = flows.map((flow) =>
+      flow.id === 'customerspage-search' ? { ...flow, event: 'mount' } : flow,
+    );
+    await loadDashboard();
+    document.querySelector<HTMLElement>('[data-flow-id="customerspage-search"]')!.click();
+    const panel = await openTab('docs');
+    await vi.waitFor(() => {
+      expect(panel.querySelectorAll('.adoc-stage').length).toBeGreaterThan(0);
+    });
+    expect(panel.querySelector('.adoc-absent')).toBeNull();
+  });
+
   it('writes styled text, not markup', async () => {
     const panel = await openTab('docs');
     await vi.waitFor(() => {
@@ -923,6 +1910,18 @@ describe('the Docs tab', () => {
       expect(new URL(href, 'http://x').searchParams.get('flow')).toBe(other.id);
     });
     expect(document.getElementById('panel-docs')?.hidden).toBe(false);
+  });
+
+  it('follows a link pasted into the address bar without a reload', async () => {
+    await openTab('docs');
+    const other = flows.find((flow) => flow.id !== flows[0]?.id)!;
+    window.location.hash = `tab=decisions&flow=${other.id}`;
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await vi.waitFor(() => {
+      expect(new URLSearchParams(window.location.hash.slice(1)).get('flow')).toBe(other.id);
+      expect(document.getElementById('panel-decisions')?.hidden).toBe(false);
+      expect(document.getElementById('panel-docs')?.hidden).toBe(true);
+    });
   });
 
   it('links to the Markdown of the same action', async () => {

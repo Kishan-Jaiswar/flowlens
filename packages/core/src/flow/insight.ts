@@ -112,6 +112,25 @@ export function flowTiming(flow: FeatureFlow): FlowTiming {
     };
   }
 
+  /**
+   * A step's time is its average over every action that runs it: a clinic
+   * lookup timed while the dashboard loaded is not this action being timed.
+   * Only when this action's own request (or, with none, its own handler) was
+   * traced is there a number for it.
+   */
+  if (!ownRunTimed(flow)) {
+    return {
+      observed: false,
+      steps: [],
+      unobserved,
+      notes: [
+        'This action has not been traced yet. Some of the steps it shares with other ' +
+          'actions were timed there, but those numbers belong to those actions. Use this ' +
+          'feature once with tracing on, then run `flowlens trace`.',
+      ],
+    };
+  }
+
   const accountedMs = round(measured.reduce((total, step) => total + (step.avgSelfMs ?? 0), 0));
   const totalMs = round(Math.max(...measured.map((step) => step.avgMs ?? step.avgSelfMs ?? 0)));
 
@@ -146,6 +165,13 @@ export function flowTiming(flow: FeatureFlow): FlowTiming {
    * is real — it is in code the tracer was not wired into — and a reader who
    * does not know that will conclude the flow is faster than it is.
    */
+  if (totalMs > 0 && accountedMs > totalMs * 1.05) {
+    notes.push(
+      `The steps add up to ${accountedMs}ms, more than the ${totalMs}ms the action took: ` +
+        'either some ran at the same time (in a `Promise.all`, say), or a step shared with ' +
+        'other actions shows its average over all of them — or both.',
+    );
+  }
   if (totalMs > 0 && accountedMs < totalMs * 0.8) {
     notes.push(
       `Steps account for ${accountedMs}ms of ${totalMs}ms. The rest is in code ` +
@@ -162,6 +188,18 @@ export function flowTiming(flow: FeatureFlow): FlowTiming {
     unobserved,
     notes,
   };
+}
+
+/** Was this action itself traced: its request, else its handler, has a time. */
+export function ownRunTimed(flow: FeatureFlow): boolean {
+  if (flow.traced !== undefined) return flow.traced;
+  const timed = (step: FlowStep): boolean =>
+    step.avgMs !== undefined || step.avgSelfMs !== undefined;
+  const own = flow.steps.filter((step) => step.kind === 'api-call' || step.kind === 'route');
+  if (own.length > 0) return own.some(timed);
+  return flow.steps.some(
+    (step) => (step.kind === 'ui-action' || step.kind === 'handler') && timed(step),
+  );
 }
 
 function toStepTiming(step: FlowStep): StepTiming {

@@ -52,11 +52,39 @@ const state = {
   selectedFlow: null,
   selectedNode: null,
   filter: '',
-  /** Page groups the user folded in the sidebar, kept across re-renders. */
-  closedPages: new Set(),
+  /**
+   * Sidebar groups the user opened, kept across re-renders. Every group — a
+   * page, a menu entry, a shared component — starts folded, so the list opens
+   * as an outline of the app rather than a wall of rows.
+   */
+  openGroups: new Set(),
+  /**
+   * The app's own sidebar (`/api/navigation`), copied, with every action
+   * placed in it: `{ file, line, entries }`. Null when the app writes no menu
+   * down, or until it arrives — it is read after the first paint.
+   */
+  navigation: null,
+  /**
+   * A page, card or dialog of the app's sidebar, when that is what is selected
+   * rather than one action: `{ key, entry, summary, error }`. Its tabs sum up
+   * every action on it.
+   */
+  selectedScope: null,
+  /** A shared part to scroll to once the page's summary is drawn. */
+  sharedTarget: null,
+  /** Shared parts unfolded on a page's summary, by id. */
+  openShared: new Set(),
+  /** The link an action was opened through, when a link is the selection. */
+  via: null,
+  /** Groups whose "When the page opens" fold the user opened. */
+  openLoads: new Set(),
   /** Issues & impact sections the reader folded or opened, by section. */
   impactOpen: {},
-  includeLocal: false,
+  /**
+   * Every action is listed, including the ones that never reach the backend —
+   * opening a dialog, a filter, a field: the sidebar is a map of the screen.
+   */
+  includeLocal: true,
   /** Which tab is showing: docs | perf | tests | changed | impact. */
   tab: 'docs',
   /** How the Docs tab shows the action: the stage list, or the diagram. */
@@ -182,6 +210,11 @@ async function getJson(url) {
 }
 
 async function load() {
+  // Read before anything is awaited: the link the page was opened with, not
+  // whatever the URL says once the requests are back.
+  const hash = new URLSearchParams(window.location.hash.slice(1));
+  // A new scan, or a different set of actions: what was fetched per action is stale.
+  flowData.clear();
   try {
     const [graph, flows, doctor] = await Promise.all([
       getJson('/api/graph'),
@@ -191,6 +224,7 @@ async function load() {
 
     state.graph = graph;
     state.flows = flows;
+    void loadNavigation();
 
     const projects = graph.meta.projects ?? {};
     el.subtitle.textContent =
@@ -207,8 +241,8 @@ async function load() {
     // `#tab=apis&flow=<id>` (or the older `#docs=<id>`) opens straight onto
     // that tab and action, so a link pasted into a ticket lands where it was
     // copied from.
-    const hash = new URLSearchParams(window.location.hash.slice(1));
     const linked = hash.get('flow') ?? hash.get('docs');
+    state.linkedEntry = hash.get('entry');
     const target = state.flows.find((flow) => flow.id === linked);
     const tab = hash.get('tab') ?? (hash.has('docs') ? 'docs' : null);
     const legacy = tab ? LEGACY_TABS[tab] : undefined;
@@ -217,8 +251,12 @@ async function load() {
       if (legacy[1]) state.docView = legacy[1];
     } else if (tab && TABS.some(([candidate]) => candidate === tab)) state.tab = tab;
     if (hash.get('view') === 'diagram') state.docView = 'diagram';
-    const first = target ?? filteredFlows()[0];
-    if (first) selectFlow(first.id);
+    // The first row in the sidebar — the app's first menu entry, when it has one.
+    const topId = el.flowList.querySelector('.flow-item')?.dataset.flowId;
+    const first = target ?? state.flows.find((flow) => flow.id === topId) ?? filteredFlows()[0];
+    // The sidebar opens folded, every time: the action named in the address is
+    // selected again on a reload, but nothing is unfolded to show it.
+    if (first) selectFlow(first.id, { reveal: false });
     else {
       // A backend scanned on its own has no user actions; its issues are still
       // the project's, so that is where it opens.
@@ -234,25 +272,75 @@ async function load() {
   }
 }
 
+/**
+ * The app's sidebar, read after the first paint: working it out reads the
+ * whole frontend, and the list is useful grouped by page in the meantime. A
+ * failure leaves it that way.
+ */
+async function loadNavigation() {
+  try {
+    const navigation = await getJson('/api/navigation');
+    state.navigation = navigation?.entries?.length ? navigation : null;
+  } catch {
+    state.navigation = null;
+  }
+  if (!state.navigation) return;
+  // `#entry=<key>` selects a page, card or link again — still folded.
+  if (state.linkedEntry && findLink(state.linkedEntry)) {
+    const key = state.linkedEntry;
+    state.linkedEntry = null;
+    selectLink(key, { reveal: false });
+    return;
+  }
+  if (state.linkedEntry && findNavEntry(state.linkedEntry)) {
+    const key = state.linkedEntry;
+    state.linkedEntry = null;
+    selectScope(key, { reveal: false });
+    return;
+  }
+  renderFlowList();
+}
+
 function filteredFlows() {
   const needle = state.filter.trim().toLowerCase();
   if (!needle) return state.flows;
-  return state.flows.filter((flow) =>
-    [
-      flow.title,
-      flow.label,
-      flow.screen,
-      flow.component,
-      flow.id,
-      ...flow.endpoints,
-      ...(flow.pages ?? []).map((page) => page.route),
-    ]
-      .filter(Boolean)
-      .some((value) => value.toLowerCase().includes(needle)),
+  // "Timing" finds everything under the app's Timing menu entry.
+  const inMenu = new Set();
+  const collect = (entry, matched) => {
+    const hit = matched || entry.label.toLowerCase().includes(needle);
+    if (hit) for (const id of entry.actions) inMenu.add(id);
+    for (const child of entry.children) collect(child, hit);
+  };
+  for (const entry of navEntries()) collect(entry, false);
+  return state.flows.filter(
+    (flow) =>
+      inMenu.has(flow.id) ||
+      [
+        flow.title,
+        flow.label,
+        flow.screen,
+        flow.component,
+        flow.id,
+        ...flow.endpoints,
+        ...(flow.pages ?? []).flatMap((page) => [page.route, page.title]),
+      ]
+        .filter(Boolean)
+        .some((value) => value.toLowerCase().includes(needle)),
   );
 }
 
 function renderFlowList() {
+  // Re-drawing the list must not move it: what was under the pointer stays.
+  const scroller = el.flowList.closest('.sidebar');
+  const scrollTop = scroller?.scrollTop ?? 0;
+  try {
+    drawFlowList();
+  } finally {
+    if (scroller) scroller.scrollTop = scrollTop;
+  }
+}
+
+function drawFlowList() {
   const flows = filteredFlows();
   const groups = pageGroups(flows);
   const searching = state.filter.trim() !== '';
@@ -271,37 +359,2510 @@ function renderFlowList() {
     return;
   }
 
-  for (const group of groups) {
-    const section = document.createElement('details');
-    section.className = 'page-group';
-    // A search shows every match, folded or not; a fold comes back after it.
-    section.open = searching || !state.closedPages.has(group.key);
-    section.ontoggle = () => {
-      if (searching) return;
-      if (section.open) state.closedPages.delete(group.key);
-      else state.closedPages.add(group.key);
-      renderFoldAll();
-    };
-    section.innerHTML = `
+  if (state.navigation) {
+    /**
+     * Two parts: the pages the app's own menu shows, as it shows them, and
+     * everything else — sign-in pages, what is on every page, the menu's own
+     * buttons, screens nothing links to.
+     */
+    const entries = navigationLayout(flows);
+    const parts = [
+      ['menu', 'In the app’s menu', entries.filter((entry) => entry.navKind === 'menu')],
+      ['other', 'Other pages', entries.filter((entry) => entry.navKind !== 'menu')],
+    ];
+    for (const [part, title, list] of parts) {
+      const sections = list.map((entry) => renderGroup(entry, searching)).filter(Boolean);
+      if (sections.length === 0) continue;
+      const heading = document.createElement('div');
+      heading.className = 'nav-part';
+      heading.dataset.part = part;
+      heading.innerHTML = `<span>${escapeHtml(title)}</span><span class="nav-part-count">${list.length}</span>`;
+      el.flowList.append(heading, ...sections);
+    }
+  } else {
+    for (const group of groups) {
+      const section = renderGroup(group, searching);
+      if (section) el.flowList.appendChild(section);
+    }
+  }
+  renderFoldAll();
+}
+
+/** Is this group unfolded? Every group starts folded; a search opens them all. */
+function groupIsOpen(group, searching) {
+  return searching || state.openGroups.has(group.key);
+}
+
+function setGroupOpen(group, open) {
+  if (open) state.openGroups.add(group.key);
+  else state.openGroups.delete(group.key);
+}
+
+/** One sidebar group: its heading, its actions, and — for a menu entry — its sub-entries. */
+function renderGroup(group, searching) {
+  const total = groupTotal(group);
+  // A page listed only for its links to shared groups says nothing to a search.
+  if (searching && total === 0) return null;
+  // The menu's own buttons are rows in the list, as they are in the app.
+  if (group.flat) {
+    const rows = document.createElement('div');
+    rows.className = 'nav-flat';
+    for (const flow of group.flows) rows.appendChild(flowItem(flow, group));
+    return rows;
+  }
+  // A card with nothing in it is not a fold: a row, like an action, that opens its tabs.
+  const links = (group.items ?? []).some((item) => item.link);
+  if (group.kind === 'nav' && group.child && total === 0 && !group.children?.length && !links) {
+    return cardRow(group);
+  }
+  // A card with something to press in it: drawn like the cards beside it, with a fold.
+  const card = group.kind === 'nav' && group.child && group.navKind === 'section';
+  const section = document.createElement('details');
+  section.className = group.kind === 'nav' ? 'page-group nav-entry' : 'page-group';
+  section.classList.toggle('nav-card-fold', card);
+  section.dataset.key = group.key;
+  section.classList.toggle('selected', state.selectedScope?.key === group.key);
+  // A search shows every match, folded or not; a fold comes back after it.
+  section.open = groupIsOpen(group, searching);
+  section.ontoggle = (event) => {
+    // A sub-entry's toggle bubbles; only this group's own fold counts here.
+    if (event?.target && event.target !== section) return;
+    if (searching) return;
+    setGroupOpen(group, section.open);
+    renderFoldAll();
+  };
+  section.innerHTML = card
+    ? `
+      <summary title="${escapeHtml(group.hint || group.name)}">
+        <span class="kind-icon kind-card" aria-hidden="true">${ICONS.layout}</span>
+        <span class="flow-text">
+          <span class="label">${escapeHtml(group.name)}</span>
+          <span class="meta"><span class="path">${escapeHtml(cardContents(group))}</span></span>
+        </span>
+        <span class="page-count" title="${plural(total, 'feature')} here: controls, links and parts like a popup, each counted once">${total}</span>
+      </summary>`
+    : `
       <summary title="${escapeHtml(group.hint)}">
-        <span class="page-icon" aria-hidden="true">${ICONS[group.icon]}</span>
+        ${
+          group.child
+            ? ''
+            : `<span class="page-icon" aria-hidden="true">${ICONS[group.icon]}</span>`
+        }
         <span class="page-text">
           <span class="page-name">${escapeHtml(group.name)}</span>
           ${group.sub ? `<span class="page-route">${escapeHtml(group.sub)}</span>` : ''}
         </span>
-        <span class="page-count" title="${plural(group.flows.length, 'action')}">${group.flows.length}</span>
+        <span class="page-count" title="${plural(total, 'feature')} here: controls, links and parts like a popup, each counted once">${total}</span>
       </summary>`;
-
-    const loads = group.flows.filter(isPageLoad);
-    const actions = group.flows.filter((flow) => !isPageLoad(flow));
-    const both = loads.length > 0 && actions.length > 0;
-    if (both) section.appendChild(subheading('When the page opens'));
-    for (const flow of loads) section.appendChild(flowItem(flow, group));
-    if (both) section.appendChild(subheading('What the user can do'));
-    for (const flow of actions) section.appendChild(flowItem(flow, group));
-    el.flowList.appendChild(section);
+  /**
+   * A page or card of the app's sidebar is something to look at, not only a
+   * fold: clicking it opens its summary on the right, in the same tabs an
+   * action has, and unfolds it. The fold is done here rather than by the
+   * browser because selecting re-draws the list.
+   */
+  if (group.kind === 'nav') {
+    section.querySelector(':scope > summary').addEventListener('click', (event) => {
+      event.preventDefault();
+      setGroupOpen(group, !(section.open && state.selectedScope?.key === group.key));
+      selectScope(group.key);
+    });
   }
-  renderFoldAll();
+
+  /**
+   * A screen of the app's sidebar lists its actions in the order the screen
+   * has them — what runs as it opens, then its controls top to bottom — so
+   * reading down the entry is walking down the screen.
+   */
+  const placedChildren = new Set();
+  if (group.items) {
+    for (const item of group.items) {
+      if (item.flow) section.appendChild(flowItem(item.flow, group));
+      else if (item.link && !searching) section.appendChild(linkItem(item.link, item.key));
+      else if (item.section) {
+        const child = group.children.find((candidate) => candidate.key === item.section);
+        if (!child) continue;
+        placedChildren.add(child.key);
+        const node = renderGroup(child, searching);
+        if (node) section.appendChild(node);
+      }
+    }
+  } else if (group.sequence) {
+    for (const flow of group.flows) section.appendChild(flowItem(flow, group));
+  }
+  /**
+   * What the user can do comes first: it is what someone opening a page in
+   * this list is looking for. What runs by itself when the page opens is
+   * folded underneath — on a busy page it is most of the rows, and it pushed
+   * the buttons off the screen.
+   */
+  const loads = group.sequence ? [] : group.flows.filter(isPageLoad);
+  const actions = group.sequence ? [] : group.flows.filter((flow) => !isPageLoad(flow));
+  if (actions.length > 0 && loads.length > 0)
+    section.appendChild(subheading('What the user can do'));
+  for (const flow of actions) section.appendChild(flowItem(flow, group));
+  if (loads.length > 0 && actions.length === 0) {
+    for (const flow of loads) section.appendChild(flowItem(flow, group));
+  } else if (loads.length > 0) {
+    const fold = document.createElement('details');
+    fold.className = 'page-loads';
+    fold.open =
+      searching ||
+      state.openLoads.has(group.key) ||
+      loads.some((flow) => flow.id === state.selectedFlow?.id);
+    fold.ontoggle = () => {
+      if (searching) return;
+      if (fold.open) state.openLoads.add(group.key);
+      else state.openLoads.delete(group.key);
+    };
+    fold.innerHTML = `<summary class="page-sub">${
+      group.kind === 'shared' ? 'When it opens' : 'When the page opens'
+    } <span class="loads-count">${loads.length}</span></summary>`;
+    for (const flow of loads) fold.appendChild(flowItem(flow, group));
+    section.appendChild(fold);
+  }
+  if (group.shared?.length) section.appendChild(sharedLinks(group.shared));
+  const rest = (group.children ?? []).filter((child) => !placedChildren.has(child.key));
+  if (rest.length) {
+    const children = document.createElement('div');
+    children.className = 'nav-children';
+    for (const child of rest) {
+      const node = renderGroup(child, searching);
+      if (node) children.appendChild(node);
+    }
+    section.appendChild(children);
+  }
+  if (group.kind === 'nav' && total === 0 && !group.children?.length && !links) {
+    const empty = document.createElement('div');
+    empty.className = 'nav-empty';
+    empty.textContent =
+      group.navKind === 'section'
+        ? 'Shows data — select it to see where it comes from'
+        : group.route || group.file
+          ? 'No actions on this screen'
+          : 'This entry does not open a page Flowslens could find';
+    section.appendChild(empty);
+  }
+  if (card) {
+    // What is in the card hangs under its row, on a rule, like a page's own.
+    const body = document.createElement('div');
+    body.className = 'nav-card-body';
+    body.append(...[...section.children].filter((node) => node.tagName !== 'SUMMARY'));
+    section.appendChild(body);
+  }
+  return section;
+}
+
+/** `shows data · 3 links`: what a card holds besides what it shows. */
+function cardContents(group) {
+  const links = state.filter.trim() ? 0 : (group.items ?? []).filter((item) => item.link).length;
+  const actions = groupTotal(group) - links;
+  const held = [actions && plural(actions, 'action'), links && plural(links, 'link')].filter(
+    Boolean,
+  );
+  const kind = group.openedBy
+    ? 'opens a popup'
+    : group.repeated
+      ? 'on each row'
+      : group.controls
+        ? 'one feature'
+        : 'shows data';
+  return [kind, ...held].join(' · ');
+}
+
+/** A card that only shows data, as one row: selecting it opens the card's own tabs. */
+function cardRow(group) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'flow-item nav-card';
+  button.dataset.key = group.key;
+  button.title = group.hint || group.name;
+  button.setAttribute('aria-selected', String(state.selectedScope?.key === group.key));
+  button.innerHTML = `
+    <span class="kind-icon kind-card" aria-hidden="true">${ICONS.layout}</span>
+    <span class="flow-text">
+      <span class="label">${escapeHtml(group.name)}</span>
+      <span class="meta"><span class="path">shows data</span></span>
+    </span>`;
+  button.onclick = () => selectScope(group.key);
+  return button;
+}
+
+/**
+ * What can be done in a group and everything under it: its actions and links,
+ * not the loads that run by themselves — the same count the page's header shows.
+ */
+function groupTotal(group) {
+  // A link is something to press too: a card of three links is not empty.
+  const links = state.filter.trim() ? 0 : (group.items ?? []).filter((item) => item.link).length;
+  // The copied sidebar lists no page loads (the page's summary has them); the
+  // plain list folds them under the page, and counts what it shows.
+  const counted =
+    group.kind === 'nav' ? group.flows.filter((flow) => flow.event !== 'mount') : group.flows;
+  // A page's features: its own controls and links, and each part with
+  // something in it (a popup, each row) once — not every control inside, and
+  // not the pages it leads to, which have their own count. A search counts
+  // every match.
+  if (group.kind === 'nav' && !state.filter.trim()) {
+    const children = group.children ?? [];
+    const parts = children.filter(
+      (child) =>
+        !child.tabContent &&
+        (child.navKind === 'section' || child.navKind === 'tab') &&
+        groupTotal(child) > 0,
+    ).length;
+    // A tab's content is the page's own: each of its features counts.
+    const tabbed = children
+      .filter((child) => child.tabContent)
+      .reduce((sum, child) => sum + groupTotal(child), 0);
+    return counted.length + links + parts + tabbed;
+  }
+  return (
+    counted.length +
+    links +
+    (group.children ?? []).reduce((sum, child) => sum + groupTotal(child), 0)
+  );
+}
+
+/** The same count for a sidebar entry: what the page header and summary say. */
+function featureCount(entry) {
+  const flowOf = (id) => state.flows.find((flow) => flow.id === id);
+  const own = entry.actions.filter((id) => {
+    const flow = flowOf(id);
+    return flow && flow.event !== 'mount';
+  }).length;
+  const links = (entry.items ?? []).filter((item) => item.link).length;
+  const tabbed = entry.children
+    .filter((child) => child.tabContent)
+    .reduce((sum, child) => sum + featureCount(child), 0);
+  const parts = entry.children.filter(
+    (child) =>
+      !child.tabContent &&
+      (child.kind === 'section' || child.kind === 'tab') &&
+      (child.actions.some((id) => flowOf(id)?.event !== 'mount') ||
+        (child.items ?? []).some((item) => item.link) ||
+        child.children.length > 0),
+  ).length;
+  return own + links + parts + tabbed;
+}
+
+/** A load drawn only sometimes — a tab's list — runs when it is shown, not with the page. */
+function shownWhen(flow) {
+  const when = flow?.steps?.[0]?.meta?.shownWhen;
+  return typeof when === 'string' ? when : undefined;
+}
+
+/** The icon each kind of sidebar entry gets. */
+const NAV_ICON = {
+  menu: 'page',
+  page: 'page',
+  auth: 'lock',
+  layout: 'layout',
+  sidebar: 'layout',
+  section: 'layout',
+  other: 'other',
+};
+
+/**
+ * The app's sidebar, as the server placed every action in it.
+ *
+ * Entries come in the app's order, each screen holding its actions in screen
+ * order and the screens it leads to beneath it — so there is nothing left over
+ * to list elsewhere.
+ */
+function navigationLayout(flows) {
+  const visible = new Map(flows.map((flow) => [flow.id, flow]));
+  /**
+   * What a page fetches as it opens is not something to press: it sits in the
+   * page's own summary, with the code that calls it, not as a row of the list.
+   */
+  const ownLoad = (entry, id) => {
+    const flow = visible.get(id);
+    return (
+      entry.kind !== 'section' && flow && isPageLoad(flow) && flow.steps[0]?.file === entry.file
+    );
+  };
+  const build = (entry, child) => ({
+    key: entry.key,
+    kind: 'nav',
+    navKind: entry.kind,
+    child: child && (entry.kind === 'tab' || entry.kind === 'section'),
+    flat: Boolean(entry.flat),
+    // A popup the action opens, or the buttons on each row: a feature, not a card.
+    openedBy: entry.openedBy,
+    repeated: Boolean(entry.repeated),
+    controls: Boolean(entry.controls),
+    tabContent: Boolean(entry.tabContent),
+    sequence: true,
+    name: entry.label,
+    sub: entry.kind === 'tab' ? '' : (entry.route ?? ''),
+    hint: [entry.route && `Opens ${entry.route}`, entry.file].filter(Boolean).join(' — '),
+    icon: NAV_ICON[entry.kind] ?? 'page',
+    route: entry.route ?? '',
+    file: entry.file,
+    flows: [
+      ...entry.actions.filter((id) => !ownLoad(entry, id)).map((id) => visible.get(id)),
+      // Its popup features, each one row.
+      ...entry.children.map((sub) => feature(sub.key)),
+    ].filter(Boolean),
+    // The screen top to bottom: actions, cards and links, as they are placed.
+    items: entry.items
+      ?.map((item, index) =>
+        item.action
+          ? visible.has(item.action) && !ownLoad(entry, item.action)
+            ? { flow: visible.get(item.action) }
+            : undefined
+          : item.link
+            ? { ...item, key: linkKey(entry.key, index) }
+            : feature(item.section)
+              ? { flow: feature(item.section) }
+              : item,
+      )
+      .filter(Boolean),
+    // A popup's feature is one row — its opener, whose tabs follow it to the
+    // database — not a fold of the popup's buttons.
+    children: entry.children.filter((sub) => !feature(sub.key)).map((sub) => build(sub, true)),
+  });
+  const openers = new Map();
+  const index = (entries) => {
+    for (const entry of entries) {
+      if (entry.openedBy && visible.has(entry.openedBy))
+        openers.set(entry.key, visible.get(entry.openedBy));
+      index(entry.children);
+    }
+  };
+  index(state.navigation.entries);
+  const feature = (key) => (key ? openers.get(key) : undefined);
+  return state.navigation.entries.map((entry) => build(entry, false));
+}
+
+/**
+ * A link on a screen: where it goes, and a way there — clicking it opens the
+ * entry of the screen it leads to, so the list can be followed the way the
+ * app is.
+ */
+function linkItem(link, key) {
+  const target = navEntryForRoute(link.to);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'flow-item nav-link';
+  button.dataset.linkKey = key;
+  button.setAttribute(
+    'aria-selected',
+    String((state.selectedScope?.key ?? state.via?.key) === key),
+  );
+  const name = link.label ?? (link.repeated ? 'Each row' : 'Link');
+  const where = target ? target.label : link.to;
+  button.title = `${link.repeated ? 'Each row of the list links to ' : 'Goes to '}${link.href}`;
+  button.innerHTML = `
+    <span class="kind-icon kind-link" aria-hidden="true">${ICONS.link}</span>
+    <span class="flow-text">
+      <span class="label">${escapeHtml(link.repeated && link.label ? `${name} (each row)` : name)}</span>
+      <span class="meta"><span class="path">→ ${escapeHtml(where)} · ${escapeHtml(link.href)}</span></span>
+    </span>`;
+  // A link is a child like any other: its own six tabs, about what it sets off.
+  button.onclick = () => selectLink(key);
+  return button;
+}
+
+/** `<entry key>#link<index in its items>`: a link's place in the sidebar, for selection and URLs. */
+function linkKey(entryKey, index) {
+  return `${entryKey}#link${index}`;
+}
+
+/** The link a key names, with the entry it sits in. */
+function findLink(key) {
+  const match = /^(.*)#link(\d+)$/.exec(key ?? '');
+  if (!match) return undefined;
+  const entry = findNavEntry(match[1]);
+  const link = entry?.items?.[Number(match[2])]?.link;
+  return link ? { entry, link } : undefined;
+}
+
+/**
+ * Select a link: its tabs are about what following it sets off — the screen
+ * it opens, and what that screen runs by itself as it opens, with the link's
+ * query string in the address.
+ */
+function selectLink(key, { reveal = true } = {}) {
+  const found = findLink(key);
+  if (!found) return;
+  void loadLinkCard(key);
+  const target = navEntryForRoute(found.link.to);
+  const targetEntry = target ? findNavEntry(target.key) : undefined;
+  const own = targetEntry ? linkFlowId(targetEntry) : undefined;
+  if (own) {
+    if (reveal) for (const above of navTrail(found.entry.key)) state.openGroups.add(above);
+    selectFlow(own, {
+      reveal: false,
+      scroll: false,
+      via: { key, link: found.link, entry: found.entry, target: targetEntry },
+    });
+    return;
+  }
+  // A link to a screen that runs nothing by itself: its summary says so.
+  state.selectedScope = {
+    key,
+    entry: found.entry,
+    link: found.link,
+    target: target ? findNavEntry(target.key) : undefined,
+    summary: null,
+    error: null,
+  };
+  state.selectedFlow = null;
+  state.selectedNode = null;
+  document.querySelector('.layout')?.removeAttribute('data-inspecting');
+  if (reveal) for (const above of navTrail(found.entry.key)) state.openGroups.add(above);
+  renderFlowList();
+  renderScopeHeader();
+  renderDetails(null);
+  renderTabs();
+  showTab(state.tab);
+  void loadLinkScope(key, target?.key);
+}
+
+/**
+ * The flow a link sets off: what the screen it opens runs by itself, drawn on
+ * that screen itself — not a dialog's load that only runs once it is opened.
+ */
+function linkFlowId(target) {
+  const loads = target.actions.filter(
+    (id) => state.flows.find((flow) => flow.id === id)?.event === 'mount',
+  );
+  return loads[0];
+}
+
+async function loadLinkScope(key, targetKey) {
+  const empty = { actions: [], endpoints: [], collections: [], files: [], sharedWith: [] };
+  try {
+    const summary = targetKey
+      ? await getJson(`/api/scope?entry=${encodeURIComponent(targetKey)}&loads=1`)
+      : empty;
+    if (state.selectedScope?.key !== key) return;
+    state.selectedScope.summary = summary;
+  } catch (error) {
+    if (state.selectedScope?.key !== key) return;
+    state.selectedScope.error = String(error.message ?? error);
+  }
+  renderScopeHeader();
+  renderTabs();
+  showTab(state.tab);
+}
+
+/** The first entry that opens a route, with the keys of the entries above it. */
+function navEntryForRoute(route) {
+  const key = routeKey(route);
+  let found;
+  const walk = (entries, trail) => {
+    for (const entry of entries) {
+      if (found) return;
+      const here = [...trail, entry.key];
+      if (entry.route && entry.kind !== 'tab' && routeKey(entry.route) === key) {
+        found = { key: entry.key, label: entry.label, trail: here };
+        return;
+      }
+      walk(entry.children, here);
+    }
+  };
+  walk(navEntries(), []);
+  return found;
+}
+
+/** `/medicines/[id]` and `/medicines/[param]` are the same page; `?import=1` is not another one. */
+function routeKey(route) {
+  return route.split('?')[0].replace(/\[[^\]]*\]/g, '[]');
+}
+
+/**
+ * Where a click sends the user, if it does: the link's own address (each page
+ * of a menu written as a list), or `router.push(\`/medicines/${id}\`)` in its
+ * handler — said with the page's name where the sidebar has it.
+ */
+function destination(flow) {
+  const links = flow.steps?.[0]?.meta?.linksTo ?? [];
+  const pushed = (flow.steps ?? [])
+    .flatMap((step) => step.meta?.navigatesTo ?? [])
+    .find((route) => route.startsWith('/'));
+  const routes = links.length ? links : pushed ? [pushed] : [];
+  if (routes.length === 0) return undefined;
+  if (routes.length === 1) {
+    const entry = navEntryForRoute(routes[0]);
+    return entry ? `${entry.label} · ${routes[0]}` : routes[0];
+  }
+  return routes.map((route) => navEntryForRoute(route)?.label ?? route).join(', ');
+}
+
+// ---------------------------------------------------------------------------
+// A page or card, tab by tab: every action's own tab, in screen order
+// ---------------------------------------------------------------------------
+
+/** Per-action data fetched for stacked tabs, kept until the next scan. */
+const flowData = new Map();
+const pendingData = new Map();
+const dataQueue = [];
+let dataRunning = 0;
+
+/** What each tab needs about an action, and where it comes from. */
+const TAB_DATA = {
+  docs: ['doc'],
+  decisions: ['decisions'],
+  perf: ['insight', 'queries'],
+  tests: ['insight'],
+  impact: ['insight'],
+};
+const DATA_URL = {
+  doc: (id) => `/api/action?flow=${encodeURIComponent(id)}`,
+  decisions: (id) => `/api/decisions?flow=${encodeURIComponent(id)}`,
+  insight: (id) => `/api/insight?flow=${encodeURIComponent(id)}`,
+  queries: (id) => `/api/queries?flow=${encodeURIComponent(id)}`,
+  // `shared|a,b,c`: the helpers a page's actions run the same way as others.
+  shared: (key) => `/api/decisions/shared?flows=${encodeURIComponent(key.slice('shared|'.length))}`,
+};
+
+/** Fetch one piece of an action's data, a few at a time, re-drawing as each arrives. */
+function wantData(id, kind) {
+  const have = flowData.get(id);
+  if (have && kind in have) return;
+  const token = `${id}|${kind}`;
+  if (pendingData.has(token)) return;
+  pendingData.set(token, true);
+  dataQueue.push({ id, kind, token });
+  pumpData();
+}
+
+function pumpData() {
+  while (dataRunning < 4 && dataQueue.length > 0) {
+    const { id, kind, token } = dataQueue.shift();
+    dataRunning++;
+    getJson(DATA_URL[kind](id))
+      .catch((error) => ({ error: String(error.message ?? error) }))
+      .then((value) => {
+        flowData.set(id, { ...(flowData.get(id) ?? {}), [kind]: value });
+        pendingData.delete(token);
+        dataRunning--;
+        pumpData();
+        scheduleStackRender();
+      });
+  }
+}
+
+let stackTimer = null;
+function scheduleStackRender() {
+  if (stackTimer) return;
+  stackTimer = setTimeout(() => {
+    stackTimer = null;
+    if (state.selectedScope?.page) renderPageStory();
+    else if (state.selectedScope && !state.selectedScope.link) {
+      renderTabs();
+      if (state.tab !== 'unused') renderStacked(state.tab);
+    }
+  }, 120);
+}
+
+/** The actions of a screen in screen order, each with the card it is in. */
+function stackedActions(entry) {
+  const list = [];
+  const walk = (node, card) => {
+    const placed = new Set();
+    for (const item of node.items ?? node.actions.map((action) => ({ action }))) {
+      if (item.action) list.push({ id: item.action, card });
+      else if (item.section) {
+        const child = node.children.find((candidate) => candidate.key === item.section);
+        if (!child) continue;
+        placed.add(child.key);
+        walk(child, child);
+      }
+    }
+    for (const child of node.children) {
+      if (placed.has(child.key) || (child.kind !== 'section' && child.kind !== 'tab')) continue;
+      walk(child, child);
+    }
+  };
+  walk(entry, null);
+  const seen = new Set();
+  return list.filter((entry) => !seen.has(entry.id) && seen.add(entry.id));
+}
+
+const SWAPPED = [
+  'selectedFlow',
+  'selectedScope',
+  'via',
+  'insight',
+  'insightLoading',
+  'actionDoc',
+  'actionDocFor',
+  'actionDocLoading',
+  'decisions',
+  'decisionsFor',
+  'decisionsLoading',
+  'queries',
+  'queriesFor',
+  'queriesLoading',
+  'docView',
+];
+
+/**
+ * One action's tab, drawn by the same code that draws it for that action
+ * alone, and lifted out of the panel with its listeners still attached.
+ */
+function drawForFlow(tab, flow) {
+  const data = flowData.get(flow.id) ?? {};
+  const saved = Object.fromEntries(SWAPPED.map((key) => [key, state[key]]));
+  Object.assign(state, {
+    selectedFlow: flow,
+    selectedScope: null,
+    via: null,
+    insight: data.insight ?? null,
+    insightLoading: !data.insight,
+    actionDoc: data.doc ?? null,
+    actionDocFor: flow.id,
+    actionDocLoading: !data.doc,
+    decisions: data.decisions ?? null,
+    decisionsFor: flow.id,
+    decisionsLoading: !data.decisions,
+    queries: data.queries ?? null,
+    queriesFor: flow.id,
+    queriesLoading: !data.queries,
+    docView: 'list',
+  });
+  const panel = el.panels[tab];
+  try {
+    if (tab === 'docs') renderDocs();
+    else if (tab === 'decisions') renderDecisions();
+    else if (tab === 'perf') renderPerf();
+    else if (tab === 'tests') renderTests();
+    else if (tab === 'impact') {
+      // Only what is about this action: the project-wide parts are said once, above.
+      panel.innerHTML = actionIssuesHtml(1) + beforeYouChangeHtml();
+      bindIssueJumps(panel);
+      bindFlowJumps(panel);
+      bindStepSelection(panel);
+      bindTableFolds(panel);
+    }
+    return [...panel.childNodes];
+  } finally {
+    Object.assign(state, saved);
+  }
+}
+
+const TAB_INTRO = {
+  docs: 'how it works, end to end',
+  decisions: 'every way it can go',
+  perf: 'where its time goes',
+  tests: 'what would catch it breaking',
+  impact: 'its bugs, and what a change to it reaches',
+};
+
+function renderStacked(tab) {
+  const panel = el.panels[tab];
+  const scope = state.selectedScope;
+  const own = stackedActions(scope.entry);
+  const data = cardOf(scope);
+  // A card showing data runs the load that brings it: that comes first.
+  const feeding = (data?.sources ?? [])
+    .flatMap((source) => source.flows)
+    .filter((id, index, all) => all.indexOf(id) === index && !own.some((entry) => entry.id === id))
+    // The page's own load is the same for every card on it: its tree is on the page.
+    .filter(
+      (id) =>
+        tab !== 'decisions' ||
+        !sharedLoadPage(
+          scope,
+          state.flows.find((flow) => flow.id === id),
+        ),
+    )
+    .map((id) => ({ id, card: DATA_SOURCE }));
+  const actions = [...feeding, ...own]
+    .map((entry) => ({ ...entry, flow: state.flows.find((flow) => flow.id === entry.id) }))
+    .filter((entry) => entry.flow);
+  for (const { id } of actions) for (const kind of TAB_DATA[tab] ?? []) wantData(id, kind);
+
+  const scroller = panel.closest('.canvas');
+  const scrollTop = scroller?.scrollTop ?? 0;
+  const frame = document.createElement('div');
+  frame.className = 'stack';
+  const ownCount = actions.length - feeding.length;
+  frame.innerHTML =
+    scope.entry.kind === 'section' && (data || scope.card === undefined)
+      ? panelIntro(
+          tab === 'decisions' && feeding.length === 0 && ownCount === 0
+            ? `${scope.entry.label} shows data: what decides how it is drawn.`
+            : `${scope.entry.label} shows data: first where each value comes from and how it is drawn, then ${TAB_INTRO[tab]} for ${
+                feeding.length ? 'the load that brings it' : 'what loads it'
+              }${ownCount ? ` and each of its ${plural(ownCount, 'action')}` : ''}.`,
+        ) + cardBlock(tab, scope)
+      : panelIntro(
+          actions.length
+            ? `${scope.entry.label}: each of its ${plural(actions.length, 'action')} in the order the screen has them, with ${TAB_INTRO[tab]}.`
+            : `Nothing on ${scope.entry.label} does anything.`,
+        );
+  // A card's own checks, drawn here in the panel so the chart can measure its boxes.
+  const chart = tab === 'decisions' && data ? frame.querySelector('.card-chart') : null;
+  if (chart) {
+    const tree = cardDecisionTree(data, scope);
+    flowData.set(tree.flowId, { decisions: tree });
+    chart.append(
+      ...drawForFlow('decisions', { id: tree.flowId, title: tree.title, endpoints: [], steps: [] }),
+    );
+  }
+  let card;
+  for (const { flow, card: inCard } of actions) {
+    if (inCard !== card) {
+      card = inCard;
+      if (card) {
+        const heading = document.createElement('h3');
+        heading.className = 'stack-card';
+        heading.textContent =
+          card === DATA_SOURCE
+            ? 'Where its data comes from'
+            : `${card.label} · ${scopeKindName(card)}`;
+        frame.appendChild(heading);
+      }
+    }
+    const item = document.createElement('section');
+    item.className = 'stack-item';
+    item.dataset.flowId = flow.id;
+    const [endpoint] = flow.endpoints;
+    item.innerHTML = `<header class="stack-head">
+        <span class="kind-icon kind-${actionKind(flow)}" aria-hidden="true">${ICONS[actionKind(flow)]}</span>
+        <span class="stack-title">${escapeHtml(flowTitle(flow))}</span>
+        ${endpoint ? `<code class="stack-endpoint">${escapeHtml(endpoint)}</code>` : destination(flow) ? `<span class="muted">→ ${escapeHtml(destination(flow))}</span>` : '<span class="muted">stays in the browser</span>'}
+      </header>`;
+    const body = document.createElement('div');
+    body.className = 'stack-body';
+    body.append(...drawForFlow(tab, flow));
+    item.appendChild(body);
+    frame.appendChild(item);
+  }
+  panel.replaceChildren(frame);
+  bindTableFolds(panel);
+  bindFlowJumps(panel);
+  if (scroller) scroller.scrollTop = scrollTop;
+}
+
+/**
+ * The helpers this page's actions run exactly as other actions do —
+ * `requireClinic`, the API client's retry — each drawn once on the page, a
+ * fold per helper; the actions name them in one step instead of drawing them
+ * again. `null` while there is nothing to say.
+ */
+function sharedPartsBlock(ids) {
+  if (!ids.length) return null;
+  const key = `shared|${[...ids].sort().join(',')}`;
+  wantData(key, 'shared');
+  const parts = flowData.get(key)?.shared;
+  if (!parts || parts.error || parts.length === 0) return null;
+  const block = document.createElement('section');
+  block.className = 'story-shared';
+  block.innerHTML = `<h3 class="story-heading">The same in other actions</h3>
+    <p class="muted">The actions on this page run these exactly as other actions in the app do. Each one’s own chart names it in one step, with the ways it can finish there; every step inside is drawn here, once. Open one to see it.</p>`;
+  for (const part of parts) {
+    const id = `shared:${part.id}`;
+    flowData.set(id, { ...(flowData.get(id) ?? {}), decisions: part });
+    const fold = document.createElement('details');
+    fold.className = 'shared-part';
+    fold.id = `shared-part-${part.id}`;
+    fold.open = state.openShared.has(part.id);
+    fold.innerHTML = `<summary>
+        <span class="kind-icon kind-shared" aria-hidden="true">⧉</span>
+        <span class="shared-part-title">${escapeHtml(part.title)}</span>
+        <span class="muted">${escapeHtml(
+          `${part.here === 1 ? '1 action here' : `${part.here} actions here`} · ${part.actions} in the app · ${plural(part.counts.decisions, 'decision')}`,
+        )}</span>
+      </summary>`;
+    const body = document.createElement('div');
+    body.className = 'stack-body';
+    fold.appendChild(body);
+    // Drawn in place, once open and on the page: the chart measures its boxes as it lays them out.
+    const draw = () => {
+      if (body.childElementCount > 0 || !fold.isConnected) return;
+      const panel = el.panels.decisions;
+      el.panels.decisions = body;
+      try {
+        drawForFlow('decisions', { id, title: part.title, endpoints: [], steps: [] });
+      } finally {
+        el.panels.decisions = panel;
+      }
+    };
+    fold.addEventListener('toggle', () => {
+      if (fold.open) state.openShared.add(part.id);
+      else state.openShared.delete(part.id);
+      if (fold.open) draw();
+    });
+    block.appendChild(fold);
+  }
+  return block;
+}
+
+/** The heading the loads that bring a card's data are stacked under. */
+const DATA_SOURCE = { key: '#data', label: 'Where its data comes from' };
+
+/** A card's data, once read: `undefined` while loading or for what is not a card. */
+function cardOf(scope) {
+  const card = scope?.card;
+  return card && !card.error ? (card.data ?? undefined) : undefined;
+}
+
+/** The part of a card's tab about its data, above the actions stacked under it. */
+function cardBlock(tab, scope) {
+  const card = scope.card;
+  if (card === undefined) return '<p class="muted">Reading what this card shows…</p>';
+  if (card.error) return `<p class="error">Could not read this card: ${escapeHtml(card.error)}</p>`;
+  const data = card.data;
+  if (!data) return '';
+  const render = {
+    docs: cardDocsHtml,
+    decisions: cardDecisionsHtml,
+    perf: cardPerfHtml,
+    tests: cardTestsHtml,
+    impact: cardImpactHtml,
+  }[tab];
+  return render ? `<section class="card-data">${render(data, scope, card)}</section>` : '';
+}
+
+/** `GET /dashboard`, `GET /dashboard and GET /medicines`. */
+function cardEndpoints(data) {
+  const endpoints = [...new Set(data.sources.flatMap((source) => source.endpoints))];
+  return endpoints.length ? endpoints.map((endpoint) => `\`${endpoint}\``).join(' and ') : '';
+}
+
+/** `lowStockCount`, `recentMovements[].reason`: a field as the card reads it. */
+function fieldList(fields, max = 6) {
+  const shown = fields.slice(0, max).map((field) => `\`${field}\``);
+  return shown.join(', ') + (fields.length > max ? ` and ${fields.length - max} more` : '');
+}
+
+/**
+ * A load from the request to the database, a line per step. The request is
+ * written as the URL the browser asks for, `/api/dashboard`, when the file
+ * that answers it says so.
+ */
+function loadPathLines(flow) {
+  const lines = [];
+  flow.steps.forEach((step, index) => {
+    if (step.layer === 'ui' || step.kind === 'collection' || step.kind === 'hook') return;
+    const verb =
+      step.kind === 'api-call'
+        ? 'The browser sends'
+        : step.kind === 'route'
+          ? 'The server receives'
+          : step.layer === 'data'
+            ? 'The database runs'
+            : 'The server runs';
+    lines.push({
+      text: `${verb} \`${requestLabel(flow, index)}\``,
+      at: { file: step.file, line: step.line },
+    });
+  });
+  return lines;
+}
+
+/** `GET /api/dashboard`: a request or route step as the URL it answers to. */
+function requestLabel(flow, index) {
+  const step = flow.steps[index];
+  if (step.kind !== 'api-call' && step.kind !== 'route') return step.label;
+  const route =
+    step.kind === 'route'
+      ? step
+      : flow.steps
+          .slice(index + 1)
+          .find((candidate) => candidate.kind === 'route' && candidate.label === step.label);
+  const url = route && fileRouteUrl(route.file);
+  return url ? `${step.label.split(' ')[0]} ${url}` : step.label;
+}
+
+/**
+ * The page a card sits on, when the load that brings the card's data is the
+ * page's own: one request for every card on it, told once on the page.
+ */
+function sharedLoadPage(scope, flow) {
+  if (!flow || !isPageLoad(flow)) return undefined;
+  const page = navTrail(scope.entry.key)
+    .slice(0, -1)
+    .reverse()
+    .map((key) => findNavEntry(key))
+    .find((entry) => entry && entry.kind !== 'section' && entry.kind !== 'tab');
+  return page?.file && page.file === flow.steps[0]?.file && page.actions.includes(flow.id)
+    ? page
+    : undefined;
+}
+
+/** Where the data comes from, step by step: the hook, the request, the server, the database. */
+function cardPathHtml(data, scope) {
+  const parts = [];
+  for (const source of data.sources) {
+    const loads = source.flows
+      .map((id) => state.flows.find((flow) => flow.id === id))
+      .filter(Boolean);
+    const flow = loads[0];
+    const page = scope && sharedLoadPage(scope, flow);
+    const lines = [
+      {
+        text: `\`${source.hook}()\` is called${loads.length ? ` — ${loads.map((load) => `**${flowTitle(load)}**`).join(', ')} runs it as the screen opens` : ''}`,
+        at: { file: source.file, line: source.line },
+      },
+      // Which rows: `{ expiring: true, sortBy: "expiryDate", pageSize: 5 }`.
+      ...(source.asks
+        ? [{ text: `It asks for \`${source.asks}\` — which rows the card shows`, at: { file: source.file, line: source.line } }]
+        : []),
+    ];
+    if (page) {
+      const call = flow.steps.findIndex((step) => step.kind === 'api-call');
+      lines.push({
+        text: `It is the ${page.label} page’s own request${call >= 0 ? ` (\`${requestLabel(flow, call)}\`)` : ''}, made once for every card on the page — each step from the browser to the database is on the ${page.label} page`,
+      });
+    } else lines.push(...(flow ? loadPathLines(flow) : []));
+    if (!flow) {
+      lines.push({
+        text: source.endpoints.length
+          ? `It calls ${source.endpoints.map((endpoint) => `\`${endpoint}\``).join(', ')}`
+          : 'It keeps its data in the browser: Flowslens found no request behind it',
+      });
+    }
+    lines.push({
+      text: source.fields.length
+        ? `The card reads ${fieldList(source.fields, 12)} of what comes back`
+        : 'The card reads its state, not a field of loaded data',
+    });
+    parts.push(`<ol class="adoc-lines card-path">${lines.map(renderDocLine).join('')}</ol>`);
+    if (page)
+      parts.push(
+        `<p><button type="button" class="scope-lead" data-open-entry="${escapeHtml(page.key)}">See it on ${escapeHtml(page.label)}</button></p>`,
+      );
+  }
+  return parts.join('');
+}
+
+function cardDocsHtml(data, scope) {
+  const endpoints = cardEndpoints(data);
+  const fields = [...new Set(data.sources.flatMap((source) => source.fields))];
+  const hooks = data.sources.map((source) => `\`${source.hook}()\``).join(' and ');
+  const parts = [
+    answer(
+      'neutral',
+      data.sources.length
+        ? `${scope.entry.label} shows data${endpoints ? ` from ${plainText(endpoints)}` : ''}`
+        : `${scope.entry.label} shows what it is given`,
+      data.sources.length
+        ? `It reads ${plural(fields.length, 'field')} of what ${hooks} loads` +
+            (data.calculations.length
+              ? `, works ${plural(data.calculations.length, 'value')} out from them in the browser,`
+              : '') +
+            ` and draws ${plural(data.values.length, 'value')}.`
+        : 'Flowslens could not follow its values back to a request.',
+    ),
+  ];
+  if (data.sources.length) {
+    parts.push(
+      heading(
+        'How the data gets here',
+        'From the call in the code to the database, in the order it runs.',
+      ),
+    );
+    parts.push(cardPathHtml(data, scope));
+  }
+  parts.push(madeTableHtml(data));
+  if (data.calculations.length) {
+    parts.push(
+      heading(
+        'Worked out in the browser',
+        'Values the card computes from the fields before drawing them.',
+      ),
+    );
+    parts.push(
+      renderDocTable({
+        columns: ['Value', 'Worked out as', 'From'],
+        rows: data.calculations.map((calc) => ({
+          cells: [`\`${calc.name}\``, `\`${calc.code}\``, fieldList(calc.fields)],
+          at: { file: calc.file, line: calc.line },
+        })),
+      }),
+    );
+  }
+  parts.push(
+    valuesTableHtml(
+      data,
+      'Each value the card draws, the code that draws it, and the fields behind it.',
+    ),
+  );
+  const links = (scope.entry.items ?? [])
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.link);
+  if (links.length || scopeActionIds(scope.entry).length) {
+    parts.push(
+      heading(
+        'What you can do on it',
+        'Click one to open its own tabs: what it shows, and what clicking it does.',
+      ),
+    );
+    parts.push(
+      `<ul class="scope-list">${links
+        .map(({ item, index }) => {
+          const target = navEntryForRoute(item.link.to);
+          return `<li class="scope-link" data-open-link="${escapeHtml(linkKey(scope.entry.key, index))}">
+            <span class="kind-icon kind-link" aria-hidden="true">${ICONS.link}</span>
+            <span class="scope-row-text">
+              <span class="scope-row-title">${escapeHtml(linkName(item.link))}</span>
+              <span class="scope-row-meta">→ ${escapeHtml(target?.label ?? item.link.to)} · <code>${escapeHtml(item.link.href)}</code></span>
+            </span>
+          </li>`;
+        })
+        .join('')}${scopeActionIds(scope.entry)
+        .map((id) => state.flows.find((flow) => flow.id === id))
+        .filter(Boolean)
+        .map(
+          (flow) => `<li class="scope-row" data-open-flow="${escapeHtml(flow.id)}">
+            <span class="kind-icon kind-${actionKind(flow)}" aria-hidden="true">${ICONS[actionKind(flow)]}</span>
+            <span class="scope-row-text"><span class="scope-row-title">${escapeHtml(flowTitle(flow))}</span>
+            <span class="scope-row-meta">${flow.endpoints[0] ? `<code>${escapeHtml(flow.endpoints[0])}</code>` : destination(flow) ? `→ <code>${escapeHtml(destination(flow))}</code>` : 'stays in the browser'}</span></span>
+          </li>`,
+        )
+        .join('')}</ul>`,
+    );
+  }
+  return parts.join('');
+}
+
+/** Where the server makes each field a card or link reads. */
+function madeTableHtml(data) {
+  const rows = data.fields.flatMap((field) =>
+    field.made.map((entry, index) => ({
+      cells: [
+        index === 0 ? `\`${field.field}\`` : '',
+        entry.how === 'returned' ? 'sent back as' : 'worked out by',
+        `\`${entry.code}\``,
+      ],
+      at: { file: entry.file, line: entry.line },
+    })),
+  );
+  if (!rows.length) return '';
+  return (
+    heading(
+      'Where the server makes each field',
+      'What the response carries, and the code that computes it.',
+    ) + renderDocTable({ columns: ['Field', '', 'Code'], rows })
+  );
+}
+
+/** Each value drawn, how, and from which fields. */
+function valuesTableHtml(data, note) {
+  if (!data.values.length) return '';
+  return (
+    heading('What it shows', note) +
+    renderDocTable({
+      columns: ['On the screen', 'Drawn as', 'Made from'],
+      rows: data.values.map((value) => ({
+        cells: [
+          value.label === 'text' ? '' : value.label,
+          `\`${value.code}\``,
+          [
+            fieldList(value.fields),
+            value.uses.length ? `via ${value.uses.map((name) => `\`${name}\``).join(', ')}` : '',
+            value.format.length
+              ? `shown with ${value.format.map((name) => `\`${name}\``).join(', ')}`
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' · '),
+        ],
+        at: { file: value.file, line: value.line },
+      })),
+    })
+  );
+}
+
+/**
+ * A link inside a card that shows a number — "3,391 Low" — is read for that
+ * number first: where it comes from and how it is drawn. What clicking it
+ * sets off follows.
+ */
+async function loadLinkCard(key) {
+  const match = /^(.*)#link(\d+)$/.exec(key ?? '');
+  if (!match || findNavEntry(match[1])?.kind !== 'section') {
+    state.linkCard = null;
+    return;
+  }
+  if (state.linkCard?.key === key && state.linkCard.card !== undefined) return;
+  state.linkCard = { key, card: undefined };
+  try {
+    const card = await getJson(
+      `/api/card?entry=${encodeURIComponent(match[1])}&link=${encodeURIComponent(match[2])}`,
+    );
+    if (state.linkCard?.key !== key) return;
+    state.linkCard.card = card;
+  } catch (error) {
+    if (state.linkCard?.key !== key) return;
+    state.linkCard.card = { error: String(error.message ?? error) };
+  }
+  if ((state.via?.key ?? state.selectedScope?.key) !== key) return;
+  if (state.selectedScope?.link) renderScopeHeader();
+  else if (state.selectedFlow) renderFlowHeader(state.selectedFlow);
+  renderTabs();
+  showTab(state.tab);
+}
+
+/** The data a link shows, once read. */
+function linkData(key) {
+  const entry = state.linkCard;
+  if (!entry || entry.key !== key || !entry.card || entry.card.error) return undefined;
+  const data = entry.card.data;
+  return data && data.values.length ? data : undefined;
+}
+
+/** What a link in a card shows, above what clicking it does. */
+function linkShowsHtml(key, link) {
+  if (!key || state.linkCard?.key !== key) return '';
+  if (state.linkCard.card === undefined)
+    return '<p class="muted">Reading what this link shows…</p>';
+  const data = linkData(key);
+  if (!data) return '';
+  const fields = [...new Set(data.values.flatMap((value) => value.fields))];
+  const endpoints = cardEndpoints(data);
+  const [first] = data.values;
+  return `<section class="card-data">${answer(
+    'neutral',
+    `“${linkName(link)}” shows ${fields.length ? plainText(fieldList(fields)) : 'a value'}${endpoints ? ` from ${plainText(endpoints)}` : ''}`,
+    `It is drawn as \`${first.code}\`` +
+      (first.format.length
+        ? `, formatted by ${first.format.map((name) => `\`${name}\``).join(', ')}`
+        : '') +
+      '. Below: how that data gets here, where the server makes it, then what clicking the link does.',
+  )}${heading('How the data gets here', 'From the call in the code to the database, in the order it runs.')}${cardPathHtml(data)}${madeTableHtml(data)}${valuesTableHtml(data, 'The value the link draws, and the fields behind it.')}${heading('What clicking it does')}</section>`;
+}
+
+/**
+ * A card's own checks as a decision tree, the shape the Decisions chart
+ * draws: first what the screen around it checks before drawing it at all,
+ * then each check in the card, in the order the code has them. A chain —
+ * `pct >= 70 ? "Good" : pct >= 40 ? "Fair" : "Low"` — is one decision inside
+ * the other, as it runs.
+ */
+function cardDecisionTree(data, scope) {
+  const label = scope.entry.label;
+  const chain = (condition, branchFor) => {
+    const tests = condition.code.split(' · ');
+    const build = (index) => {
+      const test = tests[index];
+      const at = { file: condition.file, line: condition.line };
+      // Words where core found a safe reading; the code is kept for "Show code".
+      const outcome = (n) => ({
+        code: condition.outcomes[n] ?? '?',
+        words: condition.said?.[n] ?? condition.outcomes[n] ?? '?',
+      });
+      const yes = branchFor(outcome(index), at);
+      const rest = condition.outcomes.slice(tests.length);
+      const no =
+        index + 1 < tests.length
+          ? { nodes: [build(index + 1)], ends: false }
+          : branchFor(
+              rest.length === 1
+                ? outcome(tests.length)
+                : { code: rest.join(' / ') || 'nothing', words: rest.join(' / ') || 'nothing' },
+              at,
+            );
+      // A "no" that is the next test of the chain ends when every way of that test does.
+      const next = no.nodes[0];
+      const noEnds =
+        no.ends || (next?.type === 'decision' && next.branches.every((branch) => branch.ends));
+      const node = {
+        type: 'decision',
+        question: `${test}?`,
+        label: condition.asked?.[index] ?? `${test}?`,
+        code: test,
+        side: 'browser',
+        at,
+        branches: [
+          { label: 'yes', nodes: yes.nodes, ends: yes.ends },
+          { label: 'no', nodes: no.nodes, ends: noEnds },
+        ],
+      };
+      return node;
+    };
+    return build(0);
+  };
+  const nodes = [
+    {
+      type: 'step',
+      kind: 'trigger',
+      label: `The screen draws ${label}`,
+      text: '',
+      side: 'browser',
+      at: { file: data.file, line: data.line },
+    },
+  ];
+  for (const condition of data.conditions.filter((entry) => entry.where === 'around')) {
+    nodes.push(
+      chain(condition, (outcome, at) =>
+        outcome.code === 'the card'
+          ? { nodes: [], ends: false }
+          : {
+              nodes: [
+                {
+                  type: 'end',
+                  outcome: 'stop',
+                  label:
+                    outcome.code === 'nothing'
+                      ? `Nothing is drawn — ${label} is not shown`
+                      : `Shows ${outcome.words} instead — ${label} is not drawn yet`,
+                  text: outcome.code,
+                  side: 'browser',
+                  at,
+                },
+              ],
+              ends: true,
+            },
+      ),
+    );
+  }
+  for (const condition of data.conditions.filter((entry) => entry.where === 'card')) {
+    nodes.push(
+      chain(condition, (outcome, at) => ({
+        nodes: [
+          {
+            type: 'step',
+            kind: 'compute',
+            label:
+              outcome.code === 'nothing'
+                ? 'Draws nothing here'
+                : outcome.words === outcome.code && !/^[“"]/.test(outcome.code)
+                  ? 'Works out the value'
+                  : `The value is ${outcome.words}`,
+            text: outcome.code,
+            side: 'browser',
+            at,
+          },
+        ],
+        ends: false,
+      })),
+    );
+  }
+  nodes.push({
+    type: 'end',
+    outcome: 'stop',
+    label: `${label} is drawn`,
+    text: 'drawn',
+    side: 'browser',
+  });
+  const decisions = cardChecks(data);
+  return {
+    flowId: `card:${scope.key}`,
+    title: label,
+    nodes,
+    counts: { decisions, outcomes: 0, queries: 0, requests: 0 },
+    limits: [
+      'Read from the card’s code and the screen around it: each `?:`, `&&` and `||` that decides what is drawn.',
+    ],
+  };
+}
+
+/** A card's questions as its chart draws them: `pct >= 70 · pct >= 40` is two. */
+function cardChecks(data) {
+  return (data?.conditions ?? []).reduce(
+    (sum, condition) => sum + condition.code.split(' · ').length,
+    0,
+  );
+}
+
+function cardDecisionsHtml(data, scope) {
+  const around = data.conditions.filter((condition) => condition.where === 'around');
+  const parts = [
+    answer(
+      data.conditions.length ? 'neutral' : 'ok',
+      data.conditions.length
+        ? `${plural(cardChecks(data), 'check')} ${cardChecks(data) === 1 ? 'decides' : 'decide'} what ${scope.entry.label} draws`
+        : `${scope.entry.label} always draws the same way`,
+      around.length
+        ? 'Some are on the screen around it: until they hold, the card is not drawn at all.'
+        : '',
+    ),
+  ];
+  // The checks themselves are drawn as a chart below this, once the panel is in place.
+  if (data.conditions.length) parts.push('<div class="card-chart"></div>');
+  const pages = new Map();
+  for (const source of data.sources) {
+    for (const id of source.flows) {
+      const page = sharedLoadPage(
+        scope,
+        state.flows.find((flow) => flow.id === id),
+      );
+      if (page) pages.set(page.key, page);
+    }
+  }
+  for (const page of pages.values()) {
+    parts.push(
+      `<p class="muted">Every way the ${escapeHtml(page.label)} page’s load can go — the checks, the queries and the errors — is the same for every card on it, so it is drawn once, on the page. <button type="button" class="scope-lead" data-open-entry="${escapeHtml(page.key)}">See it on ${escapeHtml(page.label)}</button></p>`,
+    );
+  }
+  return parts.join('');
+}
+
+function cardPerfHtml(data, scope) {
+  const endpoints = cardEndpoints(data);
+  return answer(
+    'neutral',
+    endpoints
+      ? `${scope.entry.label} appears once ${plainText(endpoints)} answers`
+      : `${scope.entry.label} does no work of its own`,
+    (data.calculations.length
+      ? `What it works out in the browser — ${data.calculations.map((calc) => `\`${calc.name}\``).join(', ')} — is arithmetic on values already loaded and costs nothing measurable. `
+      : '') + (endpoints ? 'The wait is the request: its timing is below.' : ''),
+  );
+}
+
+function cardTestsHtml(data, scope) {
+  const fields = [...new Set(data.fields.map((field) => field.field))];
+  return answer(
+    'neutral',
+    `What would catch ${scope.entry.label} showing a wrong number`,
+    (fields.length
+      ? `A test of the load below that checks ${fieldList(fields, 10)} in the response. `
+      : '') +
+      (data.calculations.length
+        ? `A test of the card that checks ${data.calculations.map((calc) => `\`${calc.name}\``).join(', ')} for known inputs — including an empty inventory.`
+        : ''),
+  );
+}
+
+function cardImpactHtml(data, scope, card) {
+  const parts = [];
+  const fields = data.fields;
+  parts.push(
+    answer(
+      fields.length ? 'warn' : 'ok',
+      fields.length
+        ? `${scope.entry.label} depends on ${plural(fields.length, 'field')} of ${plainText(cardEndpoints(data)) || 'its data'}`
+        : `${scope.entry.label} depends on nothing the server sends`,
+      fields.length
+        ? 'Rename one, drop it, or change how the server counts it, and this card shows the wrong thing — without any error.'
+        : '',
+    ),
+  );
+  if (fields.length) {
+    const shared = card.sharedWith ?? [];
+    parts.push(
+      renderDocTable({
+        columns: ['Field', 'Made at', 'Also read by'],
+        rows: fields.map((field) => {
+          const others = shared.filter((other) =>
+            other.fields.some((name) => name.split(/[.[]/)[0] === field.field),
+          );
+          return {
+            cells: [
+              `\`${field.field}\``,
+              field.made[0] ? `\`${field.made[0].code}\`` : 'not found on the server',
+              others.length
+                ? {
+                    html: others
+                      .map(
+                        (other) =>
+                          `<button type="button" class="pill" data-open-entry="${escapeHtml(other.key)}">${escapeHtml(other.label)}</button>`,
+                      )
+                      .join(' '),
+                  }
+                : '',
+            ],
+            at: field.made[0] ? { file: field.made[0].file, line: field.made[0].line } : undefined,
+          };
+        }),
+      }),
+    );
+  }
+  return parts.join('');
+}
+
+// ---------------------------------------------------------------------------
+// A page, explained: the whole screen in plain words
+// ---------------------------------------------------------------------------
+
+/** Pages are explained in words; what is on them — actions, cards, links — has the tabs. */
+function isPageEntry(entry) {
+  return ['menu', 'page', 'auth', 'layout', 'sidebar', 'other'].includes(entry.kind);
+}
+
+/** Developer words out: `code` and **bold** marks, as plain text. */
+function plainText(text) {
+  return String(text ?? '')
+    .replace(/\*\*/g, '')
+    .replace(/`/g, '')
+    .trim();
+}
+
+const STATUS_WORDS = {
+  400: 'the request is not valid',
+  401: 'you are not signed in',
+  403: 'you are not allowed to do this',
+  404: 'it cannot be found',
+  409: 'it already exists or clashes with something',
+  413: 'what you sent is too large',
+  422: 'what you entered is not valid',
+  429: 'you tried too many times in a row',
+  500: 'the server runs into a problem',
+  502: 'a service it depends on is down',
+  503: 'the server is not available',
+};
+
+const EFFECT_WORDS = {
+  read: 'looks up',
+  create: 'adds new',
+  update: 'updates',
+  delete: 'removes',
+  write: 'saves',
+};
+
+/**
+ * The project's own words, to split a glued collection name — `teamsettings`
+ * is "team settings" — when no model name says it better.
+ *
+ * Read from the scanned code: every identifier, label and path that is
+ * written in parts (`teamId`, `getSettings`, `team-settings/page.tsx`) gives
+ * its parts as words, and a run of capitals (`sendOTP`, `SMSService`) gives an
+ * acronym. A name written in one piece (`teamsettings`) gives nothing, so it
+ * can still be split by the words around it. Nothing here knows any app.
+ */
+let vocabulary = null;
+
+function projectVocabulary() {
+  if (vocabulary && vocabulary.graph === state.graph && vocabulary.flows === state.flows) {
+    return vocabulary;
+  }
+  const words = new Set();
+  /**
+   * The names being split are not words to split them with: `teamsettings` in
+   * `teamsettings.find` is set apart by a dot, but it is the glued name
+   * itself. Inside an identifier — `getSettings` — it is a word.
+   */
+  const names = new Set();
+  for (const node of state.graph?.nodes ?? []) {
+    const collection = node.kind === 'collection' ? node.label : node.meta?.collection;
+    if (typeof collection === 'string') names.add(collection.toLowerCase());
+  }
+  // Generic to code, not to any domain.
+  const acronyms = new Set(['id', 'url', 'api', 'ui', 'db', 'sql', 'json', 'html']);
+  const add = (text) => {
+    for (const token of String(text ?? '').split(/[^A-Za-z0-9]+/)) {
+      const parts = token
+        .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+        .split(' ')
+        .filter(Boolean);
+      for (const part of parts) {
+        const caps = /^([A-Z]{2,6})s?$/.exec(part);
+        if (caps && parts.length > 1) acronyms.add(caps[1].toLowerCase());
+      }
+      if (parts.length < 2) continue;
+      for (const part of parts) {
+        const word = part.toLowerCase();
+        if (/^[a-z]{2,}$/.test(word)) words.add(word);
+      }
+    }
+    // A path, a label or an id is written in parts too: `team-settings/page`.
+    const pieces = String(text ?? '')
+      .split(/[^A-Za-z]+/)
+      .filter(Boolean);
+    if (pieces.length > 1) {
+      for (const piece of pieces) {
+        if (/^[a-z]{2,}$/.test(piece) && !names.has(piece)) words.add(piece);
+      }
+    }
+  };
+  for (const node of state.graph?.nodes ?? []) {
+    add(node.label);
+    add(node.source?.file);
+    for (const value of Object.values(node.meta ?? {})) if (typeof value === 'string') add(value);
+  }
+  for (const flow of state.flows ?? []) {
+    add(flow.title);
+    add(flow.component);
+  }
+  vocabulary = { graph: state.graph, flows: state.flows, words, acronyms };
+  return vocabulary;
+}
+
+/** A word of the project, as written or as the plural of one. */
+function knownWord(piece, { words, acronyms }) {
+  if (words.has(piece) || acronyms.has(piece)) return true;
+  // Written only as a plural somewhere: `getClinics` teaches `clinic`.
+  if (words.has(`${piece}s`) || words.has(`${piece}es`)) return true;
+  if (piece.endsWith('y') && words.has(`${piece.slice(0, -1)}ies`)) return true;
+  if (piece.endsWith('ies') && words.has(`${piece.slice(0, -3)}y`)) return true;
+  if (piece.endsWith('es') && words.has(piece.slice(0, -2))) return true;
+  return piece.endsWith('s') && (words.has(piece.slice(0, -1)) || acronyms.has(piece.slice(0, -1)));
+}
+
+/** `smsendpointmaps` -> `SMS endpoint maps`; `teamSettings` -> `team settings`. */
+function dataName(collection) {
+  const vocab = projectVocabulary();
+  const words = collection
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .toLowerCase()
+    .split(' ')
+    .flatMap((word) => splitGlued(word, vocab));
+  return words
+    .map((word) =>
+      vocab.acronyms.has(word)
+        ? word.toUpperCase()
+        : word.endsWith('s') && vocab.acronyms.has(word.slice(0, -1))
+          ? `${word.slice(0, -1).toUpperCase()}s`
+          : word,
+    )
+    .join(' ');
+}
+
+/** The fewest of the project's words that make up a glued word, or the word itself. */
+function splitGlued(word, vocab) {
+  if (word.length < 6 || knownWord(word, vocab)) return [word];
+  const best = new Array(word.length + 1).fill(null);
+  best[0] = [];
+  for (let end = 2; end <= word.length; end++) {
+    for (let start = Math.max(0, end - 16); start <= end - 2; start++) {
+      const piece = word.slice(start, end);
+      if (best[start] && knownWord(piece, vocab)) {
+        if (!best[end] || best[start].length + 1 < best[end].length)
+          best[end] = [...best[start], piece];
+      }
+    }
+  }
+  return best[word.length] ?? [word];
+}
+
+function listWords(items, joiner = 'and') {
+  if (items.length <= 1) return items.join('');
+  return `${items.slice(0, -1).join(', ')} ${joiner} ${items[items.length - 1]}`;
+}
+
+/** "The user clicks …" -> "You click …": the reader is the user. */
+function secondPerson(text) {
+  return text.replace(
+    /^The user (\w+?)(es|s)\b/,
+    (_, stem, ending) =>
+      `You ${ending === 'es' && /(?:s|sh|ch|x|z)$/.test(stem) ? stem : stem + (ending === 'es' ? 'e' : '')}`,
+  );
+}
+
+/** What an action does to the data, in one sentence: "It looks up clinics and updates otps." */
+function dataSentence(flow, subject = 'It') {
+  const byEffect = new Map();
+  for (const entry of flow.collections ?? []) {
+    const effect = effectOf(entry);
+    byEffect.set(effect, [...(byEffect.get(effect) ?? []), dataName(entry.collection)]);
+  }
+  const parts = ['read', 'create', 'update', 'delete', 'write']
+    .filter((effect) => byEffect.has(effect))
+    .map((effect) => `${EFFECT_WORDS[effect]} ${listWords(byEffect.get(effect))}`);
+  return parts.length ? `${subject} ${listWords(parts)}.` : '';
+}
+
+/**
+ * One action, told as what the user does and what happens, read off its
+ * document: the fields, the click, the checks, the server, the data, the
+ * errors, and what the screen shows at the end.
+ */
+function actionStory(flow, doc) {
+  const stage = (key) => doc?.stages?.find((entry) => entry.key === key && !entry.absent);
+  const sentences = [];
+  const load = isPageLoad(flow);
+  const local = flow.endpoints.length === 0;
+
+  if (load) {
+    sentences.push(
+      local
+        ? 'This runs by itself as soon as it appears, without contacting the server.'
+        : 'This runs by itself as soon as it appears: the app asks the server for the data it shows.',
+    );
+  } else {
+    const form = stage('form');
+    if (form) {
+      const fields = [...plainText(form.summary).matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+      sentences.push(fields.length ? `You fill in ${listWords(fields)}.` : 'You fill in the form.');
+    }
+    const trigger = stage('trigger');
+    const said = trigger ? secondPerson(plainText(trigger.summary)) : '';
+    sentences.push(said ? `${said.replace(/\.$/, '')}.` : `You use “${flowTitle(flow)}”.`);
+    if (stage('confirm')) sentences.push('You are asked to confirm first.');
+  }
+  if (stage('frontend-validation')) {
+    sentences.push(
+      'The app first checks what was entered; if something is missing or wrong, it stops there and nothing is sent.',
+    );
+  }
+  if (local) {
+    if (!load) sentences.push('This happens on the screen only — nothing is sent to the server.');
+  } else {
+    if (!load) sentences.push('It then sends this to the server.');
+    if (stage('guards'))
+      sentences.push('The server makes sure you are signed in and allowed to do it.');
+    if (stage('backend-validation')) sentences.push('The server checks the details again.');
+    const data = dataSentence(flow, 'On the server it');
+    if (data) sentences.push(data);
+    const response = stage('response');
+    if (response) {
+      const failure = plainText(response.summary).split(/on success/)[1] ?? '';
+      const reasons = [
+        ...new Set(
+          [...failure.matchAll(/\b(\d{3})\b/g)]
+            .map((match) => STATUS_WORDS[match[1]])
+            .filter(Boolean),
+        ),
+      ];
+      if (reasons.length) sentences.push(`You see an error if ${listWords(reasons, 'or')}.`);
+    }
+  }
+  const final = stage('final-ui');
+  if (final) {
+    const text = plainText(final.summary)
+      .replace(/\ba toast\b/g, 'a pop-up message')
+      .replace(/\btoast\b/g, 'pop-up message')
+      .replace(/\bthe user is sent to\b/g, 'you are taken to')
+      .replace(/\bthe user\b/g, 'you')
+      .replace(/, (?=a pop-up|the list|the page|the screen)/g, ' and ')
+      .replace(/^On success/, 'When it works,');
+    if (text && !/^Nothing visible/.test(text)) sentences.push(`${text.replace(/\.$/, '')}.`);
+  }
+  if (!doc) sentences.push('…');
+  return sentences.join(' ');
+}
+
+/**
+ * Every step a load runs, from the line on the screen that starts it to the
+ * database. Told once on the page: the cards it feeds point here.
+ */
+function loadPathHtml(flow) {
+  const lines = loadPathLines(flow);
+  if (!lines.length) return '';
+  const start = flow.steps[0];
+  const hook = flow.steps.find((step) => step.kind === 'hook');
+  lines.unshift({
+    text: hook
+      ? `\`${hook.label}()\` is called as the screen opens`
+      : 'It starts as the screen opens',
+    at: { file: start?.file, line: start?.line },
+  });
+  return `<li class="story-path"><ol class="adoc-lines card-path story-calls">${lines
+    .map(renderDocLine)
+    .join('')}</ol></li>`;
+}
+
+/** `app/api/(group)/dashboard/route.ts` -> `/api/dashboard`, the URL a Next route file answers. */
+function fileRouteUrl(file) {
+  const match = /(?:^|\/)app\/(.+)\/route\.[cm]?[jt]sx?$/.exec(file ?? '');
+  if (!match) return undefined;
+  return `/${match[1]
+    .split('/')
+    .filter((segment) => !/^\(.*\)$/.test(segment))
+    .join('/')}`;
+}
+
+/** A link, told as where it takes you. */
+function linkStory(link) {
+  const target = navEntryForRoute(link.to);
+  const where = target ? `the ${target.label} page` : `\`${link.to}\``;
+  const query = link.href.includes('?')
+    ? link.href
+        .slice(link.href.indexOf('?') + 1)
+        .split('&')
+        .map((pair) => pair.split('=').map(decodeURIComponent).join(': '))
+    : [];
+  if (link.repeated)
+    return `Each item in the list is a link to its own ${target ? target.label : 'page'}.`;
+  return `Takes you to ${where}${query.length ? `, already filtered (${query.join(', ')})` : ''}.`;
+}
+
+const PAGE_OPENING = {
+  auth: (entry) => `This is the ${entry.label} page — where a user starts, before the app’s menu.`,
+  menu: (entry) => `This is the ${entry.label} page, opened from the app’s menu.`,
+  page: (entry, parent) =>
+    `This is the ${entry.label} page${parent ? `, which you reach from ${parent.label}` : ''}.`,
+  layout: () => 'These parts are on every page of the app, around whatever page is open.',
+  sidebar: () => 'These are the menu’s own buttons, available from every page.',
+  other: () => 'These are screens of the app that no menu or page links to.',
+};
+
+/**
+ * The page in words: what it is, what happens by itself when it opens, what
+ * the user can do on it from top to bottom — card by card — where its links
+ * go, and the pages it leads to. Each action can be opened for its tabs.
+ */
+function renderPageStory() {
+  const panel = el.panels.docs;
+  const scope = state.selectedScope;
+  if (!panel || !scope) return;
+  const { entry } = scope;
+  const trail = navTrail(entry.key);
+  const parent = trail.length > 1 ? findNavEntry(trail[trail.length - 2]) : undefined;
+  const byId = new Map(state.flows.map((flow) => [flow.id, flow]));
+  for (const { id } of stackedActions(entry)) if (byId.has(id)) wantData(id, 'doc');
+
+  const loads = [];
+  const later = [];
+  const doing = [];
+  const blocks = [];
+  const actionBlock = (flow) => {
+    const when = isPageLoad(flow) ? shownWhen(flow) : undefined;
+    (isPageLoad(flow) ? (when ? later : loads) : doing).push(flow);
+    const heading = isPageLoad(flow)
+      ? when
+        ? 'When it is shown'
+        : 'When it opens'
+      : flowTitle(flow).split(' · ').pop();
+    return `<li class="story-step" data-open-flow="${escapeHtml(flow.id)}" title="Open its tabs">
+        <span class="kind-icon kind-${actionKind(flow)}" aria-hidden="true">${ICONS[actionKind(flow)]}</span>
+        <span><strong>${escapeHtml(heading)}</strong> — ${richText(
+          actionStory(flow, flowData.get(flow.id)?.doc),
+        )}</span>
+      </li>${isPageLoad(flow) ? loadPathHtml(flow) : ''}`;
+  };
+  const tell = (node) => {
+    const rows = [];
+    const placed = new Set();
+    for (const [index, item] of (
+      node.items ?? node.actions.map((action) => ({ action }))
+    ).entries()) {
+      if (item.action && byId.has(item.action)) rows.push(actionBlock(byId.get(item.action)));
+      else if (item.link) {
+        rows.push(`<li class="story-step" data-open-link="${escapeHtml(linkKey(node.key, index))}" title="Open its tabs">
+            <span class="kind-icon kind-link" aria-hidden="true">${ICONS.link}</span>
+            <span><strong>${escapeHtml(linkName(item.link))}</strong> — ${richText(linkStory(item.link))}</span>
+          </li>`);
+      } else if (item.section) {
+        const child = node.children.find((candidate) => candidate.key === item.section);
+        if (!child) continue;
+        placed.add(child.key);
+        rows.push(card(child));
+      }
+    }
+    for (const child of node.children) {
+      if (placed.has(child.key) || (child.kind !== 'section' && child.kind !== 'tab')) continue;
+      rows.push(card(child));
+    }
+    return rows.join('');
+  };
+  const card = (child) => {
+    const inner = tell(child);
+    const kind = scopeKindName(child).toLowerCase();
+    return `<li class="story-card">
+        <button type="button" class="story-card-title" data-open-entry="${escapeHtml(child.key)}" title="Open its tabs">${escapeHtml(child.label)} <span class="muted">${escapeHtml(kind)}</span></button>
+        ${
+          inner
+            ? `<ul class="story-steps">${inner}</ul>`
+            : `<p class="story-quiet">Shows information; there is nothing to press here.</p>`
+        }
+      </li>`;
+  };
+  const body = tell(entry);
+  // Parts of the page itself, not the parts inside them.
+  const cards = entry.children.filter((child) => child.kind === 'section').length;
+  const leads = entry.children.filter((child) => child.kind === 'page');
+
+  const overview = [];
+  if (loads.length) {
+    overview.push(
+      loads.length === 1
+        ? 'As soon as it opens, it fetches what it shows by itself — you do not have to do anything.'
+        : `As soon as it opens, ${loads.length} things fetch what they show by themselves.`,
+    );
+  } else overview.push('Nothing is fetched by itself when it opens.');
+  if (later.length)
+    overview.push(
+      `${later.length === 1 ? '1 more part loads' : `${later.length} more parts load`} its data only once it is shown — a tab or a card you open.`,
+    );
+  // The same count as the header and the sidebar: the page's features.
+  const doable = featureCount(entry);
+  if (doable)
+    overview.push(
+      `It has ${doable === 1 ? '1 feature' : `${doable} features`}${cards ? `, spread over ${cards} ${cards === 1 ? 'card' : 'cards and sections'}` : ''}, explained below from the top of the screen to the bottom.`,
+    );
+  else if (cards) overview.push(`It is made of ${cards} ${cards === 1 ? 'card' : 'cards'}.`);
+  const reads = new Set();
+  const changes = new Set();
+  for (const flow of [...loads, ...later, ...doing]) {
+    for (const entryData of flow.collections ?? []) {
+      (effectOf(entryData) === 'read' ? reads : changes).add(dataName(entryData.collection));
+    }
+  }
+  if (reads.size) overview.push(`It shows data about ${listWords([...reads])}.`);
+  if (changes.size) overview.push(`It can change ${listWords([...changes])}.`);
+
+  panel.innerHTML = `
+    <article class="page-story">
+      <p class="story-lead">${escapeHtml((PAGE_OPENING[entry.kind] ?? PAGE_OPENING.page)(entry, parent))}</p>
+      <p>${escapeHtml(overview.join(' '))}</p>
+      ${body ? `<h3 class="story-heading">On this page, from top to bottom</h3><ul class="story-steps">${body}</ul>` : ''}
+      ${
+        leads.length
+          ? `<h3 class="story-heading">Pages you can go to from here</h3><ul class="story-leads">${leads
+              .map(
+                (child) =>
+                  `<li><button type="button" class="scope-lead" data-open-entry="${escapeHtml(child.key)}">${escapeHtml(child.label)}</button></li>`,
+              )
+              .join('')}</ul>`
+          : ''
+      }
+      <p class="story-hint muted">Click any step to open its own tabs: how it works end to end, every way it can go, its speed, tests and issues.</p>
+    </article>`;
+  const shared = sharedPartsBlock(stackedActions(entry).map(({ id }) => id));
+  if (shared) {
+    panel.querySelector('.page-story')?.insertBefore(shared, panel.querySelector('.story-hint'));
+    for (const fold of shared.querySelectorAll('details[open]'))
+      fold.dispatchEvent(new Event('toggle'));
+  }
+  const target = state.sharedTarget && panel.querySelector(`#shared-part-${state.sharedTarget}`);
+  if (target) {
+    state.sharedTarget = null;
+    target.scrollIntoView?.({ block: 'start' });
+  }
+}
+
+/** The raw sidebar entry with a key, anywhere in the tree. */
+function findNavEntry(key, entries = navEntries()) {
+  for (const entry of entries) {
+    if (entry.key === key) return entry;
+    const found = findNavEntry(key, entry.children);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** The keys of the entries above one, outermost first, itself included. */
+function navTrail(key) {
+  const walk = (entries, trail) => {
+    for (const entry of entries) {
+      const here = [...trail, entry.key];
+      if (entry.key === key) return here;
+      const found = walk(entry.children, here);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  return walk(navEntries(), []) ?? [];
+}
+
+/** What a screen holds: its own actions, and its cards' and tabs' — not the pages it leads to. */
+function scopeActionIds(entry) {
+  return [
+    ...entry.actions,
+    ...entry.children
+      .filter((child) => child.kind === 'section' || child.kind === 'tab')
+      .flatMap(scopeActionIds),
+  ];
+}
+
+/**
+ * Select a page, card or dialog: the right side sums up everything on it, in
+ * the tabs an action has, and the summary is fetched from the server.
+ */
+function selectScope(key, { reveal = false } = {}) {
+  const entry = findNavEntry(key);
+  if (!entry) return;
+  state.selectedScope = { key, entry, summary: null, error: null, page: isPageEntry(entry) };
+  state.selectedFlow = null;
+  state.via = null;
+  state.selectedNode = null;
+  document.querySelector('.layout')?.removeAttribute('data-inspecting');
+  if (reveal) for (const above of navTrail(key)) state.openGroups.add(above);
+  renderFlowList();
+  if (reveal) {
+    el.flowList
+      .querySelector(
+        `.page-group[data-key="${CSS.escape(key)}"], .nav-card[data-key="${CSS.escape(key)}"]`,
+      )
+      ?.scrollIntoView?.({ block: 'nearest' });
+  }
+  renderScopeHeader();
+  renderDetails(null);
+  renderTabs();
+  showTab(state.tab);
+  void loadScope(key);
+  if (entry.kind === 'section') void loadCard(key);
+}
+
+/**
+ * A card's data: what it shows, worked out how, from which request, and where
+ * the server makes each field. A card that presses nothing is still something
+ * to understand — this is what its tabs are about.
+ */
+async function loadCard(key) {
+  try {
+    const card = await getJson(`/api/card?entry=${encodeURIComponent(key)}`);
+    if (state.selectedScope?.key !== key) return;
+    state.selectedScope.card = card;
+  } catch (error) {
+    if (state.selectedScope?.key !== key) return;
+    state.selectedScope.card = { error: String(error.message ?? error) };
+  }
+  renderScopeHeader();
+  renderTabs();
+  showTab(state.tab);
+}
+
+async function loadScope(key) {
+  try {
+    const summary = await getJson(`/api/scope?entry=${encodeURIComponent(key)}`);
+    if (state.selectedScope?.key !== key) return;
+    state.selectedScope.summary = summary;
+  } catch (error) {
+    if (state.selectedScope?.key !== key) return;
+    state.selectedScope.error = String(error.message ?? error);
+  }
+  renderScopeHeader();
+  renderTabs();
+  showTab(state.tab);
+}
+
+const SCOPE_KIND = {
+  menu: 'Page',
+  page: 'Page',
+  auth: 'Sign-in page',
+  tab: 'Tab',
+  section: 'Card',
+  layout: 'On every page',
+  sidebar: 'In the menu',
+  other: 'Other screens',
+};
+
+/** What kind of part of the app a card is: a dialog says so in its file or name. */
+function scopeKindName(entry) {
+  if (entry.kind === 'section' && /dialog|drawer|modal|popup|sheet/i.test(entry.file ?? '')) {
+    return 'Dialog';
+  }
+  return SCOPE_KIND[entry.kind] ?? 'Section';
+}
+
+function renderScopeHeader() {
+  const scope = state.selectedScope;
+  if (!scope) return;
+  if (scope.link) return renderLinkHeader(scope);
+  const { entry, summary } = scope;
+  const ids = scopeActionIds(entry);
+  const flowsHere = ids.map((id) => state.flows.find((flow) => flow.id === id)).filter(Boolean);
+  const mounts = flowsHere.filter((flow) => flow.event === 'mount');
+  // The page's own loads; a tab's list loads when that tab is shown.
+  const loads = mounts.filter((flow) => !shownWhen(flow)).length;
+  const later = mounts.length - loads;
+  const links = countLinks(entry);
+  const doable = featureCount(entry);
+  const chips = [`<span class="chip">${escapeHtml(scopeKindName(entry))}</span>`];
+  if (entry.route) chips.push(`<span class="chip">${escapeHtml(entry.route)}</span>`);
+  chips.push(
+    `<span class="chip" title="The page's features: its controls, links and each part (a popup, each row) once — the number beside it in the sidebar">${plural(doable, 'feature')}</span>`,
+  );
+  const data = cardOf(scope);
+  if (data?.values.length)
+    chips.push(`<span class="chip">${plural(data.values.length, 'value')} shown</span>`);
+  if (summary) {
+    if (loads) chips.push(`<span class="chip">${loads} on load</span>`);
+    if (later) chips.push(`<span class="chip">${later} when shown</span>`);
+    if (summary.endpoints.length)
+      chips.push(`<span class="chip">${plural(summary.endpoints.length, 'request')}</span>`);
+  }
+  if (links) chips.push(`<span class="chip">${plural(links, 'link')}</span>`);
+  for (const [effect, , many] of EFFECTS) {
+    const count = (summary?.collections ?? []).filter((entry) =>
+      entry.effects.includes(effect),
+    ).length;
+    if (count > 0) chips.push(`<span class="chip effect-${effect}">${count} ${many}</span>`);
+  }
+  el.flowHeader.innerHTML = `
+    <h2>${escapeHtml(entry.label)}</h2>
+    <div class="chips">${chips.join('')}</div>
+    ${entry.file ? `<p class="muted" style="margin-top:8px">${fileLink(entry.file)}</p>` : ''}`;
+  el.docLink.href = '#';
+}
+
+function renderLinkHeader(scope) {
+  const { link, entry, target, summary } = scope;
+  const chips = [
+    `<span class="chip">Link</span>`,
+    `<span class="chip">on ${escapeHtml(entry.label)}</span>`,
+    `<span class="chip">→ ${escapeHtml(target?.label ?? link.to)}</span>`,
+    `<span class="chip">${escapeHtml(link.href)}</span>`,
+  ];
+  if (summary) chips.push(`<span class="chip">${summary.actions.length} on load there</span>`);
+  for (const [effect, , many] of EFFECTS) {
+    const count = (summary?.collections ?? []).filter((item) =>
+      item.effects.includes(effect),
+    ).length;
+    if (count > 0) chips.push(`<span class="chip effect-${effect}">${count} ${many}</span>`);
+  }
+  el.flowHeader.innerHTML = `
+    <h2>${escapeHtml(linkName(link))}</h2>
+    <div class="chips">${chips.join('')}</div>
+    ${entry.file ? `<p class="muted" style="margin-top:8px">${fileLink(entry.file)}</p>` : ''}`;
+  el.docLink.href = '#';
+}
+
+function linkName(link) {
+  const name = link.label ?? (link.repeated ? 'Each row' : 'Link');
+  return link.repeated && link.label ? `${name} (each row)` : name;
+}
+
+function countLinks(entry) {
+  return (
+    (entry.items ?? []).filter((item) => item.link).length +
+    entry.children
+      .filter((child) => child.kind === 'section' || child.kind === 'tab')
+      .reduce((sum, child) => sum + countLinks(child), 0)
+  );
+}
+
+/** A tab's number for a screen: the same worrying number, summed over its actions. */
+function scopeBadge(id) {
+  const scope = state.selectedScope;
+  if (id === 'impact' && !scope.summary) return impactBadge();
+  if (!scope.summary) return scope.error ? undefined : { text: '…', tone: 'neutral' };
+  const actions = scope.summary.actions;
+  const data = cardOf(scope);
+  if (id === 'docs' && data && data.values.length) {
+    return { text: plural(data.values.length, 'value'), tone: 'neutral' };
+  }
+  if (id === 'docs') return { text: plural(actions.length, 'action'), tone: 'neutral' };
+  if (id === 'decisions') {
+    // What the tab draws: a card's own checks, not its page's load, which is drawn on the page.
+    const drawn = actions.filter(
+      (action) =>
+        !data ||
+        !sharedLoadPage(
+          scope,
+          state.flows.find((flow) => flow.id === action.id),
+        ),
+    );
+    const branches =
+      drawn.reduce((sum, action) => sum + (action.decisions?.decisions ?? 0), 0) + cardChecks(data);
+    return branches === 0
+      ? { text: 'straight', tone: 'muted' }
+      : { text: `${branches} ${branches === 1 ? 'branch' : 'branches'}`, tone: 'neutral' };
+  }
+  if (id === 'perf') {
+    const measured = actions.filter((action) => action.timing.observed);
+    if (measured.length === 0) return { text: 'not run', tone: 'muted' };
+    const slowest = Math.max(...measured.map((action) => action.timing.totalMs ?? 0));
+    return { text: `≤ ${formatMs(slowest)}`, tone: slowest >= 1000 ? 'warn' : 'neutral' };
+  }
+  if (id === 'tests') {
+    const tested = actions.filter((action) => action.tests.totalCases > 0).length;
+    if (actions.length === 0) return undefined;
+    if (tested === 0) return { text: 'none', tone: 'danger' };
+    return { text: `${tested}/${actions.length}`, tone: tested === actions.length ? 'ok' : 'warn' };
+  }
+  if (id === 'impact') {
+    const issues = scopeIssues();
+    if (issues.length) {
+      const high = issues.some((finding) => finding.severity === 'high');
+      return { text: plural(issues.length, 'issue'), tone: high ? 'danger' : 'warn' };
+    }
+    const shared = scope.summary.sharedWith.length;
+    return shared ? { text: `${shared} shared`, tone: 'warn' } : { text: 'clean', tone: 'ok' };
+  }
+  if (id === 'unused') {
+    const count = scopeUnused().count;
+    return count === 0 ? { text: 'clean', tone: 'muted' } : { text: String(count), tone: 'warn' };
+  }
+  return undefined;
+}
+
+/** The actions a selection covers: a screen's own, or what a link sets off. */
+function selectedScopeIds() {
+  const scope = state.selectedScope;
+  return scope.link
+    ? (scope.summary?.actions ?? []).map((action) => action.id)
+    : scopeActionIds(scope.entry);
+}
+
+function scopeIssues() {
+  const ids = new Set(selectedScopeIds());
+  return (state.findings?.findings ?? []).filter((finding) =>
+    finding.flowIds.some((id) => ids.has(id)),
+  );
+}
+
+/** Unused code in the files this screen's actions run through. */
+function scopeUnused() {
+  const files = new Set(state.selectedScope.summary?.files ?? []);
+  if (state.selectedScope.entry.file) files.add(state.selectedScope.entry.file);
+  const unused = state.unused && !state.unused.error ? state.unused : undefined;
+  const exports = (unused?.exports ?? []).filter(
+    (entry) => !entry.usedInFile && files.has(entry.file),
+  );
+  const broken = (unused?.broken ?? []).filter((entry) => files.has(entry.file));
+  return { exports, broken, count: exports.length + broken.length, files };
+}
+
+/** One of a screen's actions as a row that opens it. */
+function scopeActionRow(action, extra = '') {
+  const kind =
+    action.event === 'mount'
+      ? 'load'
+      : /submit/i.test(action.event ?? '')
+        ? 'submit'
+        : action.event
+          ? 'click'
+          : 'runtime';
+  const [endpoint, ...more] = action.endpoints;
+  return `<li class="scope-row" data-open-flow="${escapeHtml(action.id)}" title="Open this action">
+      <span class="kind-icon kind-${kind}" aria-hidden="true">${ICONS[kind]}</span>
+      <span class="scope-row-text">
+        <span class="scope-row-title">${escapeHtml(action.title)}</span>
+        <span class="scope-row-meta">${
+          endpoint
+            ? `<code>${escapeHtml(endpoint)}</code>${more.length ? ` +${more.length}` : ''}`
+            : 'stays in the browser'
+        }${action.collections.length ? ` · ${escapeHtml(action.collections.map((entry) => `${entry.effect} ${entry.name}`).join(', '))}` : ''}</span>
+      </span>
+      ${extra ? `<span class="scope-row-extra">${extra}</span>` : ''}
+    </li>`;
+}
+
+function renderScopeTab(tab) {
+  const panel = el.panels[tab];
+  if (!panel) return;
+  const scope = state.selectedScope;
+  // A page or card shows each of its actions' own tab, in full, one after another.
+  if (!scope.link && tab !== 'unused') return renderStacked(tab);
+  if (scope.error) {
+    panel.innerHTML = `<p class="error">Could not load this view: ${escapeHtml(scope.error)}</p>`;
+    return;
+  }
+  if (!scope.summary) return panelLoading(panel, `everything on ${scope.entry.label}`);
+  const render = {
+    docs: renderScopeDocs,
+    decisions: renderScopeDecisions,
+    perf: renderScopePerf,
+    tests: renderScopeTests,
+    impact: renderScopeImpact,
+    unused: renderScopeUnused,
+  }[tab];
+  panel.innerHTML = render(scope);
+  bindTableFolds(panel);
+}
+
+/**
+ * Docs for a screen: what is on it, top to bottom — its loads, its controls,
+ * each card with what is in it, the links that leave it, and the screens it
+ * leads to.
+ */
+function renderScopeDocs(scope) {
+  if (scope.link) return renderLinkDocs(scope);
+  const { entry, summary } = scope;
+  const byId = new Map(summary.actions.map((action) => [action.id, action]));
+  const loads = summary.actions.filter((action) => action.event === 'mount').length;
+  const cards = [];
+  const outline = (node) => {
+    const placed = new Set();
+    const rows = [];
+    for (const [index, item] of (
+      node.items ?? node.actions.map((action) => ({ action }))
+    ).entries()) {
+      if (item.action && byId.has(item.action)) rows.push(scopeActionRow(byId.get(item.action)));
+      else if (item.link) {
+        const target = navEntryForRoute(item.link.to);
+        rows.push(`<li class="scope-link" data-open-link="${escapeHtml(linkKey(node.key, index))}">
+            <span class="kind-icon kind-link" aria-hidden="true">${ICONS.link}</span>
+            <span class="scope-row-text">
+              <span class="scope-row-title">${escapeHtml(item.link.label ?? (item.link.repeated ? 'Each row' : 'Link'))}${item.link.repeated && item.link.label ? ' (each row)' : ''}</span>
+              <span class="scope-row-meta">→ ${escapeHtml(target?.label ?? item.link.to)} · <code>${escapeHtml(item.link.href)}</code></span>
+            </span>
+          </li>`);
+      } else if (item.section) {
+        const child = node.children.find((candidate) => candidate.key === item.section);
+        if (!child) continue;
+        placed.add(child.key);
+        rows.push(section(child));
+      }
+    }
+    for (const child of node.children) {
+      if (placed.has(child.key) || (child.kind !== 'section' && child.kind !== 'tab')) continue;
+      rows.push(section(child));
+    }
+    return rows.join('');
+  };
+  const section = (child) => {
+    cards.push(child);
+    const inner = outline(child);
+    return `<li class="scope-section">
+        <button type="button" class="scope-section-title" data-open-entry="${escapeHtml(child.key)}">
+          ${escapeHtml(child.label)} <span class="muted">${escapeHtml(scopeKindName(child))}</span>
+        </button>
+        ${inner ? `<ul class="scope-list">${inner}</ul>` : '<p class="muted scope-empty">Shows information; nothing to press.</p>'}
+      </li>`;
+  };
+  const body = outline(entry);
+  const leads = entry.children.filter((child) => child.kind === 'page');
+  const sentence =
+    `${entry.label} has ${plural(summary.actions.length, 'action')}` +
+    (loads
+      ? loads === summary.actions.length
+        ? `, ${loads === 1 ? 'which runs by itself' : 'all running by themselves'} when it opens`
+        : `: ${loads} ${loads === 1 ? 'runs by itself' : 'run by themselves'} when it opens`
+      : '') +
+    (cards.length
+      ? `, in ${cards.length} ${cards.length === 1 ? 'card or section' : 'cards and sections'}`
+      : '') +
+    '.';
+  return `
+    ${panelIntro('Everything on this part of the app, in the order it appears on the screen. Click an action to open its own tabs, a card to sum up just that card.')}
+    ${answer('neutral', sentence, summary.endpoints.length ? `It calls ${summary.endpoints.map((endpoint) => `\`${endpoint}\``).join(', ')}.` : 'Nothing on it calls the backend.')}
+    <ul class="scope-list scope-top">${body || '<li class="muted">Nothing on this screen does anything.</li>'}</ul>
+    ${
+      leads.length
+        ? `<h3 class="scope-heading">Leads to</h3><ul class="scope-leads">${leads
+            .map(
+              (child) =>
+                `<li><button type="button" class="scope-lead" data-open-entry="${escapeHtml(child.key)}">${escapeHtml(child.label)} <code>${escapeHtml(child.route ?? '')}</code></button></li>`,
+            )
+            .join('')}</ul>`
+        : ''
+    }`;
+}
+
+/** What a link does, above the document of the flow it sets off. */
+function viaNote(flow) {
+  const via = state.via;
+  if (!via) return '';
+  const where = via.target?.label ?? via.link.to;
+  const query = via.link.href.includes('?')
+    ? via.link.href.slice(via.link.href.indexOf('?') + 1)
+    : '';
+  return answer(
+    'neutral',
+    `Clicking “${linkName(via.link)}” on ${via.entry.label} opens ${where}`,
+    `It goes to \`${via.link.href}\`${query ? `, so ${where} opens narrowed to \`${query}\`` : ''}. ` +
+      `${where} then runs ${flowTitle(flow)} — every step of it is below.`,
+  );
+}
+
+/** Docs for a link: where it goes, and what runs when the user lands there. */
+function renderLinkDocs(scope) {
+  const { link, entry, target, summary } = scope;
+  const query = link.href.includes('?') ? link.href.slice(link.href.indexOf('?') + 1) : '';
+  const where = target ? target.label : link.to;
+  const sentence = `“${linkName(link)}” on ${entry.label} opens ${where}`;
+  const detail =
+    (link.repeated ? 'Every row of the list has this link, each to its own record. ' : '') +
+    (query ? `The address carries \`${query}\`, so ${where} opens already narrowed to it. ` : '') +
+    (target ? '' : 'Flowslens found no screen at that address.');
+  const rows = summary.actions.map((action) => scopeActionRow(action)).join('');
+  return `
+    ${linkShowsHtml(scope.key, link)}
+    ${panelIntro('A link does not call the backend itself: what it sets off is the screen it opens, and what that screen runs by itself as it opens.')}
+    ${answer('neutral', sentence, detail.trim())}
+    <h3 class="scope-heading">When the user lands on ${escapeHtml(where)}</h3>
+    ${rows ? `<ul class="scope-list">${rows}</ul>` : `<p class="muted">${target ? 'Nothing runs by itself there.' : 'Nothing known.'}</p>`}
+    ${
+      target
+        ? `<p><button type="button" class="scope-lead" data-open-entry="${escapeHtml(target.key)}">Open the ${escapeHtml(where)} page and everything on it</button></p>`
+        : ''
+    }`;
+}
+
+function renderScopeDecisions(scope) {
+  const actions = scope.summary.actions;
+  const read = actions.filter((action) => action.decisions);
+  const rows = [...read]
+    .sort((a, b) => b.decisions.decisions - a.decisions.decisions)
+    .map((action) =>
+      scopeActionRow(
+        action,
+        action.decisions.decisions
+          ? `${action.decisions.decisions} ${action.decisions.decisions === 1 ? 'branch' : 'branches'} · ${plural(action.decisions.outcomes, 'outcome')}`
+          : 'one way through',
+      ),
+    );
+  const local = actions.filter((action) => action.endpoints.length === 0).length;
+  return `
+    ${panelIntro('Each action on this screen and how many ways it can go — the checks, branches and queries between the click and the database. Open one to see its flowchart.')}
+    ${
+      rows.length
+        ? `<ul class="scope-list">${rows.join('')}</ul>`
+        : answer('neutral', 'No action here reaches the backend', '')
+    }
+    ${local ? `<p class="muted">${plural(local, 'action')} stay in the browser and have no server side to branch.</p>` : ''}`;
+}
+
+function renderScopePerf(scope) {
+  const actions = scope.summary.actions;
+  const measured = actions
+    .filter((action) => action.timing.observed)
+    .sort((a, b) => (b.timing.totalMs ?? 0) - (a.timing.totalMs ?? 0));
+  const waiting = actions.filter(
+    (action) => !action.timing.observed && action.endpoints.length > 0,
+  );
+  return `
+    ${panelIntro('How long each action on this screen took when the app ran, slowest first. Times come from runtime tracing; an action never run while tracing has none.')}
+    ${
+      measured.length
+        ? `<ul class="scope-list">${measured
+            .map((action) =>
+              scopeActionRow(action, `<strong>${formatMs(action.timing.totalMs ?? 0)}</strong>`),
+            )
+            .join('')}</ul>`
+        : answer(
+            'neutral',
+            'Nothing on this screen has been timed yet',
+            'Run the app with the Flowslens tracer and use this screen; its actions will be timed here.',
+          )
+    }
+    ${
+      waiting.length
+        ? `<h3 class="scope-heading">Not run yet</h3><ul class="scope-list">${waiting.map((action) => scopeActionRow(action)).join('')}</ul>`
+        : ''
+    }`;
+}
+
+function renderScopeTests(scope) {
+  const actions = scope.summary.actions;
+  const tested = actions.filter((action) => action.tests.totalCases > 0);
+  const untested = actions.filter((action) => action.tests.totalCases === 0);
+  return `
+    ${panelIntro('Which actions on this screen a test would catch breaking: a test counts when it imports a file the action runs through.')}
+    ${answer(
+      tested.length === actions.length ? 'ok' : tested.length ? 'warn' : 'danger',
+      `${tested.length} of ${plural(actions.length, 'action')} covered by a test`,
+      untested.length ? 'The ones below have no test reaching them.' : '',
+    )}
+    ${
+      tested.length
+        ? `<h3 class="scope-heading">Tested</h3><ul class="scope-list">${tested
+            .map((action) =>
+              scopeActionRow(
+                action,
+                `${action.tests.coveragePct}% · ${plural(action.tests.totalCases, 'case')}`,
+              ),
+            )
+            .join('')}</ul>`
+        : ''
+    }
+    ${
+      untested.length
+        ? `<h3 class="scope-heading">No test</h3><ul class="scope-list">${untested.map((action) => scopeActionRow(action)).join('')}</ul>`
+        : ''
+    }`;
+}
+
+function renderScopeImpact(scope) {
+  const issues = scopeIssues();
+  const { summary } = scope;
+  const written = summary.collections.filter((entry) =>
+    entry.effects.some((effect) => effect !== 'read'),
+  );
+  return `
+    ${panelIntro('Bugs in the actions on this screen, and what else in the app depends on the data it changes.')}
+    <h3 class="scope-heading">Issues</h3>
+    ${
+      issues.length
+        ? `<ul class="issue-list">${issues.map((finding) => renderIssue(finding, false)).join('')}</ul>`
+        : '<p class="muted">No issues found in these actions.</p>'
+    }
+    <h3 class="scope-heading">Data it changes</h3>
+    ${
+      written.length
+        ? `<ul class="scope-plain">${written
+            .map(
+              (entry) =>
+                `<li><code>${escapeHtml(entry.name)}</code> — ${escapeHtml(entry.effects.join(', '))}</li>`,
+            )
+            .join('')}</ul>`
+        : '<p class="muted">Nothing on this screen writes to the database.</p>'
+    }
+    <h3 class="scope-heading">Also uses that data</h3>
+    ${
+      summary.sharedWith.length
+        ? summary.sharedWith
+            .map(
+              (
+                entry,
+              ) => `<p class="scope-shared"><code>${escapeHtml(entry.collection)}</code> is also used by:</p>
+                <ul class="scope-plain">${entry.flows
+                  .slice(0, 12)
+                  .map(
+                    (flow) =>
+                      `<li><button type="button" class="scope-lead" data-open-flow="${escapeHtml(flow.id)}">${escapeHtml(flow.title)}</button></li>`,
+                  )
+                  .join(
+                    '',
+                  )}${entry.flows.length > 12 ? `<li class="muted">and ${entry.flows.length - 12} more</li>` : ''}</ul>`,
+            )
+            .join('')
+        : '<p class="muted">No other feature touches the data this screen changes.</p>'
+    }`;
+}
+
+function renderScopeUnused() {
+  if (!state.unused) return '<p class="muted">Working out what nothing uses…</p>';
+  const { exports, broken, files } = scopeUnused();
+  return `
+    ${panelIntro(`Code nothing uses in the ${plural(files.size, 'file')} this screen runs through in the browser.`)}
+    ${
+      broken.length
+        ? `<h3 class="scope-heading">Imports that point at nothing</h3><ul class="scope-plain">${broken
+            .map(
+              (entry) =>
+                `<li>${fileLink(entry.file)} — <code>${escapeHtml(entry.specifier)}</code></li>`,
+            )
+            .join('')}</ul>`
+        : ''
+    }
+    ${
+      exports.length
+        ? `<h3 class="scope-heading">Exports nothing imports</h3><ul class="scope-plain">${exports
+            .map(
+              (entry) =>
+                `<li><code>${escapeHtml(entry.name)}</code> ${fileLink(entry.file, entry.line)}</li>`,
+            )
+            .join('')}</ul>`
+        : ''
+    }
+    ${broken.length + exports.length === 0 ? answer('ok', 'Nothing unused in this screen’s files', '') : ''}`;
+}
+
+/**
+ * A shared step's "See every step inside": the page the action is on, where
+ * the part is drawn once, scrolled to it.
+ */
+document.addEventListener('click', (event) => {
+  const button = event.target.closest?.('[data-open-shared]');
+  if (!button) return;
+  event.stopPropagation();
+  const flowId =
+    button.closest('.stack-item')?.dataset.flowId ??
+    (state.selectedScope ? undefined : state.selectedFlow?.id);
+  const pageKey = (
+    flowId ? navKeysFor(flowId) : navTrail(state.selectedScope?.entry.key ?? '')
+  ).find((key) => {
+    const entry = findNavEntry(key);
+    return entry && isPageEntry(entry);
+  });
+  if (!pageKey) return;
+  state.sharedTarget = button.dataset.openShared;
+  state.openShared.add(button.dataset.openShared);
+  selectScope(pageKey, { reveal: true });
+});
+
+// Rows in a screen's tabs open the action, or the card or page, they name.
+document.addEventListener('click', (event) => {
+  const target = event.target.closest?.('[data-open-flow], [data-open-entry], [data-open-link]');
+  if (!target || !target.closest('.canvas')) return;
+  if (event.target.closest('a[href]')) return;
+  if (target.dataset.openFlow) selectFlow(target.dataset.openFlow);
+  else if (target.dataset.openLink) selectLink(target.dataset.openLink);
+  else selectScope(target.dataset.openEntry, { reveal: true });
+});
+
+/** Every top-level entry of the app's sidebar. */
+function navEntries() {
+  return state.navigation?.entries ?? [];
+}
+
+/** The keys of the sidebar entries an action is listed under, outermost first. */
+function navKeysFor(flowId) {
+  const keys = [];
+  const walk = (entries, trail) => {
+    for (const entry of entries) {
+      const here = [...trail, entry.key];
+      if (entry.actions.includes(flowId)) keys.push(...here);
+      walk(entry.children, here);
+    }
+  };
+  walk(navEntries(), []);
+  return keys;
 }
 
 function renderListSummary(flows, groups, searching) {
@@ -320,11 +2881,61 @@ function renderFoldAll() {
   el.foldAll.textContent = groups.every((group) => !group.open) ? 'Expand all' : 'Collapse all';
 }
 
+/**
+ * A component on this many pages is listed once, under its own name.
+ *
+ * A walk-in form that 27 pages can open is one feature, not 27 — and listed
+ * under every page it buried each page's own buttons under the same rows.
+ */
+const SHARED_PAGES = 3;
+
+/** The component an action belongs to, when that component is on many pages. */
+function sharedComponent(flow) {
+  const pages = (flow.pages ?? []).filter((page) => !page.layout);
+  return pages.length >= SHARED_PAGES && flow.component ? flow.component : undefined;
+}
+
 /** The sidebar keys of the groups a flow is listed under. */
 function groupKeys(flow) {
+  const shared = sharedComponent(flow);
+  if (shared) return [`shared:${shared}`];
   const pages = flow.pages ?? [];
   if (pages.length === 0) return ['none'];
   return pages.map((page) => `${page.layout ? 'layout' : 'page'}:${page.route}`);
+}
+
+/** "Also opens here: Walk in form · Bottom nav" — the shared groups a page uses. */
+function sharedLinks(shared) {
+  const node = document.createElement('div');
+  node.className = 'page-shared';
+  node.append('Also on this page: ');
+  shared.forEach((entry, index) => {
+    if (index > 0) node.append(' · ');
+    const link = document.createElement('button');
+    link.type = 'button';
+    link.className = 'shared-link';
+    link.textContent = entry.name;
+    link.title = `Used on ${plural(entry.pages, 'page')} — listed once, under its own name`;
+    link.onclick = () => {
+      state.openGroups.add(entry.key);
+      renderFlowList();
+      el.flowList
+        .querySelector(`.page-group[data-key="${CSS.escape(entry.key)}"]`)
+        ?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+    };
+    node.appendChild(link);
+  });
+  return node;
+}
+
+/** `WalkInForm` -> `Walk in form`. */
+function componentName(name) {
+  const words = name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/[-_]+/g, ' ')
+    .trim();
+  return words.charAt(0).toUpperCase() + words.slice(1).toLowerCase();
 }
 
 function subheading(text) {
@@ -343,12 +2954,59 @@ function subheading(text) {
  */
 function pageGroups(flows) {
   const groups = new Map();
-  const place = (key, init, flow) => {
+  /** page route -> keys of the shared groups that page renders. */
+  const pageUses = new Map();
+  const ensure = (key, init) => {
     if (!groups.has(key)) groups.set(key, { key, ...init, flows: [] });
-    groups.get(key).flows.push(flow);
+    return groups.get(key);
   };
+  const place = (key, init, flow) => ensure(key, init).flows.push(flow);
+  const pageGroup = (page) => ({
+    kind: page.layout ? 'layout' : 'page',
+    name: page.layout
+      ? page.route === '/'
+        ? 'All pages'
+        : `All pages under ${page.route}`
+      : page.title || pageName(page.route),
+    sub: page.layout ? 'shared layout' : page.route,
+    hint: page.file,
+    icon: page.layout ? 'layout' : 'page',
+    order: page.layout ? 1.5 : 0,
+    route: page.route,
+    file: page.file,
+  });
   for (const flow of flows) {
     const pages = flow.pages ?? [];
+    const shared = sharedComponent(flow);
+    if (shared) {
+      const count = pages.filter((page) => !page.layout).length;
+      place(
+        `shared:${shared}`,
+        {
+          kind: 'shared',
+          name: componentName(shared),
+          sub: '',
+          hint: `${shared} — rendered on ${plural(count, 'page')}: ${pages
+            .map((page) => page.route)
+            .join(', ')}`,
+          icon: 'layout',
+          order: 1,
+          route: shared,
+          pages: 0,
+        },
+        flow,
+      );
+      const group = groups.get(`shared:${shared}`);
+      group.pages = Math.max(group.pages, count);
+      group.sub = `shared · on ${plural(group.pages, 'page')}`;
+      for (const page of pages) {
+        if (page.layout) continue;
+        // A page whose every action is shared still gets a heading, to link from.
+        ensure(groupKeys({ pages: [page] })[0], pageGroup(page));
+        pageUses.set(page.route, (pageUses.get(page.route) ?? new Set()).add(`shared:${shared}`));
+      }
+      continue;
+    }
     if (pages.length === 0) {
       place(
         'none',
@@ -365,29 +3023,35 @@ function pageGroups(flows) {
       );
       continue;
     }
-    for (const page of pages) {
-      const layout = page.layout;
-      place(
-        groupKeys({ pages: [page] })[0],
-        {
-          kind: layout ? 'layout' : 'page',
-          name: layout
-            ? page.route === '/'
-              ? 'All pages'
-              : `All pages under ${page.route}`
-            : pageName(page.route),
-          sub: layout ? 'shared layout' : page.route,
-          hint: page.file,
-          icon: layout ? 'layout' : 'page',
-          order: layout ? 1 : 0,
-          route: page.route,
-          file: page.file,
-        },
-        flow,
-      );
+    for (const page of pages) place(groupKeys({ pages: [page] })[0], pageGroup(page), flow);
+  }
+  const ordered = [...groups.values()].sort(
+    (a, b) => a.order - b.order || a.route.localeCompare(b.route),
+  );
+  // Two pages with one tab title — `/chats` and `/chats/[number]/[id]` are both
+  // "Chats" — keep the title and add what the route says about the second.
+  const byName = new Map();
+  for (const group of ordered) {
+    if (group.kind !== 'page') continue;
+    const same = byName.get(group.name) ?? [];
+    same.push(group);
+    byName.set(group.name, same);
+  }
+  for (const same of byName.values()) {
+    if (same.length < 2) continue;
+    for (const group of same.slice(1)) {
+      const tail = pageName(group.route).split(' › ').slice(1).join(' › ');
+      group.name = tail ? `${group.name} › ${tail}` : pageName(group.route);
     }
   }
-  return [...groups.values()].sort((a, b) => a.order - b.order || a.route.localeCompare(b.route));
+  for (const group of ordered) {
+    if (group.kind !== 'page') continue;
+    group.shared = [...(pageUses.get(group.route) ?? [])]
+      .map((key) => groups.get(key))
+      .filter(Boolean)
+      .map((shared) => ({ key: shared.key, name: shared.name, pages: shared.pages }));
+  }
+  return ordered;
 }
 
 /**
@@ -419,7 +3083,10 @@ function humanizeSegment(segment) {
  */
 function actionName(flow, group) {
   if (isPageLoad(flow)) {
-    if (group?.file && flow.steps[0]?.file === group.file) return 'Page opens';
+    if (group?.file && flow.steps[0]?.file === group.file) {
+      // A card fetches its own data when it is drawn; the page has already opened.
+      return group.navKind === 'section' ? 'Loads its data' : 'Page opens';
+    }
     return flowTitle(flow);
   }
   const label = flow.label ?? '';
@@ -464,6 +3131,8 @@ const KIND_TEXT = {
 
 const ICONS = {
   page: '<svg viewBox="0 0 16 16"><path d="M4 1.5h5.5L13 5v9.5H4z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9.5 1.5V5H13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
+  link: '<svg viewBox="0 0 16 16"><path d="M3 8h9M8.5 4.5 12 8l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  lock: '<svg viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>',
   layout:
     '<svg viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M2 6h12M6 6v7.5" stroke="currentColor" stroke-width="1.3"/></svg>',
   other:
@@ -482,8 +3151,11 @@ function flowItem(flow, group) {
   button.type = 'button';
   button.className = 'flow-item';
   button.dataset.flowId = flow.id;
-  button.setAttribute('aria-selected', String(flow.id === state.selectedFlow?.id));
-  button.onclick = () => selectFlow(flow.id);
+  button.setAttribute(
+    'aria-selected',
+    String(flow.id === state.selectedFlow?.id && !state.via && !state.selectedScope),
+  );
+  button.onclick = () => selectFlow(flow.id, { scroll: false });
   const kind = actionKind(flow);
   const issues = issuesFor(flow.id).filter((finding) => finding.severity !== 'low');
   const worst = issues.some((finding) => finding.severity === 'high') ? 'high' : 'medium';
@@ -510,7 +3182,9 @@ function flowItem(flow, group) {
                 ? `<span class="more-apis" title="${escapeHtml(more.join('\n'))}">+${more.length}</span>`
                 : ''
             }`
-          : '<span class="path">stays in the browser</span>'
+          : destination(flow)
+            ? `<span class="path">→ ${escapeHtml(destination(flow))}</span>`
+            : '<span class="path">stays in the browser</span>'
       }</span>
     </span>
     ${
@@ -563,20 +3237,32 @@ function renderFindings(doctor) {
     parts.length > 0 ? parts.join('') : '<p class="muted">Nothing to report.</p>';
 }
 
-function selectFlow(id) {
+function selectFlow(id, { reveal = true, scroll = reveal, via = null } = {}) {
   const flow = state.flows.find((candidate) => candidate.id === id);
   if (!flow) return;
+  state.selectedScope = null;
+  /**
+   * Opened as what a link sets off: the link is the selection, and this action
+   * — what its screen runs as it opens — is what its tabs describe.
+   */
+  state.via = via;
   state.selectedFlow = flow;
   state.selectedNode = null;
   el.docLink.href = apiUrl(`/api/document?flow=${encodeURIComponent(flow.id)}`);
   state.insight = null;
   if (state.queriesFor !== flow.id) state.queries = null;
-  // Opening an action from a link or another tab shows it in the list too.
-  for (const key of groupKeys(flow)) state.closedPages.delete(key);
+  // Opening an action from another tab shows it in the list too.
+  if (reveal) {
+    for (const key of groupKeys(flow)) state.openGroups.add(key);
+    for (const key of navKeysFor(flow.id)) state.openGroups.add(key);
+  }
   renderFlowList();
-  el.flowList
-    .querySelector(`.flow-item[aria-selected="true"]`)
-    ?.scrollIntoView?.({ block: 'nearest' });
+  // A row clicked in the list is already in view; one opened from elsewhere is brought there.
+  if (scroll) {
+    el.flowList
+      .querySelector(`.flow-item[aria-selected="true"]`)
+      ?.scrollIntoView?.({ block: 'nearest' });
+  }
   renderFlowHeader(flow);
   renderGraph(flow);
   renderDetails(null);
@@ -678,6 +3364,7 @@ function renderTabs() {
  * tab. A tab that always reads "12" teaches people to ignore it.
  */
 function tabBadge(id) {
+  if (state.selectedScope) return scopeBadge(id);
   // Project-wide, so it has a badge before any feature is selected.
   // Your own breaking edits outrank anything about the selected action.
   if (id === 'impact') return impactBadge();
@@ -779,7 +3466,10 @@ function showTab(id) {
     if (legacy[1]) state.docView = legacy[1];
   }
   state.tab = TABS.some(([candidate]) => candidate === id) ? id : 'docs';
-  const diagram = state.tab === 'docs' && state.docView === 'diagram';
+  // A page has no single path to draw: its Docs tab is always the summary.
+  const diagram = state.tab === 'docs' && state.docView === 'diagram' && !state.selectedScope;
+  // A page is explained in words, not in tabs: the tabs belong to what is on it.
+  if (el.tabs) el.tabs.hidden = Boolean(state.selectedScope?.page);
   // Only the diagram uses the step inspector on the right; everything else
   // gets the full width.
   const layout = document.querySelector('.layout');
@@ -787,12 +3477,17 @@ function showTab(id) {
   layout?.toggleAttribute('data-diagram', diagram);
   const params = new URLSearchParams();
   params.set('tab', state.tab);
-  if (state.selectedFlow) params.set('flow', state.selectedFlow.id);
+  if (state.selectedScope) params.set('entry', state.selectedScope.key);
+  else if (state.via) params.set('entry', state.via.key);
+  else if (state.selectedFlow) params.set('flow', state.selectedFlow.id);
   if (diagram) params.set('view', 'diagram');
   window.history.replaceState?.(null, '', `#${params}`);
   for (const [tabId] of TABS) {
     const panel = el.panels[tabId];
-    if (panel) panel.hidden = tabId !== state.tab || (tabId === 'docs' && diagram);
+    if (!panel) continue;
+    panel.hidden = state.selectedScope?.page
+      ? tabId !== 'docs'
+      : tabId !== state.tab || (tabId === 'docs' && diagram);
   }
   if (el.graph) el.graph.hidden = !diagram;
   for (const button of el.tabs?.querySelectorAll('[data-tab]') ?? []) {
@@ -801,6 +3496,14 @@ function showTab(id) {
     button.setAttribute('aria-selected', String(active));
   }
 
+  if (state.selectedScope?.page) {
+    renderPageStory();
+    return;
+  }
+  if (state.selectedScope) {
+    renderScopeTab(state.tab);
+    return;
+  }
   if (state.tab === 'decisions') openDecisionsForSelection();
   if (state.tab === 'impact') renderImpact();
   if (state.tab === 'tests') renderTests();
@@ -897,6 +3600,8 @@ async function loadUnused() {
  * because another app may call them.
  */
 function renderUnused() {
+  // A page or card is selected: its own summary owns this panel.
+  if (state.selectedScope) return renderScopeTab('unused');
   const panel = el.panels.unused;
   if (!panel) return;
   if (!state.unused) return panelLoading(panel, 'what nothing uses');
@@ -1051,6 +3756,26 @@ function renderUnused() {
 }
 
 function renderFlowHeader(flow) {
+  renderActionHeader(flow);
+  const via = state.via;
+  if (!via) return;
+  // Opened from a link: the link is what was picked, and this is what it does.
+  const name = linkName(via.link);
+  el.flowHeader.querySelector('h2').textContent = name;
+  el.flowHeader
+    .querySelector('.chips')
+    ?.insertAdjacentHTML(
+      'afterbegin',
+      `<span class="chip">Link</span><span class="chip">on ${escapeHtml(via.entry.label)}</span>` +
+        (linkData(via.key)
+          ? `<span class="chip">shows ${escapeHtml([...new Set(linkData(via.key).values.flatMap((value) => value.fields))].join(', '))}</span>`
+          : '') +
+        `<span class="chip">→ ${escapeHtml(via.target?.label ?? via.link.to)}</span>` +
+        `<span class="chip">${escapeHtml(via.link.href)}</span>`,
+    );
+}
+
+function renderActionHeader(flow) {
   const chips = [
     `<span class="chip risk-${flow.risk.level}">risk ${flow.risk.level} · ${flow.risk.score}</span>`,
     `<span class="chip">${flow.evidence}</span>`,
@@ -1696,16 +4421,18 @@ el.filter.addEventListener('keydown', (event) => {
 });
 
 el.foldAll.addEventListener('click', () => {
-  const groups = pageGroups(filteredFlows());
-  const open = groups.some((group) => !state.closedPages.has(group.key));
-  state.closedPages = open ? new Set(groups.map((group) => group.key)) : new Set();
+  const sections = [...el.flowList.querySelectorAll('.page-group')];
+  const open = sections.some((section) => section.open);
+  state.openGroups = open ? new Set() : new Set(sections.map((section) => section.dataset.key));
   renderFlowList();
 });
 
 // Up and down walk the visible rows, the way a list in any app does.
 el.flowList.addEventListener('keydown', (event) => {
   if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-  const rows = [...el.flowList.querySelectorAll('.page-group[open] .flow-item')];
+  const rows = [...el.flowList.querySelectorAll('.page-group[open] .flow-item')].filter(
+    (row) => !row.closest('.page-loads:not([open])'),
+  );
   const at = rows.indexOf(document.activeElement);
   if (at === -1) return;
   event.preventDefault();
@@ -1796,6 +4523,28 @@ function escapeHtml(value) {
 }
 
 load();
+
+/**
+ * A link pasted into the address bar, or Back/Forward, changes only the hash:
+ * the page is not reloaded, so the selection follows it here. The dashboard
+ * writes its own hash with `replaceState`, which fires no `hashchange`.
+ */
+window.addEventListener('hashchange', () => {
+  const hash = new URLSearchParams(window.location.hash.slice(1));
+  const tab = hash.get('tab');
+  const legacy = tab ? LEGACY_TABS[tab] : undefined;
+  if (legacy) {
+    state.tab = legacy[0];
+    if (legacy[1]) state.docView = legacy[1];
+  } else if (tab && TABS.some(([candidate]) => candidate === tab)) state.tab = tab;
+  state.docView = hash.get('view') === 'diagram' ? 'diagram' : 'list';
+  const entry = hash.get('entry');
+  const flow = hash.get('flow') ?? hash.get('docs');
+  if (entry && findLink(entry)) selectLink(entry);
+  else if (entry && findNavEntry(entry)) selectScope(entry, { reveal: true });
+  else if (flow) selectFlow(flow);
+  else showTab(state.tab);
+});
 
 // ---------------------------------------------------------------------------
 // Tab panels
@@ -1931,12 +4680,15 @@ function measuredElsewhereHtml() {
  * Up to nineteen stages, always in the same order, so two actions can be read
  * side by side. Only the steps the action actually has are drawn, numbered
  * 1…N; the rest are named under "Not in this action" with the reason, so a
- * missing guard or validation is still stated rather than silently dropped.
+ * missing guard or validation is still stated rather than silently dropped —
+ * except for a load, which no one triggers, so there is nothing to miss.
  * The document is built by `explainAction` in core from the
  * graph plus the few source files the action touches; the Markdown behind
  * "Copy" comes from the same document, so the two cannot disagree.
  */
 function renderDocs() {
+  // A page or card is selected: its own summary owns this panel.
+  if (state.selectedScope) return renderScopeTab('docs');
   const panel = el.panels.docs;
   if (!panel) return;
   const flow = state.selectedFlow;
@@ -1946,7 +4698,7 @@ function renderDocs() {
        <p>Select an action on the left.</p></div>`;
     return;
   }
-  const bar = docBar(flow);
+  const bar = docBar(flow) + linkShowsHtml(state.via?.key, state.via?.link) + viaNote(flow);
   const doc = state.actionDoc;
 
   if (state.actionDocLoading || !doc || (doc.flowId && doc.flowId !== flow.id)) {
@@ -1964,7 +4716,8 @@ function renderDocs() {
   const shown = doc.stages
     .filter((stage) => !stage.absent)
     .map((stage, index) => ({ ...stage, n: index + 1 }));
-  const absent = doc.stages.filter((stage) => stage.absent);
+  // Nobody does anything to a load, so a missing form or confirmation says nothing.
+  const absent = isPageLoad(flow) ? [] : doc.stages.filter((stage) => stage.absent);
   const phases = [];
   for (const stage of shown) {
     const last = phases.at(-1);
@@ -2423,6 +5176,8 @@ function renderInfrastructure(impact) {
 
 /** Tab 4 — what would catch it if you broke it. */
 function renderTests() {
+  // A page or card is selected: its own summary owns this panel.
+  if (state.selectedScope) return renderScopeTab('tests');
   const panel = el.panels.tests;
   if (!panel) return;
   if (!state.insight) return panelLoading(panel, 'which tests cover this');
@@ -2814,15 +5569,36 @@ async function loadQueries(flowId) {
  */
 function openDecisionsForSelection() {
   const id = state.selectedFlow?.id ?? null;
-  if (id && id !== state.decisionsFor) {
+  if (id && decisionsKey(id) !== state.decisionsFor) {
     void loadDecisions(id);
     return;
   }
   renderDecisions();
 }
 
+/**
+ * Which tree is loaded: an action's own, or — opened through a link — the
+ * path that link's value takes. Low and Stockout open the same page, so the
+ * link is part of the key.
+ */
+function decisionsKey(flowId) {
+  return state.via ? `${flowId}|${state.via.link.href}` : flowId;
+}
+
+function decisionsUrl(flowId) {
+  const base = `/api/decisions?flow=${encodeURIComponent(flowId)}`;
+  const via = state.via;
+  if (!via) return base;
+  return (
+    `${base}&link=${encodeURIComponent(via.link.href)}` +
+    `&label=${encodeURIComponent(linkName(via.link))}&from=${encodeURIComponent(via.entry.label)}`
+  );
+}
+
 async function loadDecisions(flowId) {
-  state.decisionsFor = flowId;
+  const key = decisionsKey(flowId);
+  const url = decisionsUrl(flowId);
+  state.decisionsFor = key;
   state.decisions = null;
   state.decisionsLoading = true;
   // Folds belong to one action's chart; a new action starts from the defaults.
@@ -2831,14 +5607,14 @@ async function loadDecisions(flowId) {
   renderTabs();
   renderDecisions();
   try {
-    const tree = await getJson(`/api/decisions?flow=${encodeURIComponent(flowId)}`);
-    if (state.decisionsFor !== flowId) return;
+    const tree = await getJson(url);
+    if (state.decisionsFor !== key) return;
     state.decisions = tree;
   } catch (error) {
-    if (state.decisionsFor !== flowId) return;
+    if (state.decisionsFor !== key) return;
     state.decisions = { error: String(error.message ?? error) };
   } finally {
-    if (state.decisionsFor === flowId) state.decisionsLoading = false;
+    if (state.decisionsFor === key) state.decisionsLoading = false;
     renderTabs();
     if (state.tab === 'decisions') renderDecisions();
   }
@@ -2888,6 +5664,8 @@ const FC = {
 };
 
 function renderDecisions() {
+  // A page or card is selected: its own summary owns this panel.
+  if (state.selectedScope) return renderScopeTab('decisions');
   const panel = el.panels.decisions;
   if (!panel) return;
   const flow = state.selectedFlow;
@@ -2914,7 +5692,10 @@ function renderDecisions() {
           `It can end ${outcomes} ${outcomes === 1 ? 'way' : 'ways'}` +
             (requests ? `, sends ${requests} ${requests === 1 ? 'request' : 'requests'}` : '') +
             (queries ? ` and runs ${queries} ${queries === 1 ? 'query' : 'queries'}` : '') +
-            '. Read it top to bottom: at each ◆ the arrows say which answer leads where.',
+            '. Read it top to bottom: at each ◆ the arrows say which answer leads where.' +
+            (tree.shared?.length
+              ? ` Steps marked ⧉ run the same way in other actions too: each is one box here, with the ways it can end, and drawn in full once on the page.`
+              : ''),
         );
 
   const check = (key, label, on) =>
@@ -2934,7 +5715,10 @@ function renderDecisions() {
     `<div class="fc-group-buttons">` +
     `<button class="button" data-fc="open">Expand all</button>` +
     `<button class="button" data-fc="close">Collapse helpers</button>` +
-    `<button class="button" data-fc="copy">Copy as text</button>` +
+    // A card's checks are worked out here, not by the server: nothing to fetch as text.
+    (flow.id.startsWith('card:')
+      ? ''
+      : `<button class="button" data-fc="copy">Copy as text</button>`) +
     `</div></div>`;
 
   const legend =
@@ -2955,7 +5739,8 @@ function renderDecisions() {
     : '';
 
   panel.innerHTML =
-    summary +
+    // A card's chart sits under the card's own answer, which already says this.
+    (flow.id.startsWith('card:') ? '' : summary) +
     `<div class="fc-bar">${toolbar}${legend}</div>` +
     `<div class="fc-scroll"><div class="fc-sizer"><div class="fc-stage"></div></div></div>` +
     limits;
@@ -3196,7 +5981,7 @@ function buildBlock(node, key, depth, layer) {
       const blocks = [
         {
           kind: 'try',
-          el: plainHead('Try', 'try', layer),
+          el: plainHead('Watched for errors', 'try', layer),
           seq: buildSeq(node.nodes, `${key}.t`, depth, layer),
           catch: node.catch
             ? {
@@ -3211,7 +5996,7 @@ function buildBlock(node, key, depth, layer) {
       if (node.finally?.length) {
         blocks.push({
           kind: 'frame',
-          el: plainHead('Either way (finally)', 'finally', layer),
+          el: plainHead('Runs either way', 'finally', layer),
           frameClass: 'kind-finally',
           seq: buildSeq(node.finally, `${key}.f`, depth, layer),
         });
@@ -3264,6 +6049,34 @@ function atLine(at) {
 
 function boxElement(node, layer) {
   const el = document.createElement('div');
+  if (node.type === 'step' && node.kind === 'shared') {
+    el.className = `fc-node fc-step kind-shared side-${node.side}`;
+    const others = node.shared.actions - 1;
+    // Failures first, each with its status; then what it hands back when it works.
+    const failing = (end) =>
+      Boolean(end.statuses?.length) || /^(Throw|Stop with|Fail|Return error)/.test(end.label);
+    const ends = [...node.shared.ends]
+      .sort((a, b) => Number(failing(b)) - Number(failing(a)))
+      .map((end) => {
+        const status = end.statuses?.length ? end.statuses.join(' / ') : '';
+        const words = status ? (end.label.split(' · ')[1] ?? end.label) : end.label;
+        return `<li class="${failing(end) ? 'fails' : 'works'}">${status ? `<span class="fc-status">${escapeHtml(status)}</span>` : ''}${escapeHtml(words)}</li>`;
+      })
+      .join('');
+    el.innerHTML =
+      `<span class="fc-icon" aria-hidden="true">⧉</span>` +
+      `<div class="fc-body"><div class="fc-label">${escapeHtml(node.label)}</div>` +
+      `<div class="fc-detail">The same in ${others} other ${others === 1 ? 'action' : 'actions'}${
+        ends ? ' — how it can finish here:' : ''
+      }</div>` +
+      (ends ? `<ul class="fc-shared-ends">${ends}</ul>` : '') +
+      codeLine(node.label, node.text) +
+      atLine(node.at) +
+      `<button type="button" class="fc-shared-open" data-open-shared="${escapeHtml(node.shared.id)}">See every step inside</button>` +
+      `</div>`;
+    layer.appendChild(el);
+    return el;
+  }
   if (node.type === 'end') {
     const status = node.statuses?.length ? node.statuses.join(' / ') : '';
     const label = status ? statusWords(node) : node.label;
@@ -3284,6 +6097,8 @@ function boxElement(node, layer) {
     el.innerHTML =
       `<span class="fc-icon" aria-hidden="true">${icon}</span>` +
       `<div class="fc-body"><div class="fc-label">${escapeHtml(node.label)}${effect}</div>` +
+      // What this query does, so six reads of two collections are six different steps.
+      (node.detail ? `<div class="fc-detail">${escapeHtml(node.detail)}</div>` : '') +
       `${node.kind === 'trigger' ? '' : codeLine(node.label, node.text)}${atLine(node.at)}</div>`;
   }
   layer.appendChild(el);
@@ -3294,7 +6109,7 @@ function boxElement(node, layer) {
 function statusWords(node) {
   const message = node.message ? `: ${node.message}` : '';
   if (node.outcome === 'respond') return `Respond${message}`;
-  if (node.outcome === 'throw') return `Throw${message || ' an error'}`;
+  if (node.outcome === 'throw') return `Stop with an error${message}`;
   return `Return to the caller${message}`;
 }
 
@@ -3989,6 +6804,8 @@ function bindIssueJumps(panel) {
  * measure, rather than a guess.
  */
 function renderPerf() {
+  // A page or card is selected: its own summary owns this panel.
+  if (state.selectedScope) return renderScopeTab('perf');
   const panel = el.panels.perf;
   if (!panel) return;
   const flow = state.selectedFlow;
@@ -4254,6 +7071,8 @@ const VERDICT_LABELS = {
  * to it would reach, and last the long list of the rest of the project.
  */
 function renderImpact() {
+  // A page or card is selected: its own summary owns this panel.
+  if (state.selectedScope) return renderScopeTab('impact');
   const panel = el.panels.impact;
   if (!panel) return;
   panel.innerHTML =

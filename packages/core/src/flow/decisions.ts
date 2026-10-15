@@ -28,14 +28,26 @@
  */
 
 import {
+  plainFallback,
+  plainQuestion,
+  plainResult,
+  plainValue,
+  words as spoken,
+} from './plainwords.js';
+import { baseQueryCall, queryDetail } from './querydetail.js';
+import {
   Node,
   SyntaxKind,
   type ArrayLiteralExpression,
+  type ClassDeclaration,
   type CallExpression,
   type ConditionalExpression,
   type IfStatement,
+  type ObjectLiteralExpression,
+  type TryStatement,
   type PropertyAccessExpression,
   type ReturnStatement,
+  type SourceFile,
   type VariableDeclaration,
 } from 'ts-morph';
 import type { Functionish } from '../analyzer/ast.js';
@@ -44,6 +56,9 @@ import type { FlowGraph } from '../graph/graph.js';
 import type { FlowNode } from '../graph/types.js';
 import { locateAction, type LocatedAction } from './action.js';
 import {
+  rendersWatching,
+  effectsWatching,
+  filledFields,
   bodyStatements,
   condense,
   endsFunction,
@@ -59,7 +74,8 @@ import {
   unwrap,
   type SourcePoint,
 } from './actionsource.js';
-import type { FeatureFlow } from './resolve.js';
+import { EXECUTION_EDGES, resolveFlows, type FeatureFlow } from './resolve.js';
+import { pageAtPath } from './pages.js';
 
 // ---------------------------------------------------------------------------
 // The tree
@@ -81,8 +97,10 @@ export interface DecisionStep {
    * - `guard` — middleware declared on the route, run before the handler
    * - `compute` — a value the next query or decision depends on: a filter
    *   condition added, or the result of a chain of `?:`
+   * - `shared` — a helper that runs the same way in other actions too, drawn
+   *   once on its own (see `shareddecisions.ts`) and named here
    */
-  kind: 'trigger' | 'call' | 'ui' | 'db' | 'external' | 'guard' | 'compute';
+  kind: 'trigger' | 'call' | 'ui' | 'db' | 'external' | 'guard' | 'compute' | 'shared';
   /** What happens, in plain words: `Update medicines`, `Show error "…"`. */
   label: string;
   /** The code that does it, as written (condensed). */
@@ -91,8 +109,29 @@ export interface DecisionStep {
   at?: SourcePoint;
   /** read | create | update | delete | write, for a query. */
   effect?: string;
+  /**
+   * What a query does, told apart from its neighbours on the same collection:
+   * `→ recentlyAdded · where ownerId · newest createdAt first · up to 5`.
+   */
+  detail?: string;
   /** The graph node behind a query or effect, so a view can link to it. */
   nodeId?: string;
+  /** For a `shared` step: which shared part it is, and how it can end here. */
+  shared?: SharedUse;
+}
+
+/** A shared helper as one action runs it. */
+export interface SharedUse {
+  /** The part's id, the same in every action that runs it. */
+  id: string;
+  /** How many actions run it, this one included. */
+  actions: number;
+  /**
+   * Every way it hands control back to this action: what it returns, an
+   * answer, a throw — as they turn out here (a throw nothing catches is a 500
+   * in one action and caught in another).
+   */
+  ends: Array<{ label: string; statuses?: number[] }>;
 }
 
 export interface DecisionBranch {
@@ -138,6 +177,8 @@ export interface DecisionGroup {
   at?: SourcePoint;
   /** For a request: the file that answers it. */
   handledBy?: SourcePoint;
+  /** For a project function: where it is written, so the same helper is known wherever it runs. */
+  callee?: SourcePoint;
   nodes: DecisionNode[];
 }
 
@@ -169,6 +210,11 @@ export interface DecisionEnd {
   message?: string;
   side: DecisionSide;
   at?: SourcePoint;
+  /**
+   * Set on a throw marked "not caught, so the server answers 500": the throw
+   * as written, before that was known — the same helper is caught elsewhere.
+   */
+  uncaught?: { text: string; label: string };
 }
 
 export interface ActionDecisions {
@@ -195,14 +241,14 @@ export interface ActionDecisionsOptions {
 // ---------------------------------------------------------------------------
 
 /** How many project functions deep a call is followed. */
-const MAX_DEPTH = 7;
+const MAX_DEPTH = 10;
 
 /** A tree past this many nodes stops growing; the reader is told. */
 const MAX_NODES = 900;
 
 /** Frontend calls that change what the user sees. */
 const UI_CALLS =
-  /^(toast(\.\w+)?|alert|notify|enqueueSnackbar|message\.\w+|notification\.\w+|router\.(push|replace|back|refresh|prefetch)|navigate|redirect|window\.location\.\w+|location\.(assign|replace|reload)|\w+\.invalidateQueries|\w+\.setQueryData|\w+\.refetch(Queries)?|refetch|mutate|reset|form\.reset|\w+\.reset|revalidatePath|revalidateTag|window\.(print|open|scrollTo)|print)$/;
+  /^(toast(\.\w+)?|alert|notify|enqueueSnackbar|message\.\w+|notification\.\w+|router\.(push|replace|back|refresh|prefetch)|navigate|redirect|window\.location\.\w+|location\.(assign|replace|reload)|\w+\.invalidateQueries|\w+\.setQueryData|\w+\.removeQueries|\w+\.resetQueries|\w+\.cancelQueries|\w+\.refetch(Queries)?|refetch|mutate|reset|form\.reset|\w+\.reset|revalidatePath|revalidateTag|window\.(print|open|scrollTo)|print)$/;
 
 /** Driver methods no plain array or map has. */
 const DRIVER_ONLY =
@@ -227,6 +273,12 @@ interface Frame {
   bound?: Map<string, Functionish>;
   /** Variables this function passes to a query: `filter` in `find(filter)`. */
   queryVars?: Set<string>;
+  /**
+   * Inside a branch of a decision: a value set here is what the branch does —
+   * `filter.category = …`, `matched.push(c)` — and is drawn, or the decision
+   * that sets it disappears with it.
+   */
+  inBranch?: boolean;
 }
 
 type LocatedCall = LocatedAction['calls'][number];
@@ -246,12 +298,20 @@ interface Walk {
   stack: Node[];
   /** Helpers already opened once: later calls name them instead of repeating the inside. */
   opened: Set<Node>;
+  /**
+   * Helper calls already opened, by function *and* arguments:
+   * `requireEnv("MONGODB_URI")` and `requireEnv("CLINICS_DB")` are two
+   * different checks, each of which can throw, and both are drawn.
+   */
+  openedCalls: Set<string>;
   /** The component's handler a child calls through its prop, when there is one. */
   parentHandler?: Functionish;
   /** Props of the child component that run the parent's handler. */
   childProps: Set<string>;
   size: number;
   limits: Set<string>;
+  /** Work a background worker does once the request has answered: drawn after the answer. */
+  later: DecisionNode[];
 }
 
 /** The decision tree for one action. */
@@ -261,6 +321,8 @@ export function actionDecisions(
   options: ActionDecisionsOptions = {},
 ): ActionDecisions {
   const reader = options.reader ?? new SourceReader(graph);
+  const page = pageOpened(graph, flow);
+  if (page) return pageNavigation(graph, flow, page, reader);
   const located = locateAction(graph, flow, { reader });
   const walk: Walk = {
     graph,
@@ -272,9 +334,11 @@ export function actionDecisions(
     drawn: new Set(),
     stack: [],
     opened: new Set(),
+    openedCalls: new Set(),
     childProps: new Set(),
     size: 0,
     limits: new Set(located.limits),
+    later: [],
   };
   for (const call of located.calls) {
     if (call.call) walk.requests.set(siteKey(call.call), call);
@@ -293,6 +357,8 @@ export function actionDecisions(
 
   try {
     nodes.push(...walkEntry(walk));
+    // A job queued outside any request still runs, later.
+    nodes.push(...walk.later.splice(0));
   } catch (error) {
     walk.limits.add(
       `Part of the source could not be read: ${error instanceof Error ? error.message : String(error)}`,
@@ -301,15 +367,42 @@ export function actionDecisions(
 
   // A request the walk did not reach is still part of the action: list it, with
   // its server side, rather than let the tree suggest the action sends nothing.
-  const missed = located.calls.filter((call) => !walk.drawn.has(call));
-  if (missed.length > 0) {
-    const reached = walk.drawn.size > 0;
+  const notDrawn = located.calls.filter((call) => !walk.drawn.has(call));
+  /**
+   * A request this action sets off by changing what the screen shows — a
+   * filter its list reads, a tab whose part loads when shown — is reached
+   * through state, not a call: said so, not "the walk did not reach them".
+   */
+  const viaState = notDrawn.filter((call) => reachedThroughState(walk, call));
+  if (viaState.length > 0) {
     nodes.push({
       type: 'group',
       label: '',
       kind: 'unlinked',
+      title: (() => {
+        const wait = debounceOf(walk, viaState);
+        return wait
+          ? `Then, once the typing has stopped for ${wait} ms, because what the screen shows changed, it loads again`
+          : 'Then, because what the screen shows changed, it loads again';
+      })(),
+      side: 'browser',
+      nodes: orderByUse(walk, viaState).flatMap((call) => unlinkedNodes(walk, call)),
+    });
+  }
+  const missed = notDrawn.filter((call) => !viaState.includes(call));
+  if (missed.length > 0) {
+    const reached = walk.drawn.size > 0;
+    // Hooks run as the component renders, all of them: on load, the requests
+    // start together and are waited for apart — drawn side by side, not in a row.
+    const together = flow.event === 'mount' && !reached && missed.length > 1;
+    nodes.push({
+      type: 'group',
+      label: together ? 'These start together as it opens' : '',
+      kind: together ? 'parallel' : 'unlinked',
       title: reached
-        ? 'Also requested — the walk from the handler did not reach these'
+        ? flow.event === 'mount'
+          ? 'Also loaded as it opens'
+          : 'Also requested — the walk from the handler did not reach these'
         : flow.event === 'mount' || !walk.located.front.some((fn) => fn.role !== 'request')
           ? 'Requests made'
           : 'Requests made — the walk from the handler did not reach them',
@@ -323,6 +416,7 @@ export function actionDecisions(
       `The tree stops at ${MAX_NODES} nodes; deeper helpers are named, not followed.`,
     );
   }
+  markUncaught(nodes, false);
   return {
     flowId: flow.id,
     title: flow.title,
@@ -333,6 +427,76 @@ export function actionDecisions(
       'Read from the source, not run: a branch that is never taken still appears.',
       'Library code is not followed: a decision made inside a library, or behind a ' +
         'dynamic call, shows up as the call.',
+    ],
+  };
+}
+
+/**
+ * Seen only while the app ran, a `GET` to one of the app's own pages: the user
+ * opening that page, not an API call — the page file it opens, if so.
+ */
+function pageOpened(graph: FlowGraph, flow: FeatureFlow): string | undefined {
+  if (flow.source || flow.endpoints.length === 0) return undefined;
+  let page: string | undefined;
+  for (const endpoint of flow.endpoints) {
+    const [method, path] = endpoint.split(' ');
+    if (method !== 'GET' || !path) return undefined;
+    page = pageAtPath(graph, path);
+    if (!page) return undefined;
+  }
+  return page;
+}
+
+/** Opening a page: the address, then every load the page runs as it opens, in full. */
+function pageNavigation(
+  graph: FlowGraph,
+  flow: FeatureFlow,
+  page: string,
+  reader: SourceReader,
+): ActionDecisions {
+  const path = flow.endpoints[0]!.split(' ')[1]!;
+  const nodes: DecisionNode[] = [
+    {
+      type: 'step',
+      kind: 'trigger',
+      label: `The user opens ${path}`,
+      text: `opens ${path}`,
+      side: 'browser',
+    },
+    {
+      type: 'step',
+      kind: 'ui',
+      label: `The browser shows the page at ${path}`,
+      text: `${page} — a page of the app, fetched from its own address; no API route answers it`,
+      side: 'browser',
+      at: { file: page, line: 1 },
+    },
+  ];
+  const loads = resolveFlows(graph, { includeLocalOnly: true }).filter(
+    (candidate) =>
+      candidate.event === 'mount' && (candidate.source?.file ?? candidate.steps[0]?.file) === page,
+  );
+  for (const load of loads) {
+    const tree = actionDecisions(graph, load, { reader });
+    nodes.push({
+      type: 'group',
+      kind: 'function',
+      label: `${capitalise(load.title)}`,
+      title: load.title,
+      side: 'browser',
+      ...(load.source ? { at: load.source } : {}),
+      // The load's own start ("X opens") is this page opening: drawn once.
+      nodes: tree.nodes.filter((node) => !(node.type === 'step' && node.kind === 'trigger')),
+    });
+  }
+  return {
+    flowId: flow.id,
+    title: flow.title,
+    nodes,
+    counts: countOf(labelTree(nodes)),
+    limits: [
+      `Seen while the app ran: ${path} is a page of the app, so the request is the page being opened.`,
+      'Read from the source, not run: a branch that is never taken still appears.',
     ],
   };
 }
@@ -362,12 +526,37 @@ function unlinkedNodes(walk: Walk, call: LocatedCall): DecisionNode[] {
   const nodes = [
     ...(walk.drawn.has(call) ? inner : [...inner, ...requestNodes(walk, call, frame)]),
     ...hookOutcome(walk, call, undefined, frame),
+    ...dataEffects(walk, call, frame),
   ];
   const options = call.hook?.options;
   const enabled =
     options && Node.isObjectLiteralExpression(options) ? options.getProperty('enabled') : undefined;
   const condition =
     enabled && Node.isPropertyAssignment(enabled) ? enabled.getInitializer() : undefined;
+  // `refetchInterval: 2000`, or a function deciding while to keep asking: the
+  // request is sent again and again — a loop, not one call.
+  const interval =
+    options && Node.isObjectLiteralExpression(options)
+      ? options.getProperty('refetchInterval')
+      : undefined;
+  const every =
+    interval && Node.isPropertyAssignment(interval) ? interval.getInitializer() : undefined;
+  if (every && every.getText() !== 'false') {
+    const text = condense(every.getText(), 70);
+    const polled: DecisionNode = {
+      type: 'group',
+      kind: 'loop',
+      label: '',
+      title: Node.isNumericLiteral(every)
+        ? `repeats every ${every.getText()} ms`
+        : `repeats while: ${text}`,
+      side: 'browser',
+      at: walk.reader.point(every),
+      nodes: [...nodes],
+    };
+    walk.size += 1;
+    nodes.splice(0, nodes.length, polled);
+  }
   if (!condition || condition.getText() === 'true') return nodes;
   return [
     decision(
@@ -382,9 +571,107 @@ function unlinkedNodes(walk: Walk, call: LocatedCall): DecisionNode[] {
   ];
 }
 
+/**
+ * `const statusQ = useImportJobStatus(jobId)` and a `useEffect` on
+ * `statusQ.data`: when the answer changes, that effect decides what happens
+ * next — "Import complete" and the summary, or "Import failed" and back a
+ * step. Nothing calls it, so the polled request read as the end of the story.
+ */
+function dataEffects(walk: Walk, call: LocatedCall, frame: Frame): DecisionNode[] {
+  const hook = call.hook?.name;
+  if (!hook) return [];
+  const out: DecisionNode[] = [];
+  const files = new Set(walk.flow.steps.flatMap((step) => (step.file ? [step.file] : [])));
+  for (const rel of files) {
+    const file = walk.reader.file(rel);
+    if (!file) continue;
+    // As it draws with the answer: `if (clinics) { … auto-select the only clinic … }`,
+    // or `if (isLoading) return <Skeleton />`: which screen the user gets.
+    const renders = rendersWatching(file, hook).flatMap((statement) => {
+      const shown = screenReturned(statement.getThenStatement());
+      if (!shown)
+        return walkStatement(
+          walk,
+          statement,
+          { ...frame, role: 'handler', depth: frame.depth + 1 },
+          false,
+        );
+      const { question, thenLabel, elseLabel } = phrase(statement.getExpression().getText());
+      const showing = step(walk, 'ui', `shows ${shown}`, frame, statement.getThenStatement());
+      showing.label = `Show ${shown}`;
+      return [
+        decision(
+          walk,
+          question,
+          statement.getExpression().getText(),
+          frame,
+          statement,
+          [{ label: thenLabel, nodes: [showing], ends: true }],
+          elseLabel,
+        ),
+      ];
+    });
+    if (renders.some((node) => worthShowing(node) || node.type === 'decision')) {
+      walk.size += 1;
+      out.push({
+        type: 'group',
+        kind: 'function',
+        label: 'As the component draws with the answer, it decides',
+        title: 'as it draws with the answer',
+        side: 'browser',
+        at: walk.reader.point(rendersWatching(file, hook)[0]!),
+        nodes: renders,
+      });
+    }
+    for (const { effect, fn, deps } of effectsWatching(file, hook)) {
+      if (walk.opened.has(fn)) continue;
+      walk.opened.add(fn);
+      const inner = walkFunction(walk, fn, { ...frame, role: 'handler', depth: frame.depth + 1 });
+      if (!inner.some((node) => worthShowing(node) || node.type === 'decision')) continue;
+      walk.size += 1;
+      out.push({
+        type: 'group',
+        kind: 'function',
+        label: 'When the answer changes, the effect watching it runs',
+        title: `when the answer changes: useEffect([${condense(deps.join(', '), 50)}])`,
+        side: 'browser',
+        at: walk.reader.point(effect),
+        nodes: inner,
+      });
+    }
+  }
+  return out;
+}
+
+/** `return <EmptyState title="Medicine not found" />` -> `"Medicine not found"`; a skeleton -> "the loading placeholder". */
+function screenReturned(then: Node): string | undefined {
+  const returned = Node.isReturnStatement(then)
+    ? then
+    : Node.isBlock(then)
+      ? then.getStatements().find((statement) => Node.isReturnStatement(statement))
+      : undefined;
+  const value =
+    returned && Node.isReturnStatement(returned) && returned.getExpression()
+      ? unwrap(returned.getExpression()!)
+      : undefined;
+  if (
+    !value ||
+    !(Node.isJsxElement(value) || Node.isJsxSelfClosingElement(value) || Node.isJsxFragment(value))
+  )
+    return undefined;
+  const text = value.getText();
+  const title = /\btitle=["']([^"']+)["']/.exec(text)?.[1];
+  if (title) return `"${title}"`;
+  if (/Skeleton|Spinner|Loading/.test(text)) return 'the loading placeholder';
+  const heading = /<h[1-3][^>]*>([^<{]+)</.exec(text)?.[1]?.trim();
+  return heading ? `"${heading}"` : 'another screen instead';
+}
+
 function walkEntry(walk: Walk): DecisionNode[] {
   const { located } = walk;
   const out: DecisionNode[] = [];
+  const gate = disabledGate(walk);
+  if (gate) out.push(gate);
   const handlers = located.front.filter((fn) => fn.role === 'handler');
   const child = located.front.find((fn) => fn.role === 'child');
 
@@ -436,13 +723,89 @@ function walkEntry(walk: Walk): DecisionNode[] {
     );
     return out;
   }
-  const first = handlers[0];
-  if (first) out.push(functionNode(walk, first.fn, frame, first.name));
-  // A page load: the request functions are the entry.
+  // A page load runs every function it calls as it opens, one after another —
+  // `getSubscription(); getTotals(); getSliders();` — not only the first.
+  const entries = walk.flow.event === 'mount' ? handlers : handlers.slice(0, 1);
+  for (const entry of entries) {
+    if (walk.opened.has(entry.fn)) continue;
+    out.push(functionNode(walk, entry.fn, frame, entry.name));
+  }
+  out.push(...popupSteps(walk, frame));
+  return out;
+}
+
+/**
+ * The click opened a popup; the rest of the feature is what the user does in
+ * it: fills its fields and presses its main button ("Download"), whose own
+ * handler then runs — drawn from there, to the server and back.
+ */
+function popupSteps(walk: Walk, frame: Frame): DecisionNode[] {
+  const out: DecisionNode[] = [];
+  for (const step of walk.flow.steps) {
+    if (step.kind !== 'handler') continue;
+    for (const edge of walk.graph.edgesFrom(step.nodeId, ['calls'])) {
+      const pressed = edge.meta?.['userStep'];
+      if (typeof pressed !== 'string') continue;
+      const target = walk.graph.node(edge.to);
+      const file = target?.source ? walk.reader.file(target.source.file) : undefined;
+      const fn = file && target?.source ? functionAtLine(file, target.source.line) : undefined;
+      const fields = (edge.meta?.['fields'] as string[] | undefined) ?? [];
+      const said = `${filledFields(fields)}${edge.meta?.['input'] ? 'uses' : 'presses'} "${pressed}"`;
+      const user: DecisionNode = {
+        type: 'step',
+        kind: 'ui',
+        label: `In the popup, the user ${said}`,
+        text: `in the popup, the user ${said}`,
+        side: 'browser',
+        ...(target?.source ? { at: target.source } : {}),
+      };
+      out.push(user);
+      if (fn && !walk.opened.has(fn))
+        out.push(functionNode(walk, fn, frame, target?.label ?? pressed));
+    }
+  }
   return out;
 }
 
 /** A function as a step, or as a group when something happens inside it. */
+/**
+ * `<button disabled={!canSave} onClick={save}>`: while the condition holds the
+ * click cannot happen at all — the first thing that decides whether the
+ * action runs, written on the button rather than in the handler.
+ */
+function disabledGate(walk: Walk): DecisionNode | undefined {
+  const entry = walk.located.entryExpression;
+  const attribute = entry?.getFirstAncestorByKind(SyntaxKind.JsxAttribute);
+  const element = attribute?.getParent()?.getParent();
+  if (!element || !(Node.isJsxOpeningElement(element) || Node.isJsxSelfClosingElement(element))) {
+    return undefined;
+  }
+  const disabled = element.getAttribute('disabled');
+  if (!disabled || !Node.isJsxAttribute(disabled)) return undefined;
+  const initializer = disabled.getInitializer();
+  const condition =
+    initializer && Node.isJsxExpression(initializer) ? initializer.getExpression() : undefined;
+  if (!condition || /^(true|false)$/.test(condition.getText())) return undefined;
+  const frame: Frame = { side: 'browser', role: 'handler', depth: 0 };
+  return decision(
+    walk,
+    `${condense(condition.getText(), 50)}?`,
+    condition.getText(),
+    frame,
+    condition,
+    [
+      {
+        label: 'yes — the button is disabled',
+        nodes: [
+          end(walk, 'stop', 'nothing happens — the button cannot be pressed', frame, condition),
+        ],
+        ends: true,
+      },
+    ],
+    'no — it can be pressed',
+  );
+}
+
 function functionNode(walk: Walk, fn: Functionish, frame: Frame, title?: string): DecisionNode {
   const name = title ?? `${nameOf(fn)}()`;
   const nodes = walkFunction(walk, fn, frame);
@@ -510,6 +873,75 @@ function queryVariables(walk: Walk, fn: Functionish): Set<string> {
 }
 
 /** `filter.category = query.category` / `or.push({ sku })` on a variable a query reads. */
+/**
+ * What a branch does when all it does is set a value: `filter.category =
+ * query.category` is "Set filter category", `and.push(…)` is "Add to and",
+ * `count++` is "Count + 1". Anything else in a branch is not a step.
+ */
+function settingStep(walk: Walk, expression: Node, frame: Frame): DecisionStep | undefined {
+  const node = unwrap(expression);
+  let label: string | undefined;
+  if (
+    Node.isBinaryExpression(node) &&
+    /=$/.test(node.getOperatorToken().getText()) &&
+    !/[=!<>]=$/.test(node.getOperatorToken().getText())
+  ) {
+    label = settingLabel(
+      node.getLeft(),
+      node.getRight().getText(),
+      node.getOperatorToken().getText(),
+    );
+  } else if (
+    Node.isCallExpression(node) &&
+    /\.(push|unshift|add|set|delete)$/.test(calleeText(node))
+  ) {
+    const base = calleeText(node).replace(/\.(push|unshift|add|set|delete)$/, '');
+    const verb = /\.delete$/.test(calleeText(node)) ? 'Remove from' : 'Add to';
+    label = `${verb} the ${spoken(base.split('.').pop()!)}`;
+  } else if (Node.isPostfixUnaryExpression(node) || Node.isPrefixUnaryExpression(node)) {
+    const text = node.getText();
+    const name = text.replace(/\+\+|--/g, '');
+    label = /^[\w$.]+$/.test(name)
+      ? `${text.includes('++') ? 'Add 1 to' : 'Take 1 from'} the ${spoken(name.split('.').pop()!)}`
+      : condense(text, 40);
+  } else if (Node.isDeleteExpression(node)) {
+    label = `Remove the ${spoken(node.getExpression().getText().split('.').pop()!)}`;
+  }
+  if (!label) return undefined;
+  const made = step(walk, 'compute', condense(node.getText(), 90), frame, node);
+  made.label = label;
+  return made;
+}
+
+/**
+ * `filter.category = query.category` -> "Set the category"; `step = "map"` ->
+ * `Set the step to "map"`; `next = {}` -> "Set the next to empty". The code
+ * itself is the step's text, shown with "Show code".
+ */
+function settingLabel(left: Node, right: string, operator: string): string {
+  const target = left.getText();
+  // `[day, month] = …` sets each of them.
+  if (Node.isArrayLiteralExpression(left) || Node.isObjectLiteralExpression(left)) {
+    const names = (target.match(/[A-Za-z_$][\w$]*/g) ?? []).map(spoken);
+    const list =
+      names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : names[0];
+    return `Set the ${list ?? 'values'}`;
+  }
+  // `next[key] = …` names the item by its list.
+  const name = spoken(
+    Node.isElementAccessExpression(left)
+      ? left.getExpression().getText().split('.').pop()!
+      : target.split('.').pop()!,
+  );
+  const value = plainValue(right);
+  if (operator === '+=') return value ? `Add ${value} to the ${name}` : `Add to the ${name}`;
+  if (operator === '-=') return value ? `Take ${value} from the ${name}` : `Take from the ${name}`;
+  if (value === 'nothing') return `Clear the ${name}`;
+  // Saying "set the supplier to the supplier" adds nothing.
+  if (value && !value.endsWith(name)) return `Set the ${name} to ${value}`;
+  return `Set the ${name}`;
+}
+
 function queryBuilding(walk: Walk, expression: Node, frame: Frame): DecisionStep | undefined {
   if (!frame.queryVars?.size) return undefined;
   const node = unwrap(expression);
@@ -522,10 +954,10 @@ function queryBuilding(walk: Walk, expression: Node, frame: Frame): DecisionStep
     const left = node.getLeft();
     base = left.getText().split(/[.[]/)[0];
     const key = Node.isPropertyAccessExpression(left) ? left.getName() : undefined;
-    label = key ? `Filter on ${words(key)}` : `Set ${base}`;
+    label = key ? `Filter on ${spoken(key)}` : `Set the ${spoken(base!)}`;
   } else if (Node.isCallExpression(node) && /\.(push|unshift)$/.test(calleeText(node))) {
     base = calleeText(node).split('.')[0];
-    label = `Add a condition to ${base}`;
+    label = `Add a condition to the ${spoken(base!)}`;
   }
   if (!base || !frame.queryVars.has(base)) return undefined;
   const made = step(walk, 'compute', condense(node.getText(), 90), frame, node);
@@ -545,9 +977,84 @@ function valueChoice(
   frame: Frame,
 ): DecisionQuestion | undefined {
   const value = unwrap(init);
+  const fn = nearestFunction(value) as Functionish | undefined;
+  /**
+   * Where a name comes from that a request decides on: a parameter, a field
+   * of one (`query.sortBy`), or a value worked out from one, or from a query's
+   * answer (`const [rollup] = await Promise.all(…)`).
+   */
+  const fromInput = (code: string): boolean => {
+    const root = /^!?\s*\(?\s*([A-Za-z_$][\w$]*)/.exec(code.trim())?.[1];
+    if (!root || !fn) return false;
+    if (fn.getParameters().some((param) => param.getName() === root)) return true;
+    const declared = fn
+      .getDescendantsOfKind(SyntaxKind.VariableDeclaration)
+      .find((declaration) =>
+        new RegExp(`(^|[^\\w$])${root.replace(/\$/g, '\\$')}([^\\w$]|$)`).test(
+          declaration.getNameNode().getText(),
+        ),
+      );
+    const source = declared?.getInitializer()?.getText() ?? '';
+    return (
+      /\bawait\b/.test(source) ||
+      fn.getParameters().some((param) => new RegExp(`\\b${param.getName()}\\b`).test(source))
+    );
+  };
+  // `const sortBy = query.sortBy ?? "updatedAt"`: a default the caller never sees.
+  if (
+    Node.isBinaryExpression(value) &&
+    value.getOperatorToken().getKind() === SyntaxKind.QuestionQuestionToken &&
+    fromInput(value.getLeft().getText())
+  ) {
+    const left = value.getLeft().getText();
+    const fallback = step(
+      walk,
+      'compute',
+      `${name} = ${condense(value.getRight().getText(), 70)}`,
+      frame,
+      value.getRight(),
+    );
+    const given = plainValue(value.getRight().getText());
+    fallback.label = given
+      ? `The ${spoken(name)} becomes ${given}`
+      : `The ${spoken(name)} falls back to ${condense(value.getRight().getText(), 40)}`;
+    const asked = decision(
+      walk,
+      `${condense(left, 50)} is missing?`,
+      `${left} ?? …`,
+      frame,
+      value,
+      [{ label: 'yes', nodes: [fallback], ends: false }],
+      `no — ${name} is ${condense(left, 40)}`,
+    );
+    asked.label = `Is ${condense(left, 50)} missing?`;
+    return asked;
+  }
   if (!Node.isConditionalExpression(value)) return undefined;
   const nested = (node: Node): boolean => Node.isConditionalExpression(unwrap(node));
-  if (!nested(value.getWhenTrue()) && !nested(value.getWhenFalse())) return undefined;
+  /**
+   * `const startDate = from_date ? new Date(from_date) : <7 days ago>`: one
+   * `? :` on what the function was given is a decision about the request — a
+   * default the caller never sees. Other single `? :`s are formatting.
+   */
+  const params = new Set(
+    (nearestFunction(value) as Functionish | undefined)
+      ?.getParameters()
+      .map((param) => param.getName()) ?? [],
+  );
+  const onInput = /^!?\s*([\w$]+)/.exec(value.getCondition().getText().trim());
+  const condition = value.getCondition().getText().trim();
+  const decidesInput =
+    (onInput !== null &&
+      params.has(onInput[1]!) &&
+      /^!?\s*[\w$]+(\?\.[\w$]+)?\s*$/.test(condition)) ||
+    // `query.sortDir === "asc" ? 1 : -1`, `sortBy === "name" ? … : …`: an input compared with a fixed value.
+    (/^[\w$]+((\?)?\.[\w$]+)*\s*[!=]==?\s*("[^"]*"|'[^']*'|-?\d+|true|false|null)$/.test(
+      condition,
+    ) &&
+      fromInput(condition));
+  if (!decidesInput && !nested(value.getWhenTrue()) && !nested(value.getWhenFalse()))
+    return undefined;
   const arm = (node: Node): DecisionNode[] => {
     const inner = unwrap(node);
     if (Node.isConditionalExpression(inner)) {
@@ -555,7 +1062,10 @@ function valueChoice(
       return [deeper];
     }
     const made = step(walk, 'compute', `${name} = ${condense(inner.getText(), 70)}`, frame, inner);
-    made.label = `${name} = ${condense(inner.getText(), 50)}`;
+    const value = plainValue(inner.getText());
+    made.label = value
+      ? `The ${spoken(name)} becomes ${value}`
+      : `The ${spoken(name)} is worked out`;
     return [made];
   };
   const chooseOne = (node: ConditionalExpression): DecisionQuestion => {
@@ -591,9 +1101,57 @@ function walkStatement(walk: Walk, statement: Node, frame: Frame, last: boolean)
   if (Node.isBlock(statement)) return walkStatements(walk, statement.getStatements(), frame, false);
 
   if (Node.isExpressionStatement(statement)) {
+    // `res.status(400).json(…)`, `res.send(buffer)`: an Express-style handler answers here.
+    const answered = expressResponse(walk, statement, frame);
+    if (answered) return answered;
+    // `setTimeout(() => search(text), 250)`: a debounce — what runs is inside.
+    const later = delayedCallback(walk, statement, frame);
+    if (later) return later;
+    // `a.download = \`Report_${from}.xlsx\`` then `a.click()`: the browser saves a file.
+    const expression = unwrap(statement.getExpression());
+    if (
+      frame.side === 'browser' &&
+      Node.isBinaryExpression(expression) &&
+      expression.getOperatorToken().getKind() === SyntaxKind.EqualsToken &&
+      /\.download$/.test(expression.getLeft().getText())
+    ) {
+      const made = step(walk, 'compute', condense(statement.getText(), 90), frame, statement);
+      made.label = `The browser saves the file as ${condense(expression.getRight().getText(), 70)}`;
+      return [made];
+    }
     const building = queryBuilding(walk, statement.getExpression(), frame);
     if (building) return [...walkExpression(walk, statement.getExpression(), frame), building];
-    return walkExpression(walk, statement.getExpression(), frame);
+    const nodes = walkExpression(walk, statement.getExpression(), frame);
+    if (frame.inBranch) {
+      // `and.push(...stockLevelClauses(level))`: the call inside runs first,
+      // then the push is what the branch does.
+      const set = settingStep(walk, statement.getExpression(), frame);
+      // Not twice: the expression may already be drawn as this very step.
+      const same = (node: DecisionNode): boolean =>
+        node.type === 'step' && set !== undefined && node.text === set.text;
+      // `user.name = await decrypt(user.name)`: the call is part of the setting, drawn once.
+      if (set && !nodes.some(same)) {
+        // Only the call that *is* the value set: `x = await decrypt(x)`, not a
+        // call somewhere inside a function the value is built from.
+        const assigned = unwrap(statement.getExpression());
+        const value = Node.isBinaryExpression(assigned) ? unwrap(assigned.getRight()) : undefined;
+        const callee =
+          value && Node.isCallExpression(value) ? value.getExpression().getText() : undefined;
+        return [
+          ...nodes.filter(
+            (node) =>
+              !(
+                callee &&
+                node.type === 'step' &&
+                node.kind === 'call' &&
+                node.text.startsWith(`${callee}(`)
+              ),
+          ),
+          set,
+        ];
+      }
+    }
+    return nodes;
   }
 
   if (Node.isVariableStatement(statement)) {
@@ -604,7 +1162,17 @@ function walkStatement(walk: Walk, statement: Node, frame: Frame, last: boolean)
       const chosen = Node.isIdentifier(name)
         ? valueChoice(walk, name.getText(), init, frame)
         : undefined;
-      return chosen ? [chosen] : walkExpression(walk, init, frame);
+      if (chosen) return [chosen];
+      const nodes = walkExpression(walk, init, frame);
+      if (nodes.length === 0 && frame.inBranch) {
+        const made = step(walk, 'compute', condense(declaration.getText(), 90), frame, declaration);
+        const value = plainValue(init.getText());
+        made.label = value
+          ? `The ${spoken(declaration.getName())} is ${value}`
+          : `Work out the ${spoken(declaration.getName())}`;
+        return [made];
+      }
+      return nodes;
     });
   }
 
@@ -662,7 +1230,12 @@ function walkStatement(walk: Walk, statement: Node, frame: Frame, last: boolean)
         body.push(...(stop >= 0 ? statements.slice(0, stop) : statements));
         if (stop >= 0 || endsFunction(statements.at(-1))) break;
       }
-      const nodes = walkStatements(walk, body, { ...frame, breaks: 'switch' }, false);
+      const nodes = walkStatements(
+        walk,
+        body,
+        { ...frame, breaks: 'switch', inBranch: true },
+        false,
+      );
       branches.push({ label: pending.join(' / '), nodes, ends: endsAll(nodes) });
       pending = [];
     });
@@ -685,7 +1258,10 @@ function walkStatement(walk: Walk, statement: Node, frame: Frame, last: boolean)
     const nodes = walkStatements(walk, statement.getTryBlock().getStatements(), frame, false);
     const clause = statement.getCatchClause();
     const caught = clause
-      ? walkStatements(walk, clause.getBlock().getStatements(), frame, false)
+      ? [
+          ...blobErrorNote(walk, statement, frame),
+          ...walkStatements(walk, clause.getBlock().getStatements(), frame, false),
+        ]
       : [];
     const finallyBlock = statement.getFinallyBlock();
     const after = finallyBlock
@@ -708,7 +1284,9 @@ function walkStatement(walk: Walk, statement: Node, frame: Frame, last: boolean)
           ? {
               catch: {
                 label: swallows
-                  ? 'anything above fails — the error is ignored and it carries on'
+                  ? onlyLogs(clause)
+                    ? 'anything above fails — the error is only written to the console, and it carries on'
+                    : 'anything above fails — the error is ignored and it carries on'
                   : 'anything above fails',
                 nodes: caught,
                 ends: endsAll(caught),
@@ -753,12 +1331,16 @@ function walkStatement(walk: Walk, statement: Node, frame: Frame, last: boolean)
 function ifNodes(walk: Walk, statement: IfStatement, frame: Frame): DecisionNode[] {
   const condition = statement.getExpression();
   const { question, thenLabel, elseLabel } = phrase(condition.getText());
-  const thenNodes = walkStatement(walk, statement.getThenStatement(), frame, false);
+  const inside = { ...frame, inBranch: true };
+  const thenNodes = walkStatement(walk, statement.getThenStatement(), inside, false);
   const elseStatement = statement.getElseStatement();
-  const elseNodes = elseStatement ? walkStatement(walk, elseStatement, frame, false) : [];
+  const elseNodes = elseStatement ? walkStatement(walk, elseStatement, inside, false) : [];
 
   // Calls inside the condition run before either branch: `if (!(await exists(id)))`.
-  const before = walkExpression(walk, condition, frame);
+  // A plain one is the question itself, not a step before it.
+  const before = walkExpression(walk, condition, frame).filter(
+    (node) => !plainCallIn(node, condition.getText()),
+  );
 
   if (thenNodes.length === 0 && elseNodes.length === 0) return before;
   const branches: DecisionBranch[] = [];
@@ -779,6 +1361,11 @@ function ifNodes(walk: Walk, statement: IfStatement, frame: Frame): DecisionNode
       covered ? undefined : elseLabel,
     ),
   ];
+}
+
+/** A helper call drawn as one line, that the text around it already shows. */
+function plainCallIn(node: DecisionNode, text: string): boolean {
+  return node.type === 'step' && node.kind === 'call' && text.includes(node.text);
 }
 
 function returnNodes(
@@ -857,6 +1444,188 @@ function responseWork(walk: Walk, expression: Node, frame: Frame): DecisionNode[
   return parts.flatMap((part) =>
     statusOf(walk.reader, part)?.statuses.length ? [] : walkExpression(walk, part, frame),
   );
+}
+
+/** `setTimeout(fn, 250)`, `requestAnimationFrame(fn)`: the callback, drawn as what happens next. */
+function delayedCallback(walk: Walk, statement: Node, frame: Frame): DecisionNode[] | undefined {
+  const expression = Node.isExpressionStatement(statement)
+    ? unwrap(statement.getExpression())
+    : undefined;
+  // `timer.current = setTimeout(…)` too.
+  const call =
+    expression && Node.isBinaryExpression(expression) ? unwrap(expression.getRight()) : expression;
+  if (!call || !Node.isCallExpression(call)) return undefined;
+  const name = calleeText(call).split('.').pop() ?? '';
+  if (!/^(setTimeout|requestAnimationFrame|queueMicrotask|setImmediate)$/.test(name))
+    return undefined;
+  const [callback, delay] = call.getArguments();
+  const fn = callback ? functionOf(callback) : undefined;
+  if (!fn) return undefined;
+  const inner = walkFunction(walk, fn, { ...frame, depth: frame.depth + 1 });
+  if (inner.length === 0) return undefined;
+  walk.size += 1;
+  return [
+    {
+      type: 'group',
+      kind: 'function',
+      label: delay ? `After ${condense(delay.getText(), 20)} ms` : 'Right after',
+      title: delay ? `after ${condense(delay.getText(), 20)} ms` : 'right after',
+      side: frame.side,
+      at: walk.reader.point(call),
+      nodes: inner,
+    },
+  ];
+}
+
+/** `useDebounce(search)` on the way to the refetch: how long it waits, in ms. */
+function debounceOf(walk: Walk, calls: LocatedCall[]): number | undefined {
+  for (const call of calls) {
+    const target = walk.flow.steps.find(
+      (step) => step.kind === 'api-call' && step.label === call.detail.endpoint,
+    );
+    if (!target) continue;
+    const path = walk.graph.path(walk.flow.entryNodeId, target.nodeId, EXECUTION_EDGES);
+    for (let index = 1; index < path.length; index++) {
+      const edge = walk.graph
+        .edgesFrom(path[index - 1]!)
+        .find((candidate) => candidate.to === path[index]);
+      const ms = edge?.meta?.['debounceMs'];
+      if (typeof ms === 'number') return ms;
+    }
+  }
+  return undefined;
+}
+
+/** Reached from the click only through a state change: a refetch or a part being shown. */
+function reachedThroughState(walk: Walk, call: LocatedCall): boolean {
+  const target = walk.flow.steps.find(
+    (step) => step.kind === 'api-call' && step.label === call.detail.endpoint,
+  );
+  if (!target) return false;
+  const path = walk.graph.path(walk.flow.entryNodeId, target.nodeId, EXECUTION_EDGES);
+  return path.some((id, index) => {
+    if (index === 0) return false;
+    const edge = walk.graph.edgesFrom(path[index - 1]!).find((candidate) => candidate.to === id);
+    return edge?.meta?.['refetch'] === true || edge?.meta?.['shows'] !== undefined;
+  });
+}
+
+/**
+ * `responseType: "blob"` in the try, `error.response.data.message` in the
+ * catch: an error answer arrives as a Blob too, so the server's message is
+ * never read and the screen falls back to the error's own text.
+ */
+function blobErrorNote(walk: Walk, statement: TryStatement, frame: Frame): DecisionNode[] {
+  const read = statement
+    .getCatchClause()
+    ?.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)
+    .find((access) => /response\??\.data\??\.message$/.test(access.getText()));
+  if (!read) return [];
+  const type = statement
+    .getTryBlock()
+    .getDescendantsOfKind(SyntaxKind.PropertyAssignment)
+    .filter((property) => property.getName() === 'responseType')
+    .map((property) => literalOf(property.getInitializer()!))
+    .find((value) => value === 'blob' || value === 'arraybuffer');
+  if (!type) return [];
+  const made = step(
+    walk,
+    'compute',
+    `${read.getText()} is undefined — the answer was asked for as ${type === 'blob' ? 'a Blob' : 'an ArrayBuffer'}`,
+    frame,
+    read,
+  );
+  made.label = `The server’s error message is never read: the answer was asked for as ${type === 'blob' ? 'a Blob' : 'an ArrayBuffer'}, so ${condense(read.getText(), 40)} is empty and the error’s own text (“Request failed with status code …”) is shown`;
+  return [made];
+}
+
+/** `catch (e) { console.log(e) }`: the failure is printed, nothing else happens. */
+function onlyLogs(clause: Node): boolean {
+  if (!Node.isCatchClause(clause)) return false;
+  const statements = clause.getBlock().getStatements();
+  return (
+    statements.length > 0 &&
+    statements.every((statement) =>
+      /^(console|logger|this\.logger)\.\w+\(/.test(statement.getText().trim()),
+    )
+  );
+}
+
+/** The response object a handler is given: `@Res() res`, `(req, res)`, Fastify's `reply`. */
+const RESPONSE_PARAMS = /^(res|response|reply)$/;
+
+/**
+ * An Express/Nest `@Res()` handler answers by calling the response object, not
+ * by returning: `res.status(HttpStatus.BAD_REQUEST).json(…)` ends that path
+ * with a 400, `res.send(buffer)` with a 200, and `res.setHeader(…)` is a step
+ * of the answer. Without this the catch read "the error is ignored".
+ */
+function expressResponse(walk: Walk, statement: Node, frame: Frame): DecisionNode[] | undefined {
+  if (!Node.isExpressionStatement(statement)) return undefined;
+  const expression = unwrap(statement.getExpression());
+  if (!Node.isCallExpression(expression)) return undefined;
+  const text = expression.getText();
+  const root = /^([\w$]+)\./.exec(text)?.[1];
+  if (!root || !RESPONSE_PARAMS.test(root)) return undefined;
+  const fn = nearestFunction(statement) as Functionish | undefined;
+  if (!fn?.getParameters().some((param) => param.getName() === root)) return undefined;
+  const member = /\.([\w$]+)\([^]*$/.exec(text.slice(root.length))?.[1];
+  const final = (
+    Node.isPropertyAccessExpression(expression.getExpression())
+      ? (expression.getExpression() as PropertyAccessExpression).getName()
+      : ''
+  ) as string;
+  if (/^(setHeader|header|set|type|cookie|clearCookie|append|attachment)$/.test(final)) {
+    const made = step(walk, 'compute', condense(text, 90), frame, statement);
+    const [name, value] = expression
+      .getArguments()
+      .map((arg) => literalOf(arg) ?? condense(arg.getText(), 60));
+    made.label = name
+      ? `Set the ${name} header${value ? ` to ${value}` : ''}`
+      : `Set the response ${final}`;
+    return [made];
+  }
+  if (!/^(json|send|end|redirect|sendFile|download|render|sendStatus)$/.test(final) || !member)
+    return undefined;
+  const status = /\.status\(\s*([^)]+)\)/.exec(text)?.[1];
+  const found = statusOf(walk.reader, expression);
+  const code =
+    found?.statuses[0] ?? (status ? statusFromText(status) : final === 'redirect' ? 302 : 200);
+  const body = expression.getArguments()[0];
+  return [
+    ...(body ? responseWork(walk, expression, frame) : []),
+    end(
+      walk,
+      'respond',
+      body ? `responds ${code} with ${condense(body.getText(), 60)}` : `responds ${code}`,
+      frame,
+      statement,
+      { statuses: [code] },
+    ),
+  ];
+}
+
+/** `400`, `HttpStatus.BAD_REQUEST`, `StatusCodes.NOT_FOUND`. */
+function statusFromText(text: string): number {
+  const number = Number(text.trim());
+  if (Number.isInteger(number)) return number;
+  const name = text.trim().split('.').pop() ?? '';
+  const known: Record<string, number> = {
+    OK: 200,
+    CREATED: 201,
+    ACCEPTED: 202,
+    NO_CONTENT: 204,
+    BAD_REQUEST: 400,
+    UNAUTHORIZED: 401,
+    FORBIDDEN: 403,
+    NOT_FOUND: 404,
+    CONFLICT: 409,
+    UNPROCESSABLE_ENTITY: 422,
+    TOO_MANY_REQUESTS: 429,
+    INTERNAL_SERVER_ERROR: 500,
+    SERVICE_UNAVAILABLE: 503,
+  };
+  return known[name] ?? 200;
 }
 
 /** `Response.json(…)`, `res.status(…).json(…)`, `new Response(…)` — an answer already. */
@@ -1116,8 +1885,18 @@ function classify(walk: Walk, call: CallExpression, frame: Frame): CallKind | un
   )
     return 'outside';
   if (Node.isIdentifier(call.getExpression()) && isProp(call, text)) return 'ui';
+  // `URL.createObjectURL(blob)`, `a.click()`: how the browser is made to save a file.
+  if (
+    frame.side === 'browser' &&
+    DOWNLOAD_CALLS.test(text) &&
+    /\.download\s*=/.test(nearestFunction(call)?.getText() ?? '')
+  )
+    return 'ui';
   return undefined;
 }
+
+const DOWNLOAD_CALLS =
+  /^((window\.)?URL\.(createObjectURL|revokeObjectURL)|[\w$]+\.click|document\.body\.(appendChild|removeChild))$/;
 
 function callNodes(
   walk: Walk,
@@ -1132,11 +1911,11 @@ function callNodes(
       return requestNodes(walk, located, frame);
     }
     case 'effect':
-      return effectsAt(walk, call).map((effect) => {
+      return effectsAt(walk, call).flatMap((effect): DecisionNode[] => {
         walk.size += 1;
         const meta = effect.meta ?? {};
         const isDb = effect.kind === 'db-op';
-        return {
+        const made: DecisionStep = {
           type: 'step',
           kind: isDb ? 'db' : 'external',
           label: '',
@@ -1146,8 +1925,16 @@ function callNodes(
           ...(isDb
             ? { effect: upsertAware(call, String(meta['effect'] ?? meta['access'] ?? 'read')) }
             : {}),
+          ...(isDb && queryDetail(call) ? { detail: queryDetail(call) } : {}),
           nodeId: effect.id,
-        } satisfies DecisionStep;
+        };
+        const nodes: DecisionNode[] = [
+          made,
+          ...(isDb ? pipelineRows(walk, call, String(meta['collection'] ?? ''), frame) : []),
+        ];
+        // After the answer, not here: the worker takes the job once it is sent.
+        if (!isDb) walk.later.push(...workerNodes(walk, effect, frame));
+        return nodes;
       });
     case 'query': {
       const found = unlinkedQuery(walk, call)!;
@@ -1161,7 +1948,9 @@ function callNodes(
           side: 'database',
           at: walk.reader.point(call),
           effect: upsertAware(call, found.effect),
+          ...(queryDetail(call) ? { detail: queryDetail(call) } : {}),
         },
+        ...pipelineRows(walk, call, found.collection, frame),
       ];
     }
     case 'parallel': {
@@ -1297,7 +2086,11 @@ function callNodes(
         return [step(walk, 'call', `${label} — not followed further`, frame, call)];
       // A helper handed a function runs it, so each call is opened on its own.
       const takesFunctions = call.getArguments().some((arg) => functionOf(arg) !== undefined);
-      if (walk.opened.has(target) && !takesFunctions)
+      const callKey = `${target.getSourceFile().getFilePath()}:${target.getStart()}(${call
+        .getArguments()
+        .map((arg) => arg.getText())
+        .join(',')})`;
+      if (walk.openedCalls.has(callKey) && !takesFunctions)
         return [step(walk, 'call', `${label} — opened above`, frame, call)];
       const bound = new Map<string, Functionish>();
       target.getParameters().forEach((param, index) => {
@@ -1307,14 +2100,15 @@ function callNodes(
           (arg && Node.isIdentifier(arg) ? resolveName(walk, arg.getText(), arg) : undefined);
         if (fn && Node.isIdentifier(param.getNameNode())) bound.set(param.getName(), fn);
       });
-      const inner = walkFunction(walk, target, {
+      const walked = walkFunction(walk, target, {
         side: frame.side,
         role: 'helper',
         depth: frame.depth + 1,
         ...(bound.size ? { bound } : {}),
       });
+      const inner = passportChecks(walk, target, frame, call, walked) ?? walked;
       if (!inner.some(worthShowing)) return [step(walk, 'call', label, frame, call)];
-      walk.opened.add(target);
+      walk.openedCalls.add(callKey);
       walk.size += 1;
       return [
         {
@@ -1324,11 +2118,204 @@ function callNodes(
           title: label,
           side: frame.side,
           at: walk.reader.point(call),
+          callee: walk.reader.point(target),
           nodes: inner,
         },
       ];
     }
   }
+}
+
+/**
+ * What an aggregation does to each row, drawn as the decisions it makes:
+ * `$match` keeps the rows that pass, `$lookup` reads another collection, and
+ * `$unwind` without `preserveNullAndEmptyArrays` drops a row whose lookup
+ * found nothing. Listed only by stage name, a report that silently left out
+ * every appointment without a bill looked like it read them all.
+ */
+function pipelineRows(
+  walk: Walk,
+  call: CallExpression,
+  collection: string,
+  frame: Frame,
+): DecisionNode[] {
+  const base = baseQueryCall(call);
+  const callee = base?.getExpression();
+  if (!base || !Node.isPropertyAccessExpression(callee) || callee.getName() !== 'aggregate')
+    return [];
+  let pipeline = base.getArguments()[0] ? unwrap(base.getArguments()[0]!) : undefined;
+  // `const pipeline = [...]; model.aggregate(pipeline)`.
+  if (pipeline && Node.isIdentifier(pipeline)) {
+    const init = declarationOf(pipeline)?.getInitializer();
+    pipeline = init ? unwrap(init) : undefined;
+  }
+  if (!pipeline || !Node.isArrayLiteralExpression(pipeline)) return [];
+  const inside: Frame = { ...frame, side: 'database' };
+  const nodes: DecisionNode[] = [];
+  const leftOut = (at: Node, why: string): DecisionEnd => {
+    const made = end(walk, 'next', `left out of the result — ${why}`, inside, at);
+    made.label = `Left out of the result — ${why}`;
+    return made;
+  };
+  for (const element of pipeline.getElements()) {
+    const stage = unwrap(element);
+    if (!Node.isObjectLiteralExpression(stage)) continue;
+    const property = stage.getProperties()[0];
+    if (!property || !Node.isPropertyAssignment(property)) continue;
+    const name = property.getName().replace(/^['"]|['"]$/g, '');
+    const value = unwrap(property.getInitializer()!);
+    const field = (key: string): string | undefined => {
+      if (!Node.isObjectLiteralExpression(value)) return undefined;
+      const found = value.getProperty(key);
+      const init = found && Node.isPropertyAssignment(found) ? found.getInitializer() : undefined;
+      return init ? (literalOf(init) ?? init.getText()) : undefined;
+    };
+    if (name === '$lookup') {
+      const from = field('from');
+      if (!from) continue;
+      const local = field('localField');
+      const foreign = field('foreignField');
+      const made = step(
+        walk,
+        'db',
+        `${from}.$lookup${local ? ` — ${local} → ${foreign ?? '_id'}` : ''}${field('as') ? `, as ${field('as')}` : ''}`,
+        inside,
+        element,
+      );
+      made.effect = 'read';
+      made.label = `Look up the matching ${from}`;
+      nodes.push(made);
+    } else if (name === '$unwind') {
+      const path = (Node.isObjectLiteralExpression(value) ? field('path') : literalOf(value)) ?? '';
+      if (/^true$/.test(field('preserveNullAndEmptyArrays') ?? '')) continue;
+      const what = path.replace(/^\$/, '');
+      if (!what) continue;
+      const asked = decision(
+        walk,
+        `has a ${what}?`,
+        `$unwind: '${path}'`,
+        inside,
+        element,
+        [{ label: 'no', nodes: [leftOut(element, `no ${what}`)], ends: true }],
+        'yes — one row per match',
+      );
+      asked.label = `Has a matching ${what}?`;
+      nodes.push(asked);
+    } else if (name === '$match' && Node.isObjectLiteralExpression(value)) {
+      const tests = value.getProperties().map((test) => {
+        // `{ ownerId }`: the field equals the value of that name.
+        if (Node.isShorthandPropertyAssignment(test))
+          return `${test.getName()} = ${test.getName()}`;
+        if (!Node.isPropertyAssignment(test)) return condense(test.getText(), 30);
+        const key = test.getName().replace(/^['"]|['"]$/g, '');
+        const wanted = unwrap(test.getInitializer()!);
+        const text = wanted.getText().replace(/\s+/g, ' ');
+        if (/^\{\s*\$size:\s*0\s*\}$/.test(text)) return `${key} is empty`;
+        if (/\$(gte|gt|lte|lt)\b/.test(text)) return `${key} in range`;
+        if (/^\{\s*\$in\b/.test(text)) return `${key} is one of the list`;
+        if (/^\{\s*\$exists:\s*true/.test(text)) return `${key} is set`;
+        return `${key} = ${condense(text, 30)}`;
+      });
+      if (tests.length === 0) continue;
+      const question = condense(tests.join(' and '), 90);
+      const asked = decision(
+        walk,
+        `${question}?`,
+        condense(value.getText(), 120),
+        inside,
+        element,
+        [{ label: 'no', nodes: [leftOut(element, 'it does not match')], ends: true }],
+        'yes',
+      );
+      asked.label = `${capitalise(question)}?`;
+      nodes.push(asked);
+    }
+  }
+  if (!nodes.some((node) => node.type === 'decision')) return nodes;
+  walk.size += 1;
+  return [
+    {
+      type: 'group',
+      kind: 'loop',
+      label: `For each record in ${collection || 'the collection'}, inside the database`,
+      title: `for each record in ${collection || 'the collection'}, inside the database`,
+      side: 'database',
+      at: walk.reader.point(base),
+      nodes,
+    },
+  ];
+}
+
+/**
+ * `queue.add("import", rows)` only puts a job in Redis; the rows are written
+ * later by the worker that takes it — drawn here, after the response, with
+ * the worker's own `on("failed")` for a job that crashes.
+ */
+function workerNodes(walk: Walk, effect: FlowNode, frame: Frame): DecisionNode[] {
+  const edge = walk.graph
+    .edgesFrom(effect.id, ['calls'])
+    .find((candidate) => candidate.meta?.['background'] === true);
+  const target = edge ? walk.graph.node(edge.to) : undefined;
+  const file = target?.source ? walk.reader.file(target.source.file) : undefined;
+  const fn = file && target?.source ? functionAtLine(file, target.source.line) : undefined;
+  if (!fn || walk.opened.has(fn) || frame.depth >= MAX_DEPTH) return [];
+  walk.opened.add(fn);
+  const inside: Frame = { side: 'server', role: 'helper', depth: frame.depth + 1 };
+  const nodes = walkFunction(walk, fn, inside);
+  const name = nameOf(fn);
+  // Where the worker is made: `new Worker(queue, (job) => processImportJob(job))`.
+  for (const rel of projectFiles(walk)) {
+    const source = walk.reader.file(rel);
+    if (!source || !source.getFullText().includes('new Worker')) continue;
+    const made = source
+      .getDescendantsOfKind(SyntaxKind.NewExpression)
+      .find(
+        (created) =>
+          created.getExpression().getText() === 'Worker' &&
+          new RegExp(`\\b${name}\\b`).test(created.getText()),
+      );
+    if (!made) continue;
+    const worker = made.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)?.getName();
+    const failed = source
+      .getDescendantsOfKind(SyntaxKind.CallExpression)
+      .find(
+        (call) =>
+          calleeText(call) === `${worker}.on` &&
+          call.getArguments()[0] !== undefined &&
+          literalOf(call.getArguments()[0]!) === 'failed',
+      );
+    const handler = failed ? functionOf(failed.getArguments()[1]) : undefined;
+    if (handler) {
+      const crashed = walkFunction(walk, handler, inside);
+      if (crashed.length) {
+        walk.size += 1;
+        nodes.push({
+          type: 'group',
+          kind: 'function',
+          label: 'If the job crashes, the worker’s failure handler runs',
+          title: `if the job crashes: ${worker}.on("failed")`,
+          side: 'server',
+          at: walk.reader.point(failed!),
+          nodes: crashed,
+        });
+      }
+    }
+    break;
+  }
+  walk.size += 1;
+  const queue = edge?.meta?.['queue'];
+  return [
+    {
+      type: 'group',
+      kind: 'function',
+      label: `Later, after the response is sent, a background worker${typeof queue === 'string' ? ` on queue "${queue}"` : ''} runs ${name}`,
+      title: `later, in the background worker: ${name}()`,
+      side: 'server',
+      at: walk.reader.point(fn),
+      callee: walk.reader.point(fn),
+      nodes,
+    },
+  ];
 }
 
 /** The request, then the server function that answers it, in a box of its own. */
@@ -1342,11 +2329,34 @@ function requestNodes(walk: Walk, located: LocatedCall, frame: Frame): DecisionN
   const { detail } = located;
   const nodes: DecisionNode[] = [];
   for (const guard of detail.middleware) {
+    const body = middlewareBody(walk, guard);
+    if (body && !walk.opened.has(body)) {
+      walk.opened.add(body);
+      walk.size += 1;
+      nodes.push({
+        type: 'group',
+        kind: 'function',
+        label: `${guard.name} runs before the handler`,
+        title: `${guard.role === 'guard' ? 'checked by' : `${guard.role}:`} ${guard.name}`,
+        side: 'server',
+        ...(guard.file ? { at: { file: guard.file, line: guard.line ?? 1 } } : {}),
+        callee: walk.reader.point(body),
+        nodes: ((walked) =>
+          passportChecks(walk, body, { ...frame, side: 'server' }, body, walked) ?? walked)(
+          walkFunction(walk, body, { side: 'server', role: 'helper', depth: frame.depth + 1 }),
+        ),
+      });
+      continue;
+    }
+    const checks =
+      guard.role === 'pipe' && /Validation/.test(guard.name)
+        ? dtoWords(walk, detail.dto?.name)
+        : undefined;
     nodes.push({
       type: 'step',
       kind: 'guard',
       label: '',
-      text: `${guard.role === 'guard' ? 'checked by' : `${guard.role}:`} ${guard.name}`,
+      text: `${guard.role === 'guard' ? 'checked by' : `${guard.role}:`} ${guard.name}${checks ? ` — checks ${checks}` : ''}`,
       side: 'server',
       ...(guard.file ? { at: { file: guard.file, line: guard.line ?? 1 } } : {}),
     });
@@ -1361,6 +2371,7 @@ function requestNodes(walk: Walk, located: LocatedCall, frame: Frame): DecisionN
       ...(nest ? { defaultStatus: detail.method === 'POST' ? 201 : 200 } : {}),
     };
     nodes.push(...walkFunction(walk, handler.fn, server));
+    nodes.push(...walk.later.splice(0));
   } else if (!detail.matched) {
     nodes.push({
       type: 'end',
@@ -1371,7 +2382,10 @@ function requestNodes(walk: Walk, located: LocatedCall, frame: Frame): DecisionN
     });
   }
   walk.size += 1;
+  const wrapper = requestWrapper(walk, located);
   return [
+    ...(wrapper ? wrapperNodes(walk, wrapper, frame, located) : []),
+    ...requestInterceptorNodes(walk, located, frame, wrapper?.client),
     {
       type: 'group',
       label: '',
@@ -1382,48 +2396,154 @@ function requestNodes(walk: Walk, located: LocatedCall, frame: Frame): DecisionN
       ...(handler ? { handledBy: handler.at } : {}),
       nodes,
     },
-    ...interceptorNodes(walk, located, frame),
+    ...interceptorNodes(walk, located, frame, wrapper?.client),
   ];
 }
 
+/** `DateRangeAppointmentsDto: from_date (string, optional), to_date (string, optional)`. */
+function dtoWords(walk: Walk, name: string | undefined): string | undefined {
+  if (!name) return undefined;
+  const fields = walk.graph
+    .successors(`dto:${name}`, ['defines', 'validates'])
+    .filter((node) => node.kind === 'field')
+    .map((field) => {
+      const type = field.meta?.['type'];
+      const notes = [
+        ...(typeof type === 'string' ? [type] : []),
+        ...(field.meta?.['optional'] === true ? ['optional'] : []),
+      ];
+      return `${field.label}${notes.length ? ` (${notes.join(', ')})` : ''}`;
+    });
+  return `${name}${fields.length ? `: ${fields.join(', ')}` : ''}`;
+}
+
 /**
- * The client's own response interceptor, between the answer and the screen:
- * `api.interceptors.response.use(ok, onError)` is where a 401 is refreshed
- * and retried, or sent to the login page — the screen's `onError` only sees
- * what it lets through.
+ * `getRequest({ url, auth })` is the app's own function around the HTTP
+ * client: it picks the token, then calls `axiosDefaultInstance.get(…)`. Its
+ * body is part of what the click does, and its client is the one whose
+ * interceptors answer a 401.
  */
-function interceptorNodes(walk: Walk, located: LocatedCall, frame: Frame): DecisionNode[] {
-  const callee = located.call?.getExpression();
+function requestWrapper(
+  walk: Walk,
+  located: LocatedCall,
+): { fn: Functionish; client: CallExpression } | undefined {
+  const call = located.call;
+  if (!call || !Node.isIdentifier(call.getExpression())) return undefined;
+  const fn = resolveCallee(walk, call);
+  if (!fn) return undefined;
+  const client = fn
+    .getDescendantsOfKind(SyntaxKind.CallExpression)
+    .find((inner) =>
+      /^[\w$]+\.(get|post|put|patch|delete|request|head)$/.test(inner.getExpression().getText()),
+    );
+  return client ? { fn, client } : undefined;
+}
+
+/** What the wrapper does before it sends: the work above its `return client.get(…)`. */
+function wrapperNodes(
+  walk: Walk,
+  wrapper: { fn: Functionish; client: CallExpression },
+  frame: Frame,
+  located: LocatedCall,
+): DecisionNode[] {
+  if (walk.opened.has(wrapper.fn)) return [];
+  const sending = wrapper.client.getFirstAncestor(
+    (node) => Node.isStatement(node) && node.getParent() === wrapper.fn.getBody(),
+  );
+  const before = bodyStatements(wrapper.fn).filter(
+    (statement) => !sending || statement.getEnd() <= sending.getPos(),
+  );
+  const inner = walkStatements(
+    walk,
+    before,
+    { side: 'browser', role: 'helper', depth: frame.depth + 1 },
+    false,
+  );
+  if (!inner.some((node) => worthShowing(node) || node.type === 'decision')) return [];
+  const send = sendStep(walk, wrapper, located, frame);
+  if (send) inner.push(send);
+  walk.opened.add(wrapper.fn);
+  walk.size += 1;
+  return [
+    {
+      type: 'group',
+      kind: 'function',
+      label: `${nameOf(wrapper.fn)} prepares the request`,
+      title: `${nameOf(wrapper.fn)}()`,
+      side: 'browser',
+      at: walk.reader.point(wrapper.fn),
+      callee: walk.reader.point(wrapper.fn),
+      nodes: inner,
+    },
+  ];
+}
+
+/** The API client a request goes through, and where its interceptors are written. */
+function clientOf(
+  walk: Walk,
+  located: LocatedCall,
+  via?: CallExpression,
+): { name: string; uses: CallExpression[] } | undefined {
+  const callee = (via ?? located.call)?.getExpression();
   const base =
     callee && Node.isPropertyAccessExpression(callee) ? unwrap(callee.getExpression()) : undefined;
-  if (!base || !Node.isIdentifier(base)) return [];
+  if (!base || !Node.isIdentifier(base)) return undefined;
   const declared = walk.reader.declaration(base.getText(), base.getSourceFile());
   const file = declared?.getSourceFile();
-  if (!file) return [];
-  const use = file
+  if (!file) return undefined;
+  const name = base.getText();
+  // This client's own: a file often sets up several, each with its own.
+  const uses = file
     .getDescendantsOfKind(SyntaxKind.CallExpression)
-    .find((candidate) => /\.interceptors\.response\.use$/.test(calleeText(candidate)));
-  const onError = use?.getArguments()[1];
-  const fn = onError
-    ? (functionOf(onError) ??
-      (Node.isIdentifier(onError) ? resolveName(walk, onError.getText(), onError) : undefined))
-    : undefined;
-  if (!fn) return [];
-  if (walk.opened.has(fn)) {
-    const again = step(
-      walk,
-      'call',
-      `${base.getText()}.interceptors.response — opened above`,
-      frame,
-      use!,
+    .filter((candidate) =>
+      new RegExp(`^${name.replace(/\$/g, '\\$')}\\.interceptors\\.(request|response)\\.use$`).test(
+        calleeText(candidate),
+      ),
     );
-    again.label = 'If it fails, the API client’s interceptor runs (opened above)';
+  return { name, uses };
+}
+
+function interceptorFn(
+  walk: Walk,
+  use: CallExpression | undefined,
+  index: number,
+): Functionish | undefined {
+  const handler = use?.getArguments()[index];
+  if (!handler) return undefined;
+  return (
+    functionOf(handler) ??
+    (Node.isIdentifier(handler) ? resolveName(walk, handler.getText(), handler) : undefined)
+  );
+}
+
+/** One interceptor, opened once per action and named after that. */
+function interceptorGroup(
+  walk: Walk,
+  fn: Functionish,
+  use: CallExpression,
+  frame: Frame,
+  title: string,
+  label: string,
+  /** An error handler that ends without a return resolves the request with nothing. */
+  onError = false,
+): DecisionNode[] {
+  if (walk.opened.has(fn)) {
+    const again = step(walk, 'call', `${title} — opened above`, frame, use);
+    again.label = `${label} (opened above)`;
     return [again];
   }
-  walk.limits.add(
-    'An interceptor is drawn as written: whether its conditions hold for this particular URL is not worked out.',
-  );
   const inner = walkFunction(walk, fn, { side: 'browser', role: 'helper', depth: frame.depth + 1 });
+  if (onError && !endsAll(inner)) {
+    const empty = end(
+      walk,
+      'return',
+      'returns nothing — the request resolves with undefined instead of failing',
+      { ...frame, side: 'browser' },
+      fn,
+    );
+    empty.label = 'Give back nothing — the caller gets undefined, not an error';
+    inner.push(empty);
+  }
   if (!inner.some(worthShowing)) return [];
   walk.opened.add(fn);
   walk.size += 1;
@@ -1431,13 +2551,230 @@ function interceptorNodes(walk: Walk, located: LocatedCall, frame: Frame): Decis
     {
       type: 'group',
       kind: 'function',
-      label: 'If the request fails, the API client’s interceptor runs first',
-      title: `${base.getText()}.interceptors.response (on error)`,
+      label,
+      title,
       side: 'browser',
-      at: walk.reader.point(use!),
+      at: walk.reader.point(use),
+      callee: walk.reader.point(fn),
       nodes: inner,
     },
   ];
+}
+
+/** `api.interceptors.request.use(fn)`: runs before every request the client sends. */
+function requestInterceptorNodes(
+  walk: Walk,
+  located: LocatedCall,
+  frame: Frame,
+  via?: CallExpression,
+): DecisionNode[] {
+  const client = clientOf(walk, located, via);
+  const use = client?.uses.find((candidate) => /\.request\.use$/.test(calleeText(candidate)));
+  const fn = interceptorFn(walk, use, 0);
+  if (!client || !use || !fn) return [];
+  return interceptorGroup(
+    walk,
+    fn,
+    use,
+    frame,
+    `${client.name}.interceptors.request`,
+    'Before it is sent, the API client’s request interceptor runs',
+  );
+}
+
+/**
+ * How the wrapper sends: `client.get(url, { headers: { Authorization: auth ?
+ * \`Bearer ${token}\` : …}, timeout: 60000, responseType })`, with what this
+ * caller passed — `auth: true`, `responseType: "blob"` — put in.
+ */
+function sendStep(
+  walk: Walk,
+  wrapper: { fn: Functionish; client: CallExpression },
+  located: LocatedCall,
+  frame: Frame,
+): DecisionStep | undefined {
+  const options = wrapper.client
+    .getArguments()
+    .map((arg) => unwrap(arg))
+    .filter((arg) => Node.isObjectLiteralExpression(arg))
+    .at(-1);
+  if (!options || !Node.isObjectLiteralExpression(options)) return undefined;
+  const passed = located.call?.getArguments()[0];
+  const given = new Map<string, Node>();
+  if (passed && Node.isObjectLiteralExpression(unwrap(passed)))
+    for (const property of (unwrap(passed) as ObjectLiteralExpression).getProperties()) {
+      if (Node.isPropertyAssignment(property) && property.getInitializer())
+        given.set(property.getName(), property.getInitializer()!);
+    }
+  /** The value this call ends up with: the caller's argument, or the arm of a `?:` it picks. */
+  const resolve = (node: Node | undefined): string | undefined => {
+    if (!node) return undefined;
+    const value = unwrap(node);
+    if (Node.isIdentifier(value)) {
+      const from = given.get(value.getText());
+      return from ? (literalOf(from) ?? from.getText()) : undefined;
+    }
+    if (Node.isConditionalExpression(value)) {
+      const test = given.get(value.getCondition().getText().trim());
+      const picked = test?.getText();
+      if (picked === 'true') return resolve(value.getWhenTrue());
+      if (picked === 'false' || (!test && /^[\w$]+$/.test(value.getCondition().getText().trim())))
+        return resolve(value.getWhenFalse());
+      return undefined;
+    }
+    return literalOf(value) ?? value.getText();
+  };
+  const parts: string[] = [];
+  for (const property of options.getProperties()) {
+    if (!Node.isPropertyAssignment(property) && !Node.isShorthandPropertyAssignment(property))
+      continue;
+    const name = property.getName();
+    const value = Node.isPropertyAssignment(property)
+      ? property.getInitializer()
+      : property.getNameNode();
+    if (name === 'timeout') {
+      const ms = resolve(value);
+      if (ms) parts.push(`gives up after ${ms} ms`);
+    } else if (name === 'responseType') {
+      const type = resolve(value);
+      if (type && type !== 'undefined') parts.push(`reads the answer as a ${type}`);
+    } else if (name === 'headers' && value && Node.isObjectLiteralExpression(unwrap(value))) {
+      const auth = (unwrap(value) as ObjectLiteralExpression).getProperty('Authorization');
+      const sent =
+        auth && Node.isPropertyAssignment(auth) ? resolve(auth.getInitializer()) : undefined;
+      const scheme = sent ? /^`?(Bearer|Basic|Token)\b/.exec(sent)?.[1] : undefined;
+      if (scheme) parts.push(`sends a ${scheme} Authorization header`);
+    }
+  }
+  const made = step(walk, 'compute', condense(wrapper.client.getText(), 90), frame, wrapper.client);
+  made.label = `Send it with ${calleeText(wrapper.client)}${parts.length ? ` — ${parts.join(', ')}` : ''}`;
+  return made;
+}
+
+/**
+ * The client's own response interceptor, between the answer and the screen:
+ * `api.interceptors.response.use(ok, onError)` is where a 401 is refreshed
+ * and retried, or sent to the login page — the screen only sees what it lets
+ * through. One that sends a 401 to the login page and returns nothing makes
+ * the request *succeed* with `undefined`: the next `response.data` throws.
+ */
+function interceptorNodes(
+  walk: Walk,
+  located: LocatedCall,
+  frame: Frame,
+  via?: CallExpression,
+): DecisionNode[] {
+  const client = clientOf(walk, located, via);
+  const use = client?.uses.find((candidate) => /\.response\.use$/.test(calleeText(candidate)));
+  if (!client || !use) return [];
+  const onSuccess = interceptorFn(walk, use, 0);
+  const onError = interceptorFn(walk, use, 1);
+  walk.limits.add(
+    'An interceptor is drawn as written: whether its conditions hold for this particular URL is not worked out.',
+  );
+  const failed = onError
+    ? interceptorGroup(
+        walk,
+        onError,
+        use,
+        frame,
+        `${client.name}.interceptors.response (on error)`,
+        'If the request fails, the API client’s interceptor runs first',
+        true,
+      )
+    : [];
+  const passed = onSuccess
+    ? interceptorGroup(
+        walk,
+        onSuccess,
+        use,
+        frame,
+        `${client.name}.interceptors.response (on success)`,
+        'When the answer comes back, the API client’s interceptor runs first',
+      )
+    : [];
+  const resolvesEmpty = onError !== undefined && fallsThrough(onError);
+  const out: DecisionNode[] = [];
+  if (passed.length === 0) out.push(...failed);
+  else if (failed.length > 0) {
+    const asked = decision(
+      walk,
+      'the server answered with a 2xx status?',
+      'validateStatus',
+      frame,
+      use,
+      [
+        { label: 'yes', nodes: passed, ends: false },
+        { label: 'no — an error status, or no answer', nodes: failed, ends: false },
+      ],
+    );
+    asked.label = 'Did the request succeed?';
+    out.push(asked);
+  } else out.push(...passed);
+  if (resolvesEmpty) out.push(...emptyResponseCheck(walk, located, frame));
+  return out;
+}
+
+/** Some path through the function ends without a `return` or a `throw`. */
+function fallsThrough(fn: Functionish): boolean {
+  const body = fn.getBody();
+  if (!body || !Node.isBlock(body)) return false;
+  const last = body.getStatements().at(-1);
+  if (!last) return true;
+  if (Node.isReturnStatement(last) || Node.isThrowStatement(last)) return false;
+  if (Node.isIfStatement(last)) {
+    const arm = (statement: Node | undefined): boolean => {
+      if (!statement) return true;
+      const inner = Node.isBlock(statement) ? statement.getStatements().at(-1) : statement;
+      if (!inner) return true;
+      if (Node.isIfStatement(inner))
+        return arm(inner.getThenStatement()) || arm(inner.getElseStatement());
+      return !Node.isReturnStatement(inner) && !Node.isThrowStatement(inner);
+    };
+    return arm(last.getThenStatement()) || arm(last.getElseStatement());
+  }
+  return true;
+}
+
+/**
+ * `const response = await getRequest(…); … response.data`: when the client's
+ * interceptor can resolve with nothing, reading the response throws, and the
+ * screen's own `catch` runs instead of what follows.
+ */
+function emptyResponseCheck(walk: Walk, located: LocatedCall, frame: Frame): DecisionNode[] {
+  const call = located.call;
+  const holder = call?.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
+  if (!call || !holder || !Node.isIdentifier(holder.getNameNode())) return [];
+  const name = holder.getName();
+  const scope = nearestFunction(call);
+  const read = scope
+    ?.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)
+    .find(
+      (access) =>
+        access.getStart() > holder.getEnd() &&
+        access.getExpression().getText() === name &&
+        !access.hasQuestionDotToken(),
+    );
+  if (!read) return [];
+  const thrown = end(
+    walk,
+    'throw',
+    `throws TypeError — cannot read ${read.getText()} of undefined`,
+    frame,
+    read,
+  );
+  thrown.label = `Stop with an error — ${read.getText()} cannot be read from nothing`;
+  const asked = decision(
+    walk,
+    `${name} is undefined?`,
+    `${name} === undefined`,
+    frame,
+    read,
+    [{ label: 'yes — the interceptor gave back nothing', nodes: [thrown], ends: true }],
+    'no',
+  );
+  asked.label = `Did the interceptor give back nothing for ${name}?`;
+  return [asked];
 }
 
 /**
@@ -1540,6 +2877,12 @@ function continuationNodes(
     }
     const failed = run(call.getArguments()[0]);
     if (failed.length) branches.push({ label: 'no — catch', nodes: failed, ends: endsAll(failed) });
+    else if (functionOf(call.getArguments()[0])) {
+      // `.catch(() => {})`: a failure is swallowed, and what follows runs anyway.
+      const ignored = step(walk, 'compute', 'the error is ignored', frame, call.getArguments()[0]);
+      ignored.label = 'The error is ignored, and it carries on';
+      branches.push({ label: 'no — catch', nodes: [ignored], ends: false });
+    }
   } else {
     const done = run(call.getArguments()[0]);
     if (done.length) branches.push({ label: 'yes — then', nodes: done, ends: false });
@@ -1567,12 +2910,32 @@ function continuationNodes(
 /** The project function a call runs, when the source says which. */
 function resolveCallee(walk: Walk, call: CallExpression): Functionish | undefined {
   const callee = call.getExpression();
-  if (Node.isIdentifier(callee)) return resolveName(walk, callee.getText(), call);
+  if (Node.isIdentifier(callee))
+    return resolveName(walk, callee.getText(), call) ?? stepNamed(walk, callee.getText());
   if (!Node.isPropertyAccessExpression(callee)) return undefined;
   // `this.orders.create(dto)` / `ordersService.create(dto)`: the graph has
   // already resolved the injected class; match the method it found.
   const name = callee.getName();
   const receiver = callee.getExpression().getText();
+  // `new JwtAuthGuard().canActivate(ctx)`: the class is named right there.
+  const created = unwrap(callee.getExpression());
+  if (Node.isNewExpression(created) && Node.isIdentifier(created.getExpression())) {
+    const declared = walk.reader.declaration(
+      created.getExpression().getText(),
+      call.getSourceFile(),
+    );
+    if (declared && Node.isClassDeclaration(declared)) {
+      const own = declared.getMethod(name);
+      if (own) return own;
+      return passportValidate(walk, declared);
+    }
+  }
+  // `super.canActivate(context)` in `class JwtAuthGuard extends AuthGuard('jwt')`:
+  // Passport runs the strategy registered as 'jwt', and its `validate` decides.
+  if (receiver === 'super' && name === 'canActivate') {
+    const owner = call.getFirstAncestor((ancestor) => Node.isClassDeclaration(ancestor));
+    if (owner && Node.isClassDeclaration(owner)) return passportValidate(walk, owner);
+  }
   if (receiver === 'this') {
     const owner = call.getFirstAncestor((ancestor) => Node.isClassDeclaration(ancestor));
     if (owner && Node.isClassDeclaration(owner)) {
@@ -1619,6 +2982,183 @@ function resolveCallee(walk: Walk, call: CallExpression): Functionish | undefine
   if (!pick?.source) return undefined;
   const file = walk.reader.file(pick.source.file);
   return file ? functionAtLine(file, pick.source.line) : undefined;
+}
+
+/**
+ * `cancelAppointment(id)` where `cancelAppointment` is a prop: the page passed
+ * its own function down, and the graph followed it. The action's steps name
+ * that function, and where it is.
+ */
+function stepNamed(walk: Walk, name: string): Functionish | undefined {
+  // `onSubmit(form)` where the page passed `onSubmit={updateMedicine}`: the
+  // scan joined the two, marked with the prop's name.
+  const passed = [
+    ...new Set(
+      walk.flow.steps.flatMap((step) =>
+        walk.graph
+          .edgesFrom(step.nodeId, ['calls'])
+          .filter((edge) => edge.meta?.['viaProp'] === name)
+          .map((edge) => edge.to),
+      ),
+    ),
+  ]
+    .map((id) => walk.graph.node(id))
+    .filter((node) => node?.source !== undefined);
+  if (passed.length === 1) {
+    const file = walk.reader.file(passed[0]!.source!.file);
+    const fn = file ? functionAtLine(file, passed[0]!.source!.line) : undefined;
+    if (fn) return fn;
+  }
+  const found = walk.flow.steps.filter(
+    (step) =>
+      (step.kind === 'handler' || step.kind === 'method') &&
+      step.file &&
+      step.line !== undefined &&
+      (step.label === name || step.label.endsWith(`.${name}`)),
+  );
+  if (found.length !== 1) return undefined;
+  const file = walk.reader.file(found[0]!.file);
+  return file ? functionAtLine(file, found[0]!.line!) : undefined;
+}
+
+/** The project's files, from the scan's import table — the reader only knows what it has opened. */
+function projectFiles(walk: Walk): string[] {
+  const imports = (walk.graph.meta as { imports?: Record<string, string[]> }).imports ?? {};
+  return [...new Set([...Object.keys(imports), ...Object.values(imports).flat()])];
+}
+
+/**
+ * The `validate` of the Passport strategy a guard stands for:
+ * `extends AuthGuard('jwt')` -> `class X extends PassportStrategy(Strategy, 'jwt')`.
+ * A strategy given no name is registered under its library's default, 'jwt'
+ * for passport-jwt and 'local' for passport-local.
+ */
+function passportValidate(walk: Walk, guard: ClassDeclaration): Functionish | undefined {
+  const base = guard.getExtends()?.getText() ?? '';
+  const wanted = /AuthGuard\(\s*['"`]([\w-]+)['"`]/.exec(base)?.[1];
+  if (!wanted) return undefined;
+  for (const rel of projectFiles(walk)) {
+    if (!/strateg|auth|passport/i.test(rel)) continue;
+    const file = walk.reader.file(rel);
+    if (!file || !file.getFullText().includes('PassportStrategy')) continue;
+    for (const strategy of file.getClasses()) {
+      const extended = strategy.getExtends()?.getText() ?? '';
+      if (!/PassportStrategy\(/.test(extended)) continue;
+      const named = /,\s*['"`]([\w-]+)['"`]\s*\)/.exec(extended)?.[1];
+      const library = file
+        .getImportDeclarations()
+        .find((declaration) => /^passport-/.test(declaration.getModuleSpecifierValue()))
+        ?.getModuleSpecifierValue()
+        .replace(/^passport-/, '');
+      if ((named ?? library) !== wanted) continue;
+      const validate = strategy.getMethod('validate');
+      if (validate) return validate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Passport checks the credentials before the strategy's `validate` runs, and
+ * answers 401 when `validate` gives nothing back. Neither is in the project's
+ * code, so a missing or forged token used to look like it carried on.
+ */
+function passportChecks(
+  walk: Walk,
+  validate: Functionish,
+  frame: Frame,
+  at: Node,
+  inner: DecisionNode[],
+): DecisionNode[] | undefined {
+  if (!Node.isMethodDeclaration(validate) || validate.getName() !== 'validate') return undefined;
+  const strategy = validate.getParent();
+  if (
+    !Node.isClassDeclaration(strategy) ||
+    !/PassportStrategy\(/.test(strategy.getExtends()?.getText() ?? '')
+  )
+    return undefined;
+  const library =
+    strategy
+      .getSourceFile()
+      .getImportDeclarations()
+      .map((declaration) => declaration.getModuleSpecifierValue())
+      .find((specifier) => /^passport-/.test(specifier)) ?? 'passport';
+  const options = strategy
+    .getConstructors()[0]
+    ?.getDescendantsOfKind(SyntaxKind.CallExpression)
+    .find((call) => call.getExpression().getText() === 'super')
+    ?.getArguments()[0];
+  const text = options?.getText() ?? '';
+  let question = `${library} accepts the credentials?`;
+  if (library === 'passport-jwt') {
+    const header = /fromHeader\(\s*['"`]([^'"`]+)/.exec(text)?.[1];
+    const where = /fromAuthHeaderAsBearerToken/.test(text)
+      ? 'a Bearer token in the Authorization header'
+      : header
+        ? `a token in the ${header} header`
+        : 'a token';
+    const secret = /secretOrKey\s*:\s*([^,\n}]+)/.exec(text)?.[1]?.trim();
+    const expiry = /ignoreExpiration\s*:\s*true/.test(text)
+      ? ' (its expiry is not checked)'
+      : ', not expired';
+    question = `${where}, signed with ${secret ? condense(secret, 40) : 'the secret'}${expiry}?`;
+  }
+  const refused = (why: string, node: Node): DecisionEnd =>
+    end(walk, 'throw', `throws UnauthorizedException — ${why}`, frame, node, {
+      statuses: [401],
+    });
+  const checked = decision(
+    walk,
+    question,
+    text || library,
+    frame,
+    options ?? at,
+    [
+      {
+        label: 'no',
+        nodes: [refused(`${library} refuses the request`, options ?? at)],
+        ends: true,
+      },
+    ],
+    'yes',
+  );
+  checked.label = `Does the request carry ${question.replace(/\?$/, '')}?`;
+  const found = decision(
+    walk,
+    'validate() gave back a user?',
+    'validate(payload)',
+    frame,
+    validate,
+    [{ label: 'no', nodes: [refused('validate() gave back nothing', validate)], ends: true }],
+    'yes — it becomes req.user',
+  );
+  found.label = 'Did validate() give back a user?';
+  return [checked, ...inner, found];
+}
+
+/**
+ * What a middleware or guard in front of the route does, opened: its `use`,
+ * `canActivate` or, for a Passport guard, the strategy's `validate`. A library
+ * one (`ValidationPipe`) stays a named step.
+ */
+function middlewareBody(
+  walk: Walk,
+  guard: { name: string; role: string; file?: string },
+): Functionish | undefined {
+  const file = guard.file ? walk.reader.file(guard.file) : undefined;
+  if (!file) return undefined;
+  const declared = walk.reader.declaration(guard.name, file);
+  if (!declared || !Node.isClassDeclaration(declared)) return undefined;
+  const own =
+    declared.getMethod('use') ??
+    declared.getMethod('canActivate') ??
+    declared.getMethod('intercept');
+  // `canActivate() { return super.canActivate(ctx) }` adds nothing of its own.
+  const onlySuper =
+    own &&
+    bodyStatements(own).length === 1 &&
+    /super\.canActivate\(/.test(own.getBody()?.getText() ?? '');
+  return onlySuper || !own ? (passportValidate(walk, declared) ?? own) : own;
 }
 
 /**
@@ -1974,6 +3514,43 @@ function canFail(node: DecisionNode): boolean {
 }
 
 /** Whether a helper's inside is worth opening: anything but plain calls. */
+/**
+ * A throw on the server that nothing catches on the way out is not where the
+ * story ends: the framework answers it — a 500 in Next.js, Express and Nest
+ * alike. Drawn as just "throws", the chart left the request unanswered.
+ */
+export function markUncaught(nodes: DecisionNode[], caught: boolean, inRequest = false): void {
+  for (const node of nodes) {
+    switch (node.type) {
+      case 'end':
+        if (
+          node.outcome === 'throw' &&
+          inRequest &&
+          !caught &&
+          node.side === 'server' &&
+          !node.statuses?.length
+        ) {
+          node.uncaught = { text: node.text, label: node.label || endLabel(node) };
+          node.statuses = [500];
+          node.text = `${node.text} — not caught, so the server answers 500`;
+          node.label = 'Stop with an error — nothing catches it, so the server answers 500';
+        }
+        break;
+      case 'decision':
+        node.branches.forEach((branch) => markUncaught(branch.nodes, caught, inRequest));
+        break;
+      case 'group':
+        markUncaught(node.nodes, caught, inRequest || node.kind === 'request');
+        break;
+      case 'try':
+        markUncaught(node.nodes, caught || node.catch !== undefined, inRequest);
+        if (node.catch) markUncaught(node.catch.nodes, caught, inRequest);
+        if (node.finally) markUncaught(node.finally, caught, inRequest);
+        break;
+    }
+  }
+}
+
 function worthShowing(node: DecisionNode): boolean {
   switch (node.type) {
     case 'step':
@@ -1982,7 +3559,9 @@ function worthShowing(node: DecisionNode): boolean {
     case 'end':
       return !['return', 'next', 'break'].includes(node.outcome);
     case 'decision':
-      return node.branches.some((branch) => branch.nodes.some(worthShowing));
+      // A decision is the point of the chart, even one that only picks which
+      // value to return: `switch (level) { case "low-stock": return … }`.
+      return node.branches.some((branch) => branch.nodes.length > 0);
     case 'group':
       return node.kind === 'request' || node.nodes.some(worthShowing);
     case 'try':
@@ -2075,7 +3654,7 @@ function triggerText(flow: FeatureFlow): string {
   return `The user ${verb} "${flow.label}"`;
 }
 
-function countOf(nodes: DecisionNode[]): ActionDecisions['counts'] {
+export function countOf(nodes: DecisionNode[]): ActionDecisions['counts'] {
   const counts = { decisions: 0, outcomes: 0, queries: 0, requests: 0 };
   const visit = (list: DecisionNode[]): void => {
     for (const node of list) {
@@ -2120,6 +3699,8 @@ function labelTree(nodes: DecisionNode[]): DecisionNode[] {
         break;
       case 'decision':
         if (!node.label) node.label = questionLabel(node.code, node.question);
+        // Words start with a capital; code as written does not.
+        if (!looksLikeCode(node.label)) node.label = capitalise(node.label);
         node.branches.forEach((branch) => labelTree(branch.nodes));
         break;
       case 'group':
@@ -2152,7 +3733,11 @@ function stepLabel(node: DecisionStep): string {
     case 'compute':
       return capitalise(node.text);
     case 'db': {
-      const [collection = node.text] = node.text.split('.');
+      const [collection = node.text, operation = ''] = node.text.split('.');
+      // A count or a pipeline is not a read of rows: say which it is.
+      if (/^(?:countDocuments|count|estimatedDocumentCount)$/.test(operation))
+        return `Count ${collection}`;
+      if (operation === 'aggregate') return `Aggregate ${collection}`;
       return `${DB_VERB[node.effect ?? 'read'] ?? 'Query'} ${collection}`;
     }
     case 'external': {
@@ -2160,6 +3745,8 @@ function stepLabel(node: DecisionStep): string {
       const match = /^(.+?) \((\w+)\)/.exec(node.text);
       return match ? `${capitalise(match[1]!)}: ${match[2]}` : capitalise(node.text);
     }
+    case 'shared':
+      return capitalise(node.text);
     case 'call': {
       if (node.text.endsWith('(recursive)')) return capitalise(node.text);
       const name = /^([\w$.]+)\(/.exec(node.text)?.[1];
@@ -2176,6 +3763,15 @@ function stepLabel(node: DecisionStep): string {
 /** `setError("Enter a valid quantity")` -> `Show error "Enter a valid quantity"`. */
 function uiLabel(call: CallExpression): string {
   const text = calleeText(call);
+  const saving: Array<[RegExp, string]> = [
+    [/createObjectURL$/, 'Turn the downloaded data into a link to a file'],
+    [/revokeObjectURL$/, 'Free the file link'],
+    [/appendChild$/, 'Put the link on the page'],
+    [/removeChild$/, 'Take the link off the page'],
+    [/\.click$/, 'Click the link, so the browser saves the file'],
+  ];
+  if (DOWNLOAD_CALLS.test(text))
+    for (const [pattern, label] of saving) if (pattern.test(text)) return label;
   const [first, second] = call.getArguments();
   const literal = first ? literalOf(first) : undefined;
 
@@ -2238,7 +3834,7 @@ function endLabel(node: DecisionEnd): string {
       if (node.text.startsWith('no route')) return 'No route answers this request';
       return `Respond with ${node.text.replace(/^responds /, '')}`;
     case 'throw':
-      return `Throw ${status ? `${status} error` : 'an error'}${message}`;
+      return `Stop with ${status ? `a ${status} error` : 'an error'}${message}`;
     case 'next':
       return node.text === 'finishes this item early'
         ? 'Done with this item'
@@ -2252,7 +3848,10 @@ function endLabel(node: DecisionEnd): string {
       const value = node.text.replace(/^returns ?/, '');
       // `return Promise.reject(error)` fails the caller's await with the error.
       if (/^Promise\.reject\(/.test(value)) return 'Fail — pass the error on to the caller';
-      return value ? `Return ${value}` : 'Return';
+      if (!value) return 'Finish here';
+      // What comes back, in words; the code is the end's text, under "Show code".
+      const result = value.includes('…') ? undefined : plainResult(value);
+      return `Give back ${result ?? 'the result'}`;
     }
   }
 }
@@ -2347,30 +3946,48 @@ function meaningOf(condition: Node, side: DecisionSide): string | undefined {
 /** The initializer of the variable an identifier names, from its declaration in scope. */
 function originOf(identifier: Node): Node | undefined {
   const name = identifier.getText();
-  let declaration: Node | undefined;
-  try {
-    declaration = identifier
-      .getSymbol()
-      ?.getDeclarations()
-      .find((candidate) => Node.isVariableDeclaration(candidate));
-  } catch {
-    declaration = undefined;
+  /**
+   * The nearest declaration above it in a scope that holds it, read off the
+   * syntax tree. Asking the type checker bound whole files for every
+   * condition, and was most of the time a tree took on a large app.
+   */
+  const scopes: Node[] = [];
+  let module: SourceFile | undefined;
+  for (const node of identifier.getAncestors()) {
+    // A parameter holds what the caller passed: there is no assignment to read.
+    if (
+      (Node.isFunctionDeclaration(node) ||
+        Node.isArrowFunction(node) ||
+        Node.isFunctionExpression(node) ||
+        Node.isMethodDeclaration(node)) &&
+      node.getParameters().some((param) => param.getName() === name)
+    )
+      break;
+    if (Node.isBlock(node)) scopes.push(node);
+    if (Node.isSourceFile(node)) module = node;
   }
-  if (!declaration) {
-    // Without a binder answer, the nearest declaration above in the same function.
-    const scope = identifier.getFirstAncestor(
-      (node) => Node.isBlock(node) || Node.isSourceFile(node),
-    );
-    declaration = scope
-      ?.getDescendantsOfKind(SyntaxKind.VariableDeclaration)
+  // Module level: declared anywhere in the file, as a closure sees it.
+  const declaration = findIn(scopes, identifier, name) ?? module?.getVariableDeclaration(name);
+  const value = declaration?.getInitializer();
+  return value ? unwrap(value) : undefined;
+}
+
+/** The last `const name = …` above `at` in the innermost of these blocks that has one. */
+function findIn(scopes: Node[], at: Node, name: string): VariableDeclaration | undefined {
+  const held = new Set(scopes);
+  for (const scope of scopes) {
+    const found = scope
+      .getDescendantsOfKind(SyntaxKind.VariableDeclaration)
       .filter(
-        (candidate) => candidate.getName() === name && candidate.getStart() < identifier.getStart(),
+        (candidate) =>
+          candidate.getName() === name &&
+          candidate.getStart() < at.getStart() &&
+          held.has(candidate.getFirstAncestor((node) => Node.isBlock(node))!),
       )
       .at(-1);
+    if (found) return found;
   }
-  if (!declaration || !Node.isVariableDeclaration(declaration)) return undefined;
-  const value = declaration.getInitializer();
-  return value ? unwrap(value) : undefined;
+  return undefined;
 }
 
 /** `schema.safeParse(x)` and friends: what is being validated, in words. */
@@ -2438,6 +4055,26 @@ function calledName(origin: Node): string | undefined {
  * `items.length` -> `items is not empty?`, `a === "x"` -> `a is "x"?`.
  */
 function questionLabel(code: string, question: string): string {
+  // `!valid` is asked the right way up, with its branches swapped (see `phrase`):
+  // the words read the condition inside.
+  const single = /^!\s*(\(?[\w$.?[\]'"()]+\)?)$/.exec(code.replace(/\s+/g, ' ').trim());
+  const plain = plainQuestion(
+    single && !code.trim().startsWith('!!') ? single[1]!.replace(/^\((.*)\)$/, '$1') : code,
+  );
+  if (plain) return plain;
+  const older = codeQuestionLabel(code, question);
+  // The older rules give the code back when they have no reading either. (A
+  // question the walk wrote in words — "the request succeeded?" — is kept.)
+  return older === question && looksLikeCode(question) ? (plainFallback(code) ?? older) : older;
+}
+
+/** `hit && Date.now() - hit.at < TTL?` is code; `the request succeeded?` is not. */
+function looksLikeCode(text: string): boolean {
+  return /[=&|()[\]<>!+*/%`]|\w\.\w/.test(text);
+}
+
+/** The older readings, for what `plainQuestion` leaves as code. */
+function codeQuestionLabel(code: string, question: string): string {
   const flat = code.replace(/\s+/g, ' ').trim();
   const doubled = /^!!\s*([\w$.]+)$/.exec(flat);
   if (doubled) return `Has ${words(doubled[1]!.split('.').pop()!)}?`;
@@ -2551,9 +4188,22 @@ export function renderDecisionTree(tree: ActionDecisions): string {
                   ? '⇢'
                   : node.kind === 'guard'
                     ? '⛨'
-                    : '•';
+                    : node.kind === 'shared'
+                      ? '⧉'
+                      : '•';
           const effect = node.effect ? ` (${node.effect})` : '';
-          lines.push(`${indent}${mark} ${node.text}${effect}${where(node.at)}`);
+          const detail = node.detail ? ` — ${node.detail}` : '';
+          lines.push(`${indent}${mark} ${node.text}${effect}${detail}${where(node.at)}`);
+          if (node.shared) {
+            lines.push(
+              `${indent}  shared with ${node.shared.actions - 1} other ${node.shared.actions === 2 ? 'action' : 'actions'} — drawn once, under "Shared"`,
+            );
+            for (const end of node.shared.ends) {
+              lines.push(
+                `${indent}  ■ ${end.label.charAt(0).toLowerCase()}${end.label.slice(1)}${end.statuses?.length ? ` [${end.statuses.join('/')}]` : ''}`,
+              );
+            }
+          }
           break;
         }
         case 'end':

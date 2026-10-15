@@ -1,3 +1,4 @@
+import { pageAtPath } from '../flow/pages.js';
 import type { FlowGraph } from '../graph/graph.js';
 import type { EdgeKind, FlowNode } from '../graph/types.js';
 import { resolveFlows, type FeatureFlow } from '../flow/resolve.js';
@@ -128,7 +129,13 @@ export function analyzeImpact(
   if (uiActions >= 3) warnings.push(`${uiActions} user actions depend on this`);
   if (endpoints.length >= 3) warnings.push(`reached from ${endpoints.length} endpoints`);
   if (collections.length >= 2) warnings.push(`touches ${collections.length} collections`);
-  if (target.evidence === 'static') {
+  // A function the tracer has no span for still ran if a query it makes was seen.
+  const seenRunning =
+    target.evidence !== 'static' ||
+    [...graph.reachable(targetId, { kinds: ['calls', 'queries'] }).keys()].some(
+      (id) => graph.node(id)?.evidence !== undefined && graph.node(id)?.evidence !== 'static',
+    );
+  if (!seenRunning) {
     warnings.push('never observed at runtime — the static picture may be incomplete');
   }
 
@@ -188,7 +195,20 @@ export function findDeadEndpoints(graph: FlowGraph): FlowNode[] {
 export function findBrokenCalls(graph: FlowGraph): FlowNode[] {
   return graph
     .nodesOfKind('api-call')
-    .filter((call) => graph.successors(call.id, ['handled-by']).length === 0);
+    .filter((call) => graph.successors(call.id, ['handled-by']).length === 0)
+    .filter((call) => !isPageNavigation(graph, call));
+}
+
+/**
+ * Seen only at runtime, a `GET` to the address of one of the app's own pages:
+ * the browser opening that page (a Next.js `<Link>` fetches it), which no API
+ * route is meant to answer.
+ */
+export function isPageNavigation(graph: FlowGraph, call: FlowNode): boolean {
+  if (call.meta?.['discoveredAtRuntime'] !== true || call.meta?.['httpMethod'] !== 'GET')
+    return false;
+  const path = call.meta?.['path'];
+  return typeof path === 'string' && pageAtPath(graph, path) !== undefined;
 }
 
 /** Collections written by more than one service — a common source of surprise. */

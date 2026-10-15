@@ -3,7 +3,7 @@ import type { FlowGraph } from '../graph/graph.js';
 import { ids } from '../graph/ids.js';
 import { callsIn, calleeMember, calleeReceiver, lineOf } from './ast.js';
 import { linkExternalEffects } from './effects.js';
-import { collectionNameOf, dbEffectOf } from './mongo.js';
+import { collectionNameOf, dbEffectOf, upsertsIn } from './mongo.js';
 import { prismaEffectOf, prismaTableOf, type PrismaSchema } from './prisma.js';
 import type { LoadedProject } from './project.js';
 
@@ -122,7 +122,15 @@ export function linkDbOperations(
     const collection = table ?? collectionFor(receiver, file, aliases);
     if (!collection) continue;
 
-    const opId = ids.dbOp(collection, operation, `${rel}:${ownerId}`);
+    /**
+     * One node per call site: two `medicines.find`s in one function (newest,
+     * and recently updated) are two queries, and one id made them one — the
+     * second's line and filter gone from every tab.
+     */
+    let opId = ids.dbOp(collection, operation, `${rel}:${ownerId}`);
+    const first = graph.node(opId);
+    if (first && first.source?.line !== lineOf(call))
+      opId = ids.dbOp(collection, operation, `${rel}:${ownerId}@${lineOf(call)}`);
     graph.addNode({
       id: opId,
       kind: 'db-op',
@@ -134,6 +142,7 @@ export function linkDbOperations(
         access,
         effect,
         ...(table ? { database: 'prisma' } : {}),
+        ...(upsertsIn(call) ? { upsert: true } : {}),
       },
     });
     graph.addEdge({ from: ownerId, to: opId, kind: 'queries' });
@@ -207,7 +216,13 @@ export function collectionFor(
   if (/(Model|Collection)$/.test(head)) {
     return collectionNameOf(head.replace(/(Model|Collection)$/, ''));
   }
-  if (/^[A-Z][A-Za-z0-9]*$/.test(head) && isImported(file, head)) {
+  // From the project's own code, or a package that holds models — never
+  // `NestFactory` from `@nestjs/core`, whose `create` builds the app.
+  const from = /^[A-Z][A-Za-z0-9]*$/.test(head) ? importedFrom(file, head) : undefined;
+  if (
+    from !== undefined &&
+    (/^(\.|@\/|~\/|src\/)/.test(from) || /model|schema|entit|db|data/i.test(from))
+  ) {
     return collectionNameOf(head);
   }
 
@@ -224,12 +239,14 @@ function findDeclaration(file: SourceFile, name: string) {
   );
 }
 
-function isImported(file: SourceFile, name: string): boolean {
+/** The module `name` is imported from in this file, if it is imported. */
+function importedFrom(file: SourceFile, name: string): string | undefined {
   for (const declaration of file.getImportDeclarations()) {
-    if (declaration.getDefaultImport()?.getText() === name) return true;
+    const from = declaration.getModuleSpecifierValue();
+    if (declaration.getDefaultImport()?.getText() === name) return from;
     for (const named of declaration.getNamedImports()) {
-      if ((named.getAliasNode() ?? named.getNameNode()).getText() === name) return true;
+      if ((named.getAliasNode() ?? named.getNameNode()).getText() === name) return from;
     }
   }
-  return false;
+  return undefined;
 }

@@ -3340,6 +3340,14 @@ code.code-link .file-link {
   line-height: 18px;
   overflow-wrap: anywhere;
 }
+.fc-detail {
+  margin-top: 3px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text);
+  opacity: 0.85;
+  overflow-wrap: anywhere;
+}
 .fc-code {
   display: block;
   margin-top: 3px;
@@ -3432,6 +3440,52 @@ code.code-link .file-link {
 .fc-step.kind-external {
   border-style: dashed;
 }
+/* A helper drawn once on the page: one box here, with the ways it can end. */
+.fc-step.kind-shared {
+  border-style: double;
+  border-width: 3px;
+}
+.fc-shared-ends {
+  list-style: none;
+  margin: 6px 0 2px;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+.fc-shared-ends li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.fc-shared-ends .fc-status {
+  min-width: 32px;
+  padding: 1px 6px;
+  font-size: 11px;
+  background: var(--warning);
+}
+.fc-shared-ends li.works {
+  color: var(--text-muted);
+}
+.fc-shared-open {
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ui);
+  cursor: pointer;
+}
+.fc-shared-open:hover {
+  text-decoration: underline;
+}
+.kind-icon.kind-shared {
+  color: var(--ui);
+  background: color-mix(in oklab, var(--ui) 12%, transparent);
+  font-size: 12px;
+}
+
 /* A value the next query or decision depends on: quieter than a step. */
 .fc-step.kind-compute {
   box-shadow: none;
@@ -3906,4 +3960,520 @@ code.code-link .file-link {
 }
 .broken-sites .usage-src {
   margin-top: 2px;
+}
+
+/* "When the page opens", folded under the page's own actions. */
+.page-loads > summary.page-sub {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.page-loads > summary.page-sub::-webkit-details-marker {
+  display: none;
+}
+
+.page-loads > summary.page-sub::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.15s;
+}
+
+.page-loads[open] > summary.page-sub::before {
+  transform: rotate(45deg);
+}
+
+.page-loads > summary.page-sub:hover {
+  color: var(--text);
+}
+
+.loads-count {
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+/* Links from a page to the shared components it renders. */
+.page-shared {
+  margin: 6px 8px 4px 40px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.shared-link {
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  color: var(--ui);
+  cursor: pointer;
+}
+
+.shared-link:hover {
+  text-decoration: underline;
+}
+
+/* The app's own menu: entries like its sidebar, sub-entries indented under a rule. */
+.nav-children {
+  margin: 2px 0 4px 20px;
+  padding-left: 6px;
+  border-left: 1px solid var(--border);
+}
+
+.nav-children > .page-group + .page-group {
+  margin-top: 0;
+}
+
+.nav-entry .nav-entry > summary {
+  padding: 5px 8px;
+}
+
+.nav-entry .nav-entry .page-name {
+  font-weight: 500;
+}
+
+.nav-empty {
+  margin: 2px 0 6px 40px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.nav-children .nav-empty {
+  margin-left: 12px;
+}
+
+.nav-flat {
+  margin: 0 0 6px;
+}
+
+.nav-flat .flow-item {
+  margin-left: 0;
+  width: 100%;
+}
+
+/* A card or section of a screen, nested where it is drawn. */
+.nav-entry > .nav-entry,
+.nav-entry > .page-group {
+  margin: 2px 0 2px 12px;
+  border-left: 1px solid var(--border);
+  padding-left: 6px;
+}
+
+/* A card with things to press: a row like the cards beside it, that folds open. */
+.nav-entry > .page-group.nav-card-fold {
+  margin: 0;
+  border-left: 0;
+  padding-left: 0;
+}
+
+.page-group.nav-card-fold > summary {
+  align-items: flex-start;
+  width: calc(100% - 12px);
+  margin-left: 12px;
+  border: 1px solid transparent;
+}
+
+.page-group.nav-card-fold > summary::after {
+  align-self: center;
+}
+
+.page-group.nav-card-fold > summary .label {
+  font-weight: 550;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.page-group.nav-card-fold > summary .meta {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text-muted);
+}
+
+.page-group.nav-card-fold > summary .page-count {
+  align-self: center;
+}
+
+.page-group.nav-card-fold.selected > summary {
+  background: color-mix(in oklab, var(--ui) 8%, var(--surface));
+  border-color: color-mix(in oklab, var(--ui) 55%, var(--border));
+  box-shadow: none;
+}
+
+.nav-card-body {
+  margin: 2px 0 4px 22px;
+  padding-left: 6px;
+  border-left: 1px solid var(--border);
+}
+
+/* A link on a screen: where it goes, followed by clicking it. */
+.flow-item.nav-link .label {
+  color: var(--ui);
+}
+
+.flow-item.nav-link:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.kind-icon.kind-link {
+  color: var(--ui);
+  background: color-mix(in oklab, var(--ui) 10%, transparent);
+}
+
+.page-group.nav-target > summary {
+  background: color-mix(in oklab, var(--ui) 16%, transparent);
+  transition: background 0.3s ease;
+}
+
+/* A page or card selected in the sidebar. */
+.page-group.selected > summary {
+  background: color-mix(in oklab, var(--ui) 12%, transparent);
+  box-shadow: inset 2px 0 0 var(--ui);
+}
+
+/* A screen's tabs: its actions as rows that open them. */
+.scope-list {
+  list-style: none;
+  margin: 8px 0 12px;
+  padding: 0;
+}
+
+.scope-list .scope-list {
+  margin: 4px 0 4px 14px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+.scope-row,
+.scope-link {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 8px;
+}
+
+.scope-row,
+.scope-link[data-open-link] {
+  cursor: pointer;
+}
+
+.scope-row:hover,
+.scope-link[data-open-link]:hover {
+  background: var(--surface-2);
+}
+
+.scope-row-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.scope-row-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.scope-link .scope-row-title {
+  color: var(--ui);
+}
+
+.scope-row-meta {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scope-row-extra {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.scope-section {
+  margin: 6px 0;
+}
+
+.scope-section-title,
+.scope-lead {
+  border: 0;
+  background: none;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 6px;
+  text-align: left;
+}
+
+.scope-lead {
+  font-weight: 500;
+  color: var(--ui);
+}
+
+.scope-section-title:hover,
+.scope-lead:hover {
+  background: var(--surface-2);
+}
+
+.scope-empty {
+  margin: 2px 0 6px 22px;
+  font-size: 12px;
+}
+
+.scope-heading {
+  margin: 18px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.scope-plain,
+.scope-leads {
+  margin: 4px 0 10px;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.scope-shared {
+  margin: 8px 0 2px;
+  font-size: 13px;
+}
+
+/* A page or card, tab by tab: each action's own tab, one after another. */
+.stack-card {
+  margin: 22px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.stack-item {
+  margin: 10px 0 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.stack-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.stack-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.stack-endpoint {
+  margin-left: auto;
+  font-size: 11.5px;
+}
+
+.stack-body {
+  padding: 12px 14px;
+}
+
+/* One action among many: no List / Diagram switch, which is about the selection. */
+.stack-body .view-switch {
+  display: none;
+}
+
+/* A page, explained in plain words. */
+.page-story {
+  max-width: none;
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.story-lead {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 4px 0 8px;
+}
+
+.story-heading {
+  margin: 22px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.story-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.story-steps .story-steps {
+  margin: 4px 0 6px 12px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+}
+
+.story-step {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.story-step:hover {
+  background: var(--surface-2);
+}
+
+.story-step .kind-icon {
+  margin-top: 3px;
+}
+
+.story-card {
+  margin: 10px 0;
+}
+
+.story-card-title {
+  border: 0;
+  background: none;
+  padding: 4px 10px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.story-card-title:hover {
+  background: var(--surface-2);
+}
+
+.story-quiet {
+  margin: 0 0 0 24px;
+  color: var(--text-muted);
+  font-size: 13.5px;
+}
+
+.story-path {
+  list-style: none;
+  margin: 0 0 8px 30px;
+  font-size: 13.5px;
+}
+
+/* What the page's actions share with the rest of the app: a fold per helper. */
+.story-shared .shared-part {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.story-shared .shared-part > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.story-shared .shared-part > summary::-webkit-details-marker {
+  display: none;
+}
+.story-shared .shared-part > summary:hover {
+  background: var(--surface-2);
+}
+.story-shared .shared-part-title {
+  font-family: var(--mono);
+  font-weight: 600;
+}
+.story-shared .shared-part > .stack-body {
+  padding: 0 12px 12px;
+}
+
+.story-leads {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.story-hint {
+  margin-top: 24px;
+  font-size: 12.5px;
+}
+
+/* A page has no tabs of its own: the bar is hidden, whatever its display. */
+.tabs[hidden] {
+  display: none;
+}
+
+/* The sidebar's two parts: the app's own menu, and every other page. */
+.nav-part {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 12px 8px 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.nav-part + .page-group,
+.nav-part + .nav-flat {
+  margin-top: 0;
+}
+
+.nav-part:first-child {
+  margin-top: 4px;
+}
+
+.nav-part[data-part='other'] {
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.nav-part-count {
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+/* A card's data: where its values come from, above what is stacked under it. */
+.card-data {
+  margin-bottom: 18px;
+}
+.card-data .adoc-lines.card-path {
+  list-style: decimal;
+  padding-left: 22px;
+}
+.card-data .adoc-lines.card-path > li {
+  margin: 4px 0;
+}
+
+/* A card that only shows data: a row that opens its tabs, not a fold. */
+.kind-icon.kind-card {
+  color: var(--text-muted);
+  background: color-mix(in oklab, var(--text-muted) 12%, transparent);
 }

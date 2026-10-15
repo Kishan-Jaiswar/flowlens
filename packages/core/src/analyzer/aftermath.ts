@@ -11,6 +11,7 @@
  * Read from the handler body, per handler, and recorded on the handler node.
  */
 
+import { keyPrefixOf } from './querykeys.js';
 import { Node, SyntaxKind, type CallExpression } from 'ts-morph';
 
 /** Router methods that move the user somewhere else. */
@@ -43,6 +44,8 @@ export interface Aftermath {
   navigatesTo: string[];
   /** Query keys or paths it invalidates, which causes a refetch. */
   invalidates: string[];
+  /** Each invalidated key's literal start, where it could be read: `queryKeys.medicines.all` -> medicines. */
+  invalidatePrefixes?: Record<string, string[]>;
   /** State setters called on the failure path. */
   errorStates: string[];
   /** Toast or notification calls, with their message when it is a literal. */
@@ -67,6 +70,7 @@ const EMPTY: Aftermath = {
 export function aftermathOf(fn: Node): Aftermath {
   const navigatesTo = new Set<string>();
   const invalidates = new Set<string>();
+  const prefixes: Record<string, string[]> = {};
   const errorStates = new Set<string>();
   const notifies = new Set<string>();
   let handlesErrors = false;
@@ -81,7 +85,25 @@ export function aftermathOf(fn: Node): Aftermath {
 
     // `router.push('/medicines')`
     if (member && NAVIGATION.has(member) && receiver && ROUTER_NAMES.has(receiver)) {
-      const target = firstStringLike(call);
+      // `replace(from ? from : "/dashboard")`: each place it can go.
+      const [first] = call.getArguments();
+      const arms =
+        first && Node.isConditionalExpression(first)
+          ? [first.getWhenTrue(), first.getWhenFalse()]
+          : undefined;
+      if (arms) {
+        for (const arm of arms) {
+          const route =
+            Node.isTemplateExpression(arm) ||
+            Node.isStringLiteral(arm) ||
+            Node.isNoSubstitutionTemplateLiteral(arm)
+              ? routeOfNode(arm)
+              : undefined;
+          navigatesTo.add(route ?? `${member}(${arm.getText()})`);
+        }
+        continue;
+      }
+      const target = routeOf(call);
       navigatesTo.add(target ?? `${member}()`);
       continue;
     }
@@ -89,6 +111,7 @@ export function aftermathOf(fn: Node): Aftermath {
     // `queryClient.invalidateQueries({ queryKey: ['medicines'] })`
     if (INVALIDATORS.has(member) || INVALIDATORS.has(bare)) {
       for (const key of invalidatedKeys(call)) invalidates.add(key);
+      for (const [key, prefix] of invalidatedPrefixes(call)) prefixes[key] = prefix;
       continue;
     }
 
@@ -123,6 +146,7 @@ export function aftermathOf(fn: Node): Aftermath {
   return {
     navigatesTo: [...navigatesTo],
     invalidates: [...invalidates],
+    ...(Object.keys(prefixes).length ? { invalidatePrefixes: prefixes } : {}),
     errorStates: [...errorStates],
     notifies: [...notifies],
     handlesErrors,
@@ -177,6 +201,28 @@ function invalidatedKeys(call: CallExpression): string[] {
   return keys;
 }
 
+/** The same keys as `invalidatedKeys`, each with the literal start it resolves to. */
+function invalidatedPrefixes(call: CallExpression): Array<[string, string[]]> {
+  const found: Array<[string, string[]]> = [];
+  const add = (node: Node | undefined): void => {
+    if (!node) return;
+    const first = Node.isArrayLiteralExpression(node) ? node.getElements()[0] : node;
+    const text = first ? (readLiteral(first) ?? keyExpression(first)) : undefined;
+    const prefix = keyPrefixOf(node);
+    if (text && prefix) found.push([text, prefix]);
+  };
+  for (const argument of call.getArguments()) {
+    if (Node.isObjectLiteralExpression(argument)) {
+      for (const property of argument.getProperties()) {
+        if (!Node.isPropertyAssignment(property)) continue;
+        if (!['queryKey', 'queryKeys', 'key'].includes(property.getName())) continue;
+        add(property.getInitializer());
+      }
+    } else add(argument);
+  }
+  return found;
+}
+
 /**
  * A key factory expression, reduced to something a reader recognises.
  *
@@ -193,6 +239,24 @@ function keyExpression(node: Node): string | undefined {
 
 function firstStringLike(call: CallExpression): string | undefined {
   const [first] = call.getArguments();
+  return first ? readLiteral(first) : undefined;
+}
+
+/** `/medicines/${m.id}/edit` -> `/medicines/[param]/edit`: the route a navigation goes to. */
+function routeOf(call: CallExpression): string | undefined {
+  return routeOfNode(call.getArguments()[0]);
+}
+
+function routeOfNode(first: Node | undefined): string | undefined {
+  if (first && Node.isTemplateExpression(first)) {
+    const route =
+      first.getHead().getLiteralText() +
+      first
+        .getTemplateSpans()
+        .map((span) => `[param]${span.getLiteral().getLiteralText()}`)
+        .join('');
+    return route.startsWith('/') ? route : undefined;
+  }
   return first ? readLiteral(first) : undefined;
 }
 

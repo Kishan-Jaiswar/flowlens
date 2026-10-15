@@ -1,0 +1,91 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]: ◎
+      - generic [ref=e5]:
+        - heading "Flowslens" [level=1] [ref=e6]
+        - paragraph [ref=e7]: 155 nodes · 247 edges · 25 files · web + api
+    - generic [ref=e8]:
+      - generic [ref=e9] [cursor=pointer]:
+        - checkbox "include local-only actions" [checked] [ref=e10]
+        - generic [ref=e11]: include local-only actions
+      - button "Rescan" [ref=e12] [cursor=pointer]
+      - link "Feature doc" [ref=e13] [cursor=pointer]:
+        - /url: /api/document?flow=customerspage-delete
+  - main [ref=e14]:
+    - complementary [ref=e15]:
+      - generic [ref=e16]:
+        - generic [ref=e17]:
+          - generic [ref=e18]:
+            - heading "Actions" [level=2] [ref=e19]
+            - paragraph [ref=e20]: 13 actions on 2 pages
+          - button "Expand all" [ref=e21] [cursor=pointer]
+        - generic [ref=e22]:
+          - searchbox "Search actions, pages or APIs" [ref=e23]
+          - generic "Press / to search": /
+      - generic [ref=e24]:
+        - group [ref=e25]:
+          - generic "Customers /customers 9" [ref=e26] [cursor=pointer]:
+            - generic [ref=e31]:
+              - generic [ref=e32]: Customers
+              - generic [ref=e33]: /customers
+            - generic "9 actions" [ref=e34]: "9"
+        - group [ref=e35]:
+          - generic "Orders /orders 4" [ref=e36] [cursor=pointer]:
+            - generic [ref=e41]:
+              - generic [ref=e42]: Orders
+              - generic [ref=e43]: /orders
+            - generic "4 actions" [ref=e44]: "4"
+      - generic [ref=e45]:
+        - heading "Findings" [level=2] [ref=e46]
+        - generic [ref=e47]:
+          - generic [ref=e48]: "⚠ PUT /customers/:param/archivewrong method (backend: PATCH)"
+          - generic [ref=e49]:
+            - text: ⚠
+            - code [ref=e50]: customers
+            - text: written by CustomersService, ImportsService
+          - generic [ref=e51]: 5 endpoint(s) with no known caller
+    - generic [ref=e52]:
+      - generic [ref=e53]:
+        - heading "Customers · Delete" [level=2] [ref=e54]
+        - generic [ref=e55]:
+          - generic [ref=e56]: risk high · 65
+          - generic [ref=e57]: static
+          - generic [ref=e58]: Customers
+          - generic [ref=e59]: click
+          - generic [ref=e60]: CustomersPage
+          - generic [ref=e61]: 1 reads
+          - generic [ref=e62]: 1 inserts
+          - generic [ref=e63]: 1 deletes
+        - paragraph [ref=e64]:
+          - link "web/src/pages/customers.tsx:44 ↗" [ref=e65] [cursor=pointer]:
+            - /url: vscode://file//home/kishanjaiswar/Desktop/flowlens/examples/crud/web/src/pages/customers.tsx:44
+      - tablist "Feature views" [ref=e66]:
+        - tab "Docs …" [selected] [ref=e67] [cursor=pointer]:
+          - generic [ref=e68]: Docs
+          - generic [ref=e69]: …
+        - tab "Decisions" [ref=e70] [cursor=pointer]
+        - tab "Performance …" [ref=e72] [cursor=pointer]:
+          - generic [ref=e73]: Performance
+          - generic [ref=e74]: …
+        - tab "Tests …" [ref=e75] [cursor=pointer]:
+          - generic [ref=e76]: Tests
+          - generic [ref=e77]: …
+        - tab "Issues & impact …" [ref=e78] [cursor=pointer]:
+          - generic [ref=e79]: Issues & impact
+          - generic [ref=e80]: …
+        - tab "Unused" [ref=e81] [cursor=pointer]
+      - text: ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗
+      - tabpanel "Docs …" [ref=e83]:
+        - generic [ref=e84]:
+          - generic [ref=e85]:
+            - group "Show the action as" [ref=e86]:
+              - button "List" [pressed] [ref=e87] [cursor=pointer]
+              - button "Diagram" [ref=e88] [cursor=pointer]
+            - generic [ref=e89]: How this action works, end to end
+          - generic [ref=e90]:
+            - button "Expand all" [ref=e91] [cursor=pointer]
+            - button "Copy as Markdown" [ref=e92] [cursor=pointer]
+            - link "Open Markdown" [ref=e93] [cursor=pointer]:
+              - /url: /api/action?flow=customerspage-delete&format=markdown
+        - paragraph [ref=e94]: Reading the code behind this action…

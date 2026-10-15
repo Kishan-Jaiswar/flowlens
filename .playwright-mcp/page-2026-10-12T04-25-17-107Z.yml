@@ -1,0 +1,320 @@
+- generic [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]: ◎
+      - generic [ref=e5]:
+        - heading "Flowslens" [level=1] [ref=e6]
+        - paragraph [ref=e7]: 155 nodes · 247 edges · 25 files · web + api
+    - generic [ref=e8]:
+      - generic [ref=e9] [cursor=pointer]:
+        - checkbox "include local-only actions" [checked] [ref=e10]
+        - generic [ref=e11]: include local-only actions
+      - button "Rescan" [ref=e12] [cursor=pointer]
+      - link "Feature doc" [ref=e13] [cursor=pointer]:
+        - /url: /api/document?flow=customerspage-delete
+  - main [ref=e14]:
+    - complementary [ref=e15]:
+      - generic [ref=e16]:
+        - generic [ref=e17]:
+          - generic [ref=e18]:
+            - heading "Actions" [level=2] [ref=e19]
+            - paragraph [ref=e20]: 13 actions on 2 pages
+          - button "Collapse all" [ref=e132] [cursor=pointer]
+        - generic [ref=e22]:
+          - searchbox "Search actions, pages or APIs" [ref=e23]
+          - generic "Press / to search": /
+      - generic [ref=e24]:
+        - group [ref=e133]:
+          - generic "Customers /customers 9" [ref=e134] [cursor=pointer]:
+            - generic [ref=e139]:
+              - generic [ref=e140]: Customers
+              - generic [ref=e141]: /customers
+            - generic "9 actions" [ref=e142]: "9"
+        - group [ref=e143]:
+          - generic "Orders /orders 4" [active] [ref=e144] [cursor=pointer]:
+            - generic [ref=e149]:
+              - generic [ref=e150]: Orders
+              - generic [ref=e151]: /orders
+            - generic "4 actions" [ref=e152]: "4"
+          - button "Submit Order in Order form POST /orders ⚠ 1" [ref=e153] [cursor=pointer]:
+            - generic [ref=e157]:
+              - generic [ref=e158]: Submit Order
+              - generic [ref=e159]: in Order form
+              - generic [ref=e160]:
+                - generic [ref=e161]: POST
+                - generic [ref=e162]: /orders
+            - generic "1 issue — see Issues & impact" [ref=e163]: ⚠ 1
+          - button "Change (line 35) in Order form stays in the browser" [ref=e164] [cursor=pointer]:
+            - generic [ref=e168]:
+              - generic [ref=e169]: Change (line 35)
+              - generic [ref=e170]: in Order form
+              - generic [ref=e171]: stays in the browser
+          - button "Change (line 40) in Order form stays in the browser" [ref=e173] [cursor=pointer]:
+            - generic [ref=e177]:
+              - generic [ref=e178]: Change (line 40)
+              - generic [ref=e179]: in Order form
+              - generic [ref=e180]: stays in the browser
+          - button "Print Order in Order form GET /orders/:param/latest" [ref=e182] [cursor=pointer]:
+            - generic [ref=e186]:
+              - generic [ref=e187]: Print Order
+              - generic [ref=e188]: in Order form
+              - generic [ref=e189]:
+                - generic [ref=e190]: GET
+                - generic [ref=e191]: /orders/:param/latest
+      - generic [ref=e45]:
+        - heading "Findings" [level=2] [ref=e46]
+        - generic [ref=e47]:
+          - generic [ref=e48]: "⚠ PUT /customers/:param/archivewrong method (backend: PATCH)"
+          - generic [ref=e49]:
+            - text: ⚠
+            - code [ref=e50]: customers
+            - text: written by CustomersService, ImportsService
+          - generic [ref=e51]: 5 endpoint(s) with no known caller
+    - generic [ref=e52]:
+      - generic [ref=e53]:
+        - heading "Customers · Delete" [level=2] [ref=e54]
+        - generic [ref=e55]:
+          - generic [ref=e56]: risk high · 65
+          - generic [ref=e57]: static
+          - generic [ref=e58]: Customers
+          - generic [ref=e59]: click
+          - generic [ref=e60]: CustomersPage
+          - generic [ref=e61]: 1 reads
+          - generic [ref=e62]: 1 inserts
+          - generic [ref=e63]: 1 deletes
+        - paragraph [ref=e64]:
+          - link "web/src/pages/customers.tsx:44 ↗" [ref=e65] [cursor=pointer]:
+            - /url: vscode://file//home/kishanjaiswar/Desktop/flowlens/examples/crud/web/src/pages/customers.tsx:44
+      - tablist "Feature views" [ref=e66]:
+        - tab "Docs 14 steps" [selected] [ref=e192] [cursor=pointer]:
+          - generic [ref=e193]: Docs
+          - generic [ref=e194]: 14 steps
+        - tab "Decisions" [ref=e195] [cursor=pointer]
+        - tab "Performance not run" [ref=e197] [cursor=pointer]:
+          - generic [ref=e198]: Performance
+          - generic [ref=e199]: not run
+        - tab "Tests none" [ref=e200] [cursor=pointer]:
+          - generic [ref=e201]: Tests
+          - generic [ref=e202]: none
+        - tab "Issues & impact 341 breaking" [ref=e203] [cursor=pointer]:
+          - generic [ref=e204]: Issues & impact
+          - generic [ref=e205]: 341 breaking
+        - tab "Unused 4" [ref=e206] [cursor=pointer]:
+          - generic [ref=e207]: Unused
+          - generic [ref=e208]: "4"
+      - text: ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗
+      - tabpanel "Docs 14 steps" [ref=e209]:
+        - generic [ref=e210]:
+          - generic [ref=e211]:
+            - group "Show the action as" [ref=e212]:
+              - button "List" [pressed] [ref=e213] [cursor=pointer]
+              - button "Diagram" [ref=e214] [cursor=pointer]
+            - generic [ref=e215]: How this action works, end to end
+          - generic [ref=e216]:
+            - button "Expand all" [ref=e217] [cursor=pointer]
+            - button "Copy as Markdown" [ref=e218] [cursor=pointer]
+            - link "Open Markdown" [ref=e219] [cursor=pointer]:
+              - /url: /api/action?flow=customerspage-delete&format=markdown
+        - article [ref=e220]:
+          - generic [ref=e221]:
+            - paragraph [ref=e222]:
+              - text: The user clicks
+              - strong [ref=e223]: "\"Delete\""
+              - text: "on"
+              - strong [ref=e224]: Customers
+              - text: .
+            - generic [ref=e225]:
+              - code [ref=e226]: DELETE /customers/:param
+              - code [ref=e227]: GET /customers
+              - generic [ref=e228]: read from the source
+              - link "customers.tsx:44 ↗" [ref=e229] [cursor=pointer]:
+                - /url: vscode://file//home/kishanjaiswar/Desktop/flowlens/examples/crud/web/src/pages/customers.tsx:44
+          - region "At a glance" [ref=e230]:
+            - heading "At a glance" [level=3] [ref=e231]
+            - generic [ref=e232]:
+              - generic [ref=e233]: In the browser — before anything is sent
+              - list [ref=e234]:
+                - listitem [ref=e235]:
+                  - button "1 User opens page On /customers ▸" [ref=e236] [cursor=pointer]:
+                    - generic [ref=e237]: "1"
+                    - generic [ref=e238]: User opens page
+                    - generic [ref=e239]:
+                      - text: "On"
+                      - code [ref=e240]: /customers
+                    - text: ▸
+                  - text: ↗
+                - listitem [ref=e241]:
+                  - button "2 User fills form Fills 1 field in CustomersPage ▸" [ref=e242] [cursor=pointer]:
+                    - generic [ref=e243]: "2"
+                    - generic [ref=e244]: User fills form
+                    - generic [ref=e245]:
+                      - text: Fills 1 field in
+                      - code [ref=e246]: CustomersPage
+                    - text: ▸
+                  - text: ↗
+                - listitem [ref=e247]:
+                  - button "3 User triggers the action The user clicks \"Delete\" ▸" [ref=e248] [cursor=pointer]:
+                    - generic [ref=e249]: "3"
+                    - generic [ref=e250]: User triggers the action
+                    - generic [ref=e251]:
+                      - text: The user clicks
+                      - strong [ref=e252]: "\"Delete\""
+                    - text: ▸
+                  - text: ↗
+                - listitem [ref=e253]:
+                  - button "4 Click / event handler onClick (inline) → handleDelete → handleSearch ▸" [ref=e254] [cursor=pointer]:
+                    - generic [ref=e255]: "4"
+                    - generic [ref=e256]: Click / event handler
+                    - generic [ref=e257]:
+                      - code [ref=e258]: onClick (inline)
+                      - text: →
+                      - code [ref=e259]: handleDelete
+                      - text: →
+                      - code [ref=e260]: handleSearch
+                    - text: ▸
+                  - text: ↗ ↗ ↗
+            - generic [aria-hidden] [ref=e261]: ↓
+            - generic [ref=e262]:
+              - generic [ref=e263]: Over the network
+              - list [ref=e264]:
+                - listitem [ref=e265]:
+                  - button "5 Actual API request GET process.env.NEXT_PUBLIC_API_URL ?? 'http://localh…/api/customers?search=<param> · DELETE process.env.NEXT_PUBLIC_API_URL ?? 'http://localh…/api/customers/<param> ▸" [ref=e266] [cursor=pointer]:
+                    - generic [ref=e267]: "5"
+                    - generic [ref=e268]: Actual API request
+                    - generic [ref=e269]:
+                      - code [ref=e270]: GET process.env.NEXT_PUBLIC_API_URL ?? 'http://localh…/api/customers?search=<param>
+                      - text: ·
+                      - code [ref=e271]: DELETE process.env.NEXT_PUBLIC_API_URL ?? 'http://localh…/api/customers/<param>
+                    - text: ▸
+                  - text: ↗ ↗ ↗ ↗ ↗ ↗
+                - listitem [ref=e272]:
+                  - button "6 Backend route GET /customers → CustomersController · DELETE /customers/:param → CustomersController ▸" [ref=e273] [cursor=pointer]:
+                    - generic [ref=e274]: "6"
+                    - generic [ref=e275]: Backend route
+                    - generic [ref=e276]:
+                      - code [ref=e277]: GET /customers
+                      - text: →
+                      - code [ref=e278]: CustomersController
+                      - text: ·
+                      - code [ref=e279]: DELETE /customers/:param
+                      - text: →
+                      - code [ref=e280]: CustomersController
+                    - text: ▸
+                  - text: ↗ ↗
+            - generic [aria-hidden] [ref=e281]: ↓
+            - generic [ref=e282]:
+              - generic [ref=e283]: On the server
+              - list [ref=e284]:
+                - listitem [ref=e285]:
+                  - button "7 Controller CustomersController.search · CustomersController.remove ▸" [ref=e286] [cursor=pointer]:
+                    - generic [ref=e287]: "7"
+                    - generic [ref=e288]: Controller
+                    - generic [ref=e289]:
+                      - code [ref=e290]: CustomersController.search
+                      - text: ·
+                      - code [ref=e291]: CustomersController.remove
+                    - text: ▸
+                  - text: ↗ ↗
+                - listitem [ref=e292]:
+                  - 'button "8 Service / business logic CustomersService.search · CustomersService.remove → AuditService.record: 1 read, 2 writes ▸" [ref=e293] [cursor=pointer]':
+                    - generic [ref=e294]: "8"
+                    - generic [ref=e295]: Service / business logic
+                    - generic [ref=e296]:
+                      - code [ref=e297]: CustomersService.search
+                      - text: ·
+                      - code [ref=e298]: CustomersService.remove
+                      - text: →
+                      - code [ref=e299]: AuditService.record
+                      - text: ": 1 read, 2 writes"
+                    - text: ▸
+                  - text: ↗ ↗ ↗
+            - generic [aria-hidden] [ref=e300]: ↓
+            - generic [ref=e301]:
+              - generic [ref=e302]: In the database
+              - list [ref=e303]:
+                - listitem [ref=e304]:
+                  - button "9 Database customers — read, delete · auditlogs — insert ▸" [ref=e305] [cursor=pointer]:
+                    - generic [ref=e306]: "9"
+                    - generic [ref=e307]: Database
+                    - generic [ref=e308]:
+                      - strong [ref=e309]: customers
+                      - text: — read, delete ·
+                      - strong [ref=e310]: auditlogs
+                      - text: — insert
+                    - text: ▸
+                  - text: ↗ ↗ ↗ ↗ ↗
+                - listitem [ref=e311]:
+                  - 'button "10 Database result Results used: find → returned by CustomersService.search ▸" [ref=e312] [cursor=pointer]':
+                    - generic [ref=e313]: "10"
+                    - generic [ref=e314]: Database result
+                    - generic [ref=e315]:
+                      - text: "Results used:"
+                      - code [ref=e316]: find
+                      - text: → returned by
+                      - code [ref=e317]: CustomersService.search
+                    - text: ▸
+                  - text: ↗ ↗ ↗
+            - generic [aria-hidden] [ref=e318]: ↓
+            - generic [ref=e319]:
+              - generic [ref=e320]: The way back — response to screen
+              - list [ref=e321]:
+                - listitem [ref=e322]:
+                  - button "11 Backend response 200 on success ▸" [ref=e323] [cursor=pointer]:
+                    - generic [ref=e324]: "11"
+                    - generic [ref=e325]: Backend response
+                    - generic [ref=e326]:
+                      - strong [ref=e327]: "200"
+                      - text: on success
+                    - text: ▸
+                  - text: ↗ ↗
+                - listitem [ref=e328]:
+                  - button "12 Frontend receives response handleSearch awaits it · handleDelete awaits it ▸" [ref=e329] [cursor=pointer]:
+                    - generic [ref=e330]: "12"
+                    - generic [ref=e331]: Frontend receives response
+                    - generic [ref=e332]:
+                      - code [ref=e333]: handleSearch
+                      - text: awaits it ·
+                      - code [ref=e334]: handleDelete
+                      - text: awaits it
+                    - text: ▸
+                  - text: ↗ ↗
+                - listitem [ref=e335]:
+                  - 'button "13 Frontend response handler Success: state update · Error: not handled ▸" [ref=e336] [cursor=pointer]':
+                    - generic [ref=e337]: "13"
+                    - generic [ref=e338]: Frontend response handler
+                    - generic [ref=e339]:
+                      - text: "Success: state update · Error:"
+                      - strong [ref=e340]: not handled
+                    - text: ▸
+                  - text: ↗ ↗
+                - listitem [ref=e341]:
+                  - button "14 Final UI state Nothing visible changes on success ▸" [ref=e342] [cursor=pointer]:
+                    - generic [ref=e343]: "14"
+                    - generic [ref=e344]: Final UI state
+                    - generic [ref=e345]: Nothing visible changes on success
+                    - text: ▸
+          - region "Not in this action" [ref=e346]:
+            - heading "Not in this action" [level=4] [ref=e347]
+            - list [ref=e348]:
+              - listitem [ref=e349]:
+                - generic [ref=e350]: Confirmation dialog
+                - text: No confirmation — the click goes straight through
+              - listitem [ref=e351]:
+                - generic [ref=e352]: Frontend validation
+                - text: No check — whatever is typed is sent
+              - listitem [ref=e353]:
+                - generic [ref=e354]: Payload construction
+                - code [ref=e355]: GET /customers
+                - text: ": no body ·"
+                - code [ref=e356]: DELETE /customers/:param
+                - text: ": no body"
+              - listitem [ref=e357]:
+                - generic [ref=e358]: Middleware / guard / auth
+                - strong [ref=e359]: No auth check
+                - text: — anyone who can reach the route can call it
+              - listitem [ref=e360]:
+                - generic [ref=e361]: Backend validation
+                - strong [ref=e362]: No validation
+                - text: — whatever arrives is used as is
+          - group [ref=e363]:
+            - generic "What this document cannot see" [ref=e364] [cursor=pointer]

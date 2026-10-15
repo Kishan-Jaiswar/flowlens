@@ -142,6 +142,8 @@ export function linkExternalEffects(
     const receiver = calleeReceiver(call);
     const found = matchEffect(receiver, member, call);
     if (!found) continue;
+    // `const cache = new Map()` is memory in this process, not a cache server.
+    if (inProcess(call)) continue;
 
     const effectId = ids.externalEffect(found.target, `${site}:${lineOf(call)}`);
     graph.addNode({
@@ -226,7 +228,16 @@ function matchHttp(
 
   const [first] = Node.isCallExpression(call) ? call.getArguments() : [];
   const url = readString(first) ?? literalHead(first) ?? urlFromOptions(first);
-  if (!url) return undefined;
+  if (!url) {
+    // `fetch(endpoint.url)` on the server: an address from config. A server
+    // cannot fetch a relative path, so it leaves the process — to a host the
+    // source does not name.
+    if (first && (Node.isIdentifier(first) || Node.isPropertyAccessExpression(first))) {
+      const where = first.getText();
+      return { kind: 'http', target: 'outside service', label: `outside service (${where})` };
+    }
+    return undefined;
+  }
 
   const host = hostOf(url);
   if (!host || LOCAL_HOSTS.test(host)) return undefined;
@@ -262,4 +273,20 @@ export function literalHead(node: Node | undefined): string | undefined {
   const text = node.getText();
   const match = /^[`'"]?(https?:\/\/[^$`'"]+)/i.exec(text);
   return match?.[1];
+}
+
+/** `cache.get(k)` where `const cache = new Map()` in the same file: nothing leaves the process. */
+function inProcess(call: Node): boolean {
+  if (!Node.isCallExpression(call)) return false;
+  const callee = call.getExpression();
+  if (!Node.isPropertyAccessExpression(callee)) return false;
+  const base = callee.getExpression();
+  if (!Node.isIdentifier(base)) return false;
+  const init = call
+    .getSourceFile()
+    .getVariableDeclarations()
+    .find((declaration) => declaration.getName() === base.getText())
+    ?.getInitializer()
+    ?.getText();
+  return init !== undefined && /^new (Map|Set|WeakMap|WeakSet)\b/.test(init);
 }

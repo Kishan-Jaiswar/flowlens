@@ -133,7 +133,7 @@ export function runMcp(args: McpArgs): number {
         properties: {
           filter: {
             type: 'string',
-            description: 'Words the title or endpoint must contain, e.g. "delete medicine".',
+            description: 'Words the title or endpoint must contain, e.g. "delete order".',
           },
           includeLocalOnly: {
             type: 'boolean',
@@ -226,7 +226,7 @@ export function runMcp(args: McpArgs): number {
         properties: {
           symbol: {
             type: 'string',
-            description: 'e.g. deleteMedicine, CustomersService.create, "POST /orders", medicines',
+            description: 'e.g. deleteOrder, CustomersService.create, "POST /orders", orders',
           },
         },
         required: ['symbol'],

@@ -6,10 +6,15 @@ import {
   type FunctionDeclaration,
   type FunctionExpression,
   type JsxAttribute,
+  type JsxElement,
+  type JsxOpeningElement,
+  type JsxSelfClosingElement,
+  type ObjectLiteralExpression,
   type SourceFile,
   type VariableDeclaration,
 } from 'ts-morph';
 import type { FlowGraph } from '../graph/graph.js';
+import type { FlowNode } from '../graph/types.js';
 import { ids } from '../graph/ids.js';
 import {
   asObjectLiteral,
@@ -24,14 +29,22 @@ import {
   propertyValue,
   readPathLike,
   readString,
+  stripQuotes,
   type Functionish,
 } from './ast.js';
 import { classifyFile, isFrontendCandidate } from './classify.js';
 import { aftermathOf } from './aftermath.js';
 import { callSequenceFacts } from './callsequence.js';
-import { composeTitle, eventVerb, humanizeName, screenOf } from './screens.js';
+import {
+  composeTitle,
+  eventVerb,
+  humanizeName,
+  isGenericComponentName,
+  screenOf,
+} from './screens.js';
 import { DYNAMIC_MARKER, HTTP_METHODS, PARAM, normalizePath, type HttpMethod } from './http.js';
 import type { LoadedProject } from './project.js';
+import { keyPrefixOf } from './querykeys.js';
 
 /**
  * Event props that make a JSX element a user action.
@@ -131,6 +144,114 @@ const QUERY_HOOKS = new Set([
   'useSWRImmutable',
 ]);
 
+/**
+ * `enabled: !!jobId` with `jobId` the hook's first parameter: whether it
+ * fetches at all is the caller's to say. `enabled: false` never fetches by
+ * itself.
+ */
+function enabledBy(fn: Functionish): Record<string, unknown> {
+  const params = fn.getParameters().map((param) => param.getName());
+  for (const call of callsIn(fn)) {
+    if (!QUERY_HOOKS.has(calleeName(call).split('.').pop() ?? '')) continue;
+    const options = call.getArguments().find((arg) => Node.isObjectLiteralExpression(arg));
+    const enabled =
+      options && Node.isObjectLiteralExpression(options)
+        ? options.getProperty('enabled')
+        : undefined;
+    if (!enabled || !Node.isPropertyAssignment(enabled)) continue;
+    const value = enabled.getInitializer();
+    if (!value) continue;
+    if (value.getText() === 'false') return { enabledByParam: -1 };
+    const used = value
+      .getDescendantsOfKind(SyntaxKind.Identifier)
+      .map((identifier) => params.indexOf(identifier.getText()));
+    if (Node.isIdentifier(value)) used.push(params.indexOf(value.getText()));
+    const index = used.find((position) => position >= 0);
+    if (index !== undefined) return { enabledByParam: index };
+  }
+  return {};
+}
+
+const LIBRARY_HOOKS =
+  /^(useMutation|useQuery|useInfiniteQuery|useSuspenseQuery|useSWR|useSWRMutation|useSWRImmutable)$/;
+
+/** A library hook called in a component body, made a hook node of its own. */
+function inlineLibraryHook(
+  call: CallExpression,
+  declaration: VariableDeclaration,
+  rel: string,
+  graph: FlowGraph,
+): { name: string; symbol: DeclaredSymbol; fetches: boolean; componentId?: string } | undefined {
+  const library = calleeName(call);
+  if (!LIBRARY_HOOKS.test(library)) return undefined;
+  const component = ownerComponentName(declaration);
+  if (!component) return undefined;
+  const binding = declaration.getNameNode();
+  const local = Node.isIdentifier(binding)
+    ? binding.getText()
+    : Node.isObjectBindingPattern(binding)
+      ? binding
+          .getElements()
+          .map((element) => element.getName())
+          .join(', ')
+      : 'result';
+  const name = `${component}.${local.replace(/[^\w$]+/g, '_')}`;
+  const id = ids.hook(rel, name);
+  const fetches = !/Mutation$/.test(library);
+  const options = call.getArguments().find((arg) => Node.isObjectLiteralExpression(arg));
+  const key =
+    options && Node.isObjectLiteralExpression(options)
+      ? options.getProperty('queryKey')
+      : undefined;
+  const prefix =
+    key && Node.isPropertyAssignment(key) ? keyPrefixOf(key.getInitializer()) : undefined;
+  graph.addNode({
+    id,
+    kind: 'hook',
+    label: `${local} (${library})`,
+    source: { file: rel, line: lineOf(call) },
+    meta: {
+      inline: true,
+      ...(fetches ? { fetchesOnMount: true } : {}),
+      ...(prefix ? { queryKeyPrefix: prefix } : {}),
+      ...aftermathMeta(call),
+    },
+  });
+  const componentId = ids.component(rel, component);
+  return {
+    name,
+    symbol: { id, kind: 'hook', file: rel, ensure: noop },
+    fetches,
+    ...(graph.hasNode(componentId) ? { componentId } : {}),
+  };
+}
+
+/** The inline library hook a call is written inside, if any. */
+function inlineHookOf(call: Node, hooks: Map<Node, DeclaredSymbol>): DeclaredSymbol | undefined {
+  if (hooks.size === 0) return undefined;
+  for (let node = call.getParent(); node; node = node.getParent()) {
+    const hook = hooks.get(node);
+    if (hook) return hook;
+  }
+  return undefined;
+}
+
+/** The literal start of a query hook's key: what an invalidation has to match. */
+function queryKeyOf(fn: Functionish): Record<string, unknown> {
+  for (const call of callsIn(fn)) {
+    if (!QUERY_HOOKS.has(calleeName(call).split('.').pop() ?? '')) continue;
+    const options = call.getArguments().find((arg) => Node.isObjectLiteralExpression(arg));
+    const key =
+      options && Node.isObjectLiteralExpression(options)
+        ? options.getProperty('queryKey')
+        : undefined;
+    const prefix =
+      key && Node.isPropertyAssignment(key) ? keyPrefixOf(key.getInitializer()) : undefined;
+    if (prefix) return { queryKeyPrefix: prefix };
+  }
+  return {};
+}
+
 /** Does this function body issue a request on mount rather than on demand? */
 function fetchesOnMount(fn: Functionish): boolean {
   for (const call of callsIn(fn)) {
@@ -221,6 +342,16 @@ interface PendingCall {
    * named `router` or `console`.
    */
   receiverOnly?: boolean;
+  /** Where the call is written, so a caller's calls can be read in order. */
+  line?: number;
+  /** Inside `onSuccess`/`onError`/`.then(...)`: runs once a response is back. */
+  afterResponse?: boolean;
+  /** Where the call ends: an argument's call ends, and so runs, before its caller. */
+  end?: number;
+  /** Arguments that are empty when the component first draws: `null`, a state set later. */
+  emptyArgs?: number[];
+  /** Names the arguments are built from, through `useMemo` and the like: `query` -> page, sortBy. */
+  reads?: string[];
 }
 
 /**
@@ -234,6 +365,20 @@ interface PendingAlias {
   file: string;
   localName: string;
   hookName: string;
+  /** The key read off the hook's result: `logout` in `const { logout: signOut } = useAuth()`. */
+  member?: string;
+}
+
+/**
+ * `useAuth()` returning `useContext(AuthContext)`, and what
+ * `<AuthContext.Provider value={{ logout }}>` puts in it: the hook's members are
+ * the provider component's own functions, so a click on `logout` runs one.
+ */
+interface ContextIndex {
+  /** Hook name -> the context it reads. */
+  hooks: Map<string, string>;
+  /** `Context::member` -> the provider's handler node id. */
+  members: Map<string, string>;
 }
 
 interface DeclaredSymbol {
@@ -263,21 +408,1065 @@ export function analyzeFrontend(
   const globals = new Map<string, DeclaredSymbol[]>();
   const pending: PendingCall[] = [];
   const aliases: PendingAlias[] = [];
+  const contexts: ContextIndex = { hooks: new Map(), members: new Map() };
   const actionProps = actionPropsOf(config);
 
   for (const file of loaded.sourceFiles) {
     const rel = loaded.rel(file);
     if (!isFrontendCandidate(classifyFile(file, rel))) continue;
     try {
-      analyzeFrontendFile(file, rel, graph, config, globals, pending, aliases, actionProps);
+      analyzeFrontendFile(
+        file,
+        rel,
+        graph,
+        config,
+        globals,
+        pending,
+        aliases,
+        contexts,
+        actionProps,
+      );
     } catch (error) {
       // One unusual file must never end a scan of ten thousand.
       loaded.warnings.push(`frontend analysis failed for ${rel}: ${message(error)}`);
     }
   }
 
-  resolvePendingCalls(graph, globals, pending, aliases);
+  resolvePendingCalls(graph, globals, pending, aliases, contexts);
   addMountActions(graph);
+  nameComponentEvents(graph);
+  linkPropBindings(graph, loaded);
+  linkStateRefetches(graph, loaded);
+  linkEffectRefetches(graph, loaded);
+  linkPopupFeatures(graph, loaded);
+  markConditionalMounts(graph, loaded);
+  distinguishTwins(graph, loaded);
+}
+
+/**
+ * `useEffect(() => { fetchBills() }, [activeTab, debouncedSearch, page])`: the
+ * tab, the search and the page buttons each make the list load again — the
+ * effect reruns when a state it watches changes. Without this, a search box or
+ * a date filter read "stays in the browser" and was hidden. An effect that only
+ * sets another watched state (a debounce: `setTimeout(() =>
+ * setDebouncedSearch(input), 1000)`) passes the change on.
+ */
+const POPUP_TAG = /(?:Popup|Modal|Dialog|Drawer|Sheet|Overlay|Popover)/;
+const MAIN_ACTION =
+  /download|save|submit|collect|create|update|send|confirm|generate|apply|add|upload|import|pay|book/i;
+
+/**
+ * "Download Report" opens a popup; the user picks the dates there and presses
+ * "Download", which sends the request. To the user that is one feature, and
+ * its flow runs from the first click to the database — so the button that
+ * opens a popup is joined to the popup's main action, as a step the user takes
+ * in it (`userStep`). Every tab then follows the feature end to end.
+ */
+function linkPopupFeatures(graph: FlowGraph, loaded: LoadedProject): void {
+  const files = new Map(loaded.sourceFiles.map((file) => [loaded.rel(file), file] as const));
+  const actions = graph.nodesOfKind('ui-action');
+  for (const component of graph.nodesOfKind('component')) {
+    const file = component.source ? files.get(component.source.file) : undefined;
+    if (!file) continue;
+    const fn = file
+      .getDescendants()
+      .find(
+        (node) =>
+          (Node.isFunctionDeclaration(node) ||
+            Node.isArrowFunction(node) ||
+            Node.isFunctionExpression(node)) &&
+          functionName(node as Functionish) === component.label,
+      );
+    if (!fn) continue;
+    const own = graph
+      .successors(component.id, ['renders'])
+      .filter((node) => node.kind === 'ui-action');
+    for (const opening of [
+      ...fn.getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
+      ...fn.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
+    ]) {
+      const tag = opening.getTagNameNode().getText();
+      const openProp = ['isOpen', 'open', 'show', 'visible']
+        .map((name) => opening.getAttribute(name))
+        .find((attr) => attr && Node.isJsxAttribute(attr));
+      if (!POPUP_TAG.test(tag) && !openProp) continue;
+      const element = Node.isJsxSelfClosingElement(opening) ? opening : opening.getParent();
+      const condition = [
+        openProp && Node.isJsxAttribute(openProp)
+          ? openProp.getInitializer()?.getText()
+          : undefined,
+        gateOf(element),
+      ]
+        .filter(Boolean)
+        .join(' ');
+      const names = [...condition.replace(/!!/g, '').matchAll(/(!?)\s*\b([A-Za-z_$][\w$]*)\b/g)]
+        .filter((match) => match[1] !== '!')
+        .map((match) => match[2]!);
+      if (names.length === 0) continue;
+      // What opens it: a click here that sets one of those states to something.
+      const openers = own.filter((action) => {
+        const handler = graph.successors(action.id, ['triggers'])[0];
+        // Its own handler, or the one it calls: `onClick={() => handleUpdatePayment(bill)}`.
+        const handlers = handler
+          ? [
+              handler,
+              ...graph.successors(handler.id, ['calls']).filter((node) => node.kind === 'handler'),
+            ]
+          : [];
+        return handlers.some((each) => {
+          const sets = each.meta?.['sets'] as Record<string, string[]> | undefined;
+          return names.some((name) =>
+            (sets?.[setterName(name)] ?? []).some(
+              (value) => !/^#(false|null|undefined|0)$/.test(value) && value !== '',
+            ),
+          );
+        });
+      });
+      if (openers.length === 0) continue;
+      // What is in it: its own controls, and those of the components it draws.
+      const start = element.getStartLineNumber();
+      const end = element.getEndLineNumber();
+      const drawn = new Set(
+        element
+          .getDescendantsOfKind(SyntaxKind.JsxOpeningElement)
+          .map((inner) => inner.getTagNameNode().getText())
+          .concat(
+            element
+              .getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement)
+              .map((inner) => inner.getTagNameNode().getText()),
+          )
+          .filter((name) => /^[A-Z]/.test(name) && name !== tag)
+          // `<AddMedicineDialog open={addOpen} />`: the popup is a component of its own.
+          .concat(/^[A-Z]/.test(tag) ? [tag] : []),
+      );
+      const inside = actions.filter((action) => {
+        if (openers.includes(action)) return false;
+        // Hidden behind the action that runs it, which is the one to follow.
+        if (((action.meta?.['relayedBy'] as string[] | undefined) ?? []).length > 0) return false;
+        const at = action.source;
+        if (!at) return false;
+        if (at.file === component.source!.file && at.line >= start && at.line <= end) return true;
+        // A copy made for one place it is drawn: `AdjustStockDialog`'s button
+        // as drawn on this page, or `MedicineForm`'s as drawn in `AddMedicineDialog`.
+        const site = action.meta?.['site'];
+        if (drawn.has(String(action.meta?.['component'] ?? '')))
+          return site === undefined || site === component.label;
+        return site !== undefined && drawn.has(String(site));
+      });
+      const pressed = inside.filter(
+        (action) =>
+          // What loads as it opens is already joined to the click that shows it.
+          !/^(mount|on(Close|Change|Input|Focus|Blur|KeyDown|KeyUp|MouseDown))$/.test(
+            String(action.meta?.['event']),
+          ) && !/^close|^cancel/i.test(action.label),
+      );
+      const sending = pressed.filter((action) => {
+        const handler = graph.successors(action.id, ['triggers'])[0];
+        return handler !== undefined && reachesApiCall(graph, handler.id);
+      });
+      const main =
+        sending.find((action) => action.meta?.['event'] === 'onSubmit') ??
+        sending.find((action) => MAIN_ACTION.test(action.label)) ??
+        sending.at(-1);
+      const target = main ? graph.successors(main.id, ['triggers'])[0] : undefined;
+      if (!main || !target) continue;
+      // The inputs of the form it submits too: `MedicineForm` inside `AddMedicineDialog`.
+      const fields = [
+        ...inside,
+        ...actions.filter(
+          (action) =>
+            main.meta?.['component'] !== component.label &&
+            action.meta?.['component'] === main.meta?.['component'] &&
+            !inside.includes(action),
+        ),
+      ]
+        .filter((action) => /^on(Change|Input)$/.test(String(action.meta?.['event'])))
+        // What this popup and its form hold, not a dropdown widget's own search box.
+        .filter((action) =>
+          [tag, component.label, main.meta?.['component']].includes(
+            action.meta?.['component'] as string,
+          ),
+        )
+        .map((action) => action.label)
+        .filter((label, index, list) => list.indexOf(label) === index);
+      // A wizard's earlier step — "Continue" to a preview — is pressed before the main one.
+      // Picking a file runs `handleFile` — checks it and reads its columns — before
+      // anything is sent: a step of its own, once however many ways lead to it.
+      const working = new Set<string>();
+      // A file input before the drop zone beside it: both run the same `handleFile`.
+      const byEvent = (action: FlowNode): number => (action.meta?.['event'] === 'onDrop' ? 1 : 0);
+      const inputs = [...inside]
+        .sort((a, b) => byEvent(a) - byEvent(b))
+        .filter((action) => {
+          if (!/^on(Change|Drop)$/.test(String(action.meta?.['event']))) return false;
+          // The popup's own inputs, not the inside of a dropdown widget drawn in it.
+          const owner = action.meta?.['component'];
+          if (owner !== tag && owner !== component.label) return false;
+          const handler = graph.successors(action.id, ['triggers'])[0];
+          const runs = handler
+            ? graph
+                .successors(handler.id, ['calls'])
+                .filter((node) => node.kind === 'handler')
+                .map((node) => node.id)
+            : [];
+          if (runs.length === 0 || runs.every((id) => working.has(id))) return false;
+          for (const id of runs) working.add(id);
+          return true;
+        });
+      // What is filled in comes after a step of its own: the mapping, after the file is read.
+      const filled = fields.filter((label) => !inputs.some((input) => input.label === label));
+      const firstFilled = inputs.length;
+      const before = [
+        ...inputs,
+        ...sending.filter(
+          (action) => action !== main && /^(continue|next|preview|proceed)\b/i.test(action.label),
+        ),
+      ];
+      for (const opener of openers) {
+        const handler = graph.successors(opener.id, ['triggers'])[0];
+        if (!handler) continue;
+        before.forEach((earlier, index) => {
+          const step = graph.successors(earlier.id, ['triggers'])[0];
+          if (!step) return;
+          graph.addEdge({
+            from: handler.id,
+            to: step.id,
+            kind: 'calls',
+            meta: {
+              line: end - before.length + index,
+              userStep: earlier.label,
+              ...(inputs.includes(earlier) ? { input: true } : {}),
+              ...(index === firstFilled && filled.length ? { fields: filled } : {}),
+            },
+          });
+        });
+        graph.addEdge({
+          from: handler.id,
+          to: target.id,
+          kind: 'calls',
+          meta: {
+            line: end,
+            userStep: main.label,
+            ...(before.length === firstFilled && filled.length ? { fields: filled } : {}),
+          },
+        });
+        opener.meta = { ...opener.meta, opensFeature: main.id };
+      }
+    }
+  }
+}
+
+/** `{open && <X/>}`, `{open ? <X/> : null}`: the condition an element is drawn under. */
+function gateOf(element: Node): string | undefined {
+  let current: Node = element;
+  for (let parent = current.getParent(); parent; current = parent, parent = parent.getParent()) {
+    if (Node.isParenthesizedExpression(parent)) continue;
+    if (
+      Node.isBinaryExpression(parent) &&
+      parent.getOperatorToken().getKind() === SyntaxKind.AmpersandAmpersandToken &&
+      parent.getRight() === current
+    )
+      return parent.getLeft().getText();
+    if (Node.isConditionalExpression(parent) && parent.getWhenTrue() === current)
+      return parent.getCondition().getText();
+    return undefined;
+  }
+  return undefined;
+}
+
+function linkEffectRefetches(graph: FlowGraph, loaded: LoadedProject): void {
+  const files = new Map(loaded.sourceFiles.map((file) => [loaded.rel(file), file] as const));
+  for (const component of graph.nodesOfKind('component')) {
+    const file = component.source ? files.get(component.source.file) : undefined;
+    if (!file) continue;
+    const fn = file
+      .getDescendants()
+      .find(
+        (node) =>
+          (Node.isFunctionDeclaration(node) ||
+            Node.isArrowFunction(node) ||
+            Node.isFunctionExpression(node)) &&
+          functionName(node as Functionish) === component.label,
+      );
+    if (!fn) continue;
+    const states = new Map(
+      graph
+        .successors(component.id, ['defines'])
+        .filter((node) => node.kind === 'state')
+        .map((node) => [node.label, node.id] as const),
+    );
+    if (states.size === 0) continue;
+    const handlerOf = (name: string): string | undefined => {
+      const id = ids.handler(component.source!.file, component.label, name);
+      return graph.hasNode(id) ? id : undefined;
+    };
+    // Each effect: the states it watches, what it runs, the states it sets.
+    const effects = fn
+      .getDescendantsOfKind(SyntaxKind.CallExpression)
+      .filter((call) =>
+        /^(React\.)?(useEffect|useLayoutEffect)$/.test(call.getExpression().getText()),
+      )
+      .map((call) => {
+        const [body, deps] = call.getArguments();
+        const watched =
+          deps && Node.isArrayLiteralExpression(deps)
+            ? deps
+                .getElements()
+                .map((element) => element.getText())
+                .filter((name) => states.has(name))
+            : [];
+        const calls = body ? body.getDescendantsOfKind(SyntaxKind.CallExpression) : [];
+        const runs = [
+          ...new Set(
+            calls
+              .map((inner) => inner.getExpression().getText())
+              .map((name) => handlerOf(name))
+              .filter((id): id is string => id !== undefined),
+          ),
+        ];
+        const sets = calls
+          .map((inner) => inner.getExpression().getText())
+          .filter((name) => /^set[A-Z]/.test(name))
+          .map((name) => name.charAt(3).toLowerCase() + name.slice(4))
+          .filter((name) => states.has(name));
+        return { watched, runs, sets };
+      })
+      .filter((effect) => effect.watched.length > 0);
+    if (effects.length === 0) continue;
+    // What changing each state ends up running, through effects that pass it on.
+    const runsOn = new Map<string, Set<string>>();
+    for (let round = 0; round < 3; round++) {
+      for (const effect of effects) {
+        const reached = new Set(effect.runs);
+        for (const set of effect.sets) for (const id of runsOn.get(set) ?? []) reached.add(id);
+        for (const state of effect.watched) {
+          const known = runsOn.get(state) ?? new Set<string>();
+          for (const id of reached) known.add(id);
+          runsOn.set(state, known);
+        }
+      }
+    }
+    for (const [state, targets] of runsOn) {
+      for (const writer of graph.edgesTo(states.get(state)!, ['writes-state'])) {
+        const handler = graph.node(writer.from);
+        if (handler?.kind !== 'handler') continue;
+        for (const target of targets) {
+          if (target === handler.id) continue;
+          graph.addEdge({
+            from: handler.id,
+            to: target,
+            kind: 'calls',
+            meta: { refetch: true, state, effect: true },
+          });
+        }
+      }
+    }
+  }
+}
+
+/**
+ * `{tab === "excels" && <ImportHistoryView />}`: its data loads when the user
+ * opens that tab, not when the page opens. Marked so the page does not count
+ * it among what it loads by itself.
+ */
+function markConditionalMounts(graph: FlowGraph, loaded: LoadedProject): void {
+  for (const action of graph.nodesOfKind('ui-action')) {
+    if (action.meta?.['event'] !== 'mount') continue;
+    const name = action.meta?.['component'];
+    if (typeof name !== 'string') continue;
+    const conditions: string[] = [];
+    let sites = 0;
+    for (const file of loaded.sourceFiles) {
+      if (!file.getFullText().includes(`<${name}`)) continue;
+      for (const opening of [
+        ...file.getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
+        ...file.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
+      ]) {
+        if (opening.getTagNameNode().getText() !== name) continue;
+        sites += 1;
+        const element = Node.isJsxSelfClosingElement(opening) ? opening : opening.getParent();
+        const condition = renderCondition(element);
+        if (condition) conditions.push(condition);
+      }
+    }
+    // Every place that draws it does so only sometimes.
+    if (sites > 0 && conditions.length === sites) {
+      action.meta = { ...action.meta, shownWhen: [...new Set(conditions)].join(' or ') };
+      linkShowingClicks(graph, action, conditions);
+    }
+  }
+}
+
+/**
+ * The click that shows it starts its load: `setTab("excels")` with
+ * `{tab === "excels" && <ImportHistoryView />}`. Read when the condition is
+ * `state === "value"`; a click setting another value does not show it.
+ */
+function linkShowingClicks(graph: FlowGraph, mount: FlowNode, conditions: string[]): void {
+  const targets = graph.successors(mount.id, ['triggers', 'requests']);
+  if (targets.length === 0) return;
+  for (const condition of conditions) {
+    const test = /^\s*([\w$]+)\s*===\s*["'`]([^"'`]+)["'`]\s*$/.exec(condition);
+    const bare = /^\s*(!?)\s*([\w$]+)\s*$/.exec(condition);
+    const state = test?.[1] ?? bare?.[2];
+    if (!state) continue;
+    for (const node of graph.nodesOfKind('state')) {
+      if (node.label !== state) continue;
+      for (const writer of graph.edgesTo(node.id, ['writes-state'])) {
+        const handler = graph.node(writer.from);
+        if (handler?.kind !== 'handler') continue;
+        if (test && !writesValue(handler, state, test[2]!)) continue;
+        // `{open && <Form />}`: `setOpen(false)` hides it; only a truthy value shows it.
+        if (bare && !writesTruthy(handler, state, bare[1] === '!')) continue;
+        for (const target of targets)
+          graph.addEdge({
+            from: handler.id,
+            to: target.id,
+            kind: 'calls',
+            meta: { shows: mount.meta?.['component'] },
+          });
+      }
+    }
+  }
+}
+
+/** Does it set `state` to something that makes `state` (or `!state`) true? Unknown counts as yes. */
+function writesTruthy(handler: FlowNode, state: string, negated: boolean): boolean {
+  const setter = `set${state.charAt(0).toUpperCase()}${state.slice(1)}`;
+  const written = (handler.meta?.['sets'] as Record<string, string[]> | undefined)?.[setter];
+  if (!written) return true;
+  const falsy = (value: string) => /^#(false|null|undefined|0)$/.test(value) || value === '';
+  return written.some((value) => value === '*' || (negated ? falsy(value) : !falsy(value)));
+}
+
+/** Does this handler set `state` to `value`? Unknown (not a literal) counts as yes. */
+function writesValue(handler: FlowNode, state: string, value: string): boolean {
+  const setter = `set${state.charAt(0).toUpperCase()}${state.slice(1)}`;
+  const written = (handler.meta?.['sets'] as Record<string, string[]> | undefined)?.[setter];
+  return !written || written.includes(value) || written.includes('*');
+}
+
+/** The condition an element is drawn under, within its own component. */
+function renderCondition(element: Node | undefined): string | undefined {
+  for (let node = element; node; node = node.getParent()) {
+    const parent = node.getParent();
+    if (!parent || Node.isFunctionDeclaration(parent) || Node.isArrowFunction(parent))
+      return undefined;
+    if (Node.isConditionalExpression(parent) && parent.getCondition() !== node) {
+      const test = parent.getCondition().getText();
+      return parent.getWhenTrue() === node ? test : `not (${test})`;
+    }
+    if (
+      Node.isBinaryExpression(parent) &&
+      parent.getOperatorToken().getKind() === SyntaxKind.AmpersandAmpersandToken &&
+      parent.getRight() === node
+    )
+      return parent.getLeft().getText();
+  }
+  return undefined;
+}
+
+/**
+ * `Next` in `Pagination` calls `onPageChange`; the page passes `setPage`. The
+ * click's effect is the page's, so each place the component is rendered is
+ * followed: a setter it is given becomes a state write, a handler a call. Its
+ * Docs stopped at "calls `onPageChange`" and never reached the refetch.
+ */
+function linkPropBindings(graph: FlowGraph, loaded: LoadedProject): void {
+  for (const action of graph.nodesOfKind('ui-action')) {
+    const owner = action.meta?.['component'];
+    if (typeof owner !== 'string') continue;
+    const props = new Set([
+      ...((action.meta?.['callsProps'] as string[] | undefined) ?? []),
+      ...(((action.meta?.['needsProps'] as { any?: string[] } | undefined)?.any ?? []) as string[]),
+    ]);
+    if (props.size === 0) continue;
+    const handlers = graph
+      .successors(action.id, ['triggers'])
+      .filter((node) => node.kind === 'handler');
+    if (handlers.length === 0) continue;
+
+    /** Each place it is drawn, with what it is given there. */
+    const sites: Array<{
+      rel: string;
+      site: string;
+      links: Array<{ to: string; kind: 'writes-state' | 'calls'; prop: string }>;
+    }> = [];
+    for (const file of loaded.sourceFiles) {
+      if (!file.getFullText().includes(`<${owner}`)) continue;
+      const rel = loaded.rel(file);
+      const openings = [
+        ...file.getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
+        ...file.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
+      ].filter((opening) => opening.getTagNameNode().getText() === owner);
+      const needs = action.meta?.['needsProps'] as { any: string[]; all: string[] } | undefined;
+      for (const opening of openings) {
+        const site = siteComponentName(opening);
+        if (!site) continue;
+        const siteId = ids.component(rel, site);
+        if (!graph.hasNode(siteId)) continue;
+        // `<TH>Batch</TH>` draws no sort button: not a place this action is.
+        const passed = new Set(
+          opening
+            .getAttributes()
+            .map((attr) => (Node.isJsxAttribute(attr) ? attr.getNameNode().getText() : '...')),
+        );
+        if (
+          needs &&
+          !passed.has('...') &&
+          !(
+            (needs.any.length === 0 || needs.any.some((prop) => passed.has(prop))) &&
+            needs.all.every((prop) => passed.has(prop))
+          )
+        )
+          continue;
+        const links: Array<{ to: string; kind: 'writes-state' | 'calls'; prop: string }> = [];
+        for (const prop of props) {
+          const attr = opening.getAttribute(prop);
+          const init = attr && Node.isJsxAttribute(attr) ? attr.getInitializer() : undefined;
+          const value = init && Node.isJsxExpression(init) ? init.getExpression() : undefined;
+          if (!value) continue;
+          const names = Node.isIdentifier(value)
+            ? [value.getText()]
+            : value
+                .getDescendantsOfKind(SyntaxKind.CallExpression)
+                .map((call) => call.getExpression())
+                .filter((callee) => Node.isIdentifier(callee))
+                .map((callee) => callee.getText());
+          for (const name of names) {
+            const stateId = graph
+              .successors(siteId, ['defines'])
+              .find((node) => node.kind === 'state' && setterOfState(node) === name)?.id;
+            const handlerId = ids.handler(rel, site, name);
+            if (stateId && graph.hasNode(stateId))
+              links.push({ to: stateId, kind: 'writes-state', prop });
+            else if (graph.hasNode(handlerId)) links.push({ to: handlerId, kind: 'calls', prop });
+          }
+        }
+        // A place that passes nothing followable still draws it: it keeps its copy.
+        sites.push({ rel, site, links });
+      }
+    }
+    if (sites.every((site) => site.links.length === 0)) continue;
+    if (sites.length === 1) {
+      for (const handler of handlers)
+        for (const link of sites[0]!.links)
+          graph.addEdge({
+            from: handler.id,
+            to: link.to,
+            kind: link.kind,
+            meta: { viaProp: link.prop },
+          });
+      // Drawn in one place: that place is still where it lives — a form inside a dialog.
+      action.meta = { ...action.meta, site: sites[0]!.site };
+      promoteInner(graph, action.id, sites[0]!.rel, sites[0]!.site, sites[0]!.links);
+      continue;
+    }
+
+    /**
+     * Drawn in several places, each giving it something else: each place is
+     * its own action. One shared "Next" listed every page's request at once —
+     * GET /medicines on the stock history page.
+     */
+    for (const { rel, site, links } of sites) {
+      const place = screenOf(rel, site);
+      const cloneId = `${action.id}@${rel}#${site}`;
+      graph.addNode({
+        id: cloneId,
+        kind: 'ui-action',
+        label: action.label,
+        ...(action.source ? { source: action.source } : {}),
+        meta: {
+          ...action.meta,
+          // Placed by where it is drawn, not where the component lives.
+          siteFile: rel,
+          screen: place.screen,
+          title: composeTitle(place.screen, action.label),
+          ...(place.page ? { page: place.page } : {}),
+        },
+      });
+      for (const edge of graph.edgesTo(action.id)) graph.addEdge({ ...edge, to: cloneId });
+      for (const handler of handlers) {
+        const handlerClone = `${handler.id}@${rel}#${site}`;
+        graph.addNode({
+          id: handlerClone,
+          kind: 'handler',
+          label: handler.label,
+          ...(handler.source ? { source: handler.source } : {}),
+          ...(handler.meta ? { meta: handler.meta } : {}),
+        });
+        for (const edge of graph.edgesFrom(handler.id))
+          graph.addEdge({ ...edge, from: handlerClone });
+        for (const link of links)
+          graph.addEdge({
+            from: handlerClone,
+            to: link.to,
+            kind: link.kind,
+            meta: { viaProp: link.prop },
+          });
+        graph.addEdge({ from: cloneId, to: handlerClone, kind: 'triggers' });
+      }
+      graph.node(cloneId)!.meta = { ...graph.node(cloneId)!.meta, site };
+      promoteInner(graph, cloneId, rel, site, links);
+    }
+    graph.removeNode(action.id);
+  }
+}
+
+/**
+ * `<MedicineForm onSubmit={onSubmit} mode="edit">`: the form's own submit
+ * button checks every field, then runs this page's `onSubmit` — the whole of
+ * what pressing it does. That inner action is the one listed, under the name
+ * this page gives it ("Update medicine"); the page's `onSubmit` event, only
+ * the second half, is hidden behind it. A button that only passes the call
+ * on — a tab calling `onChange` — stays hidden behind the named outer one.
+ */
+function promoteInner(
+  graph: FlowGraph,
+  innerId: string,
+  rel: string,
+  site: string,
+  links: Array<{ to: string; kind: 'writes-state' | 'calls'; prop: string }>,
+): void {
+  const inner = graph.node(innerId);
+  if (!inner) return;
+  const outers = ((inner.meta?.['relayedBy'] as string[] | undefined) ?? [])
+    .map((id) => graph.node(id))
+    .filter((node): node is FlowNode => node !== undefined);
+  // Only the outer events of this place: a copy for the edit page is not relayed by the add dialog.
+  const here = outers.filter(
+    (outer) => outer.source?.file === rel && outer.meta?.['component'] === site,
+  );
+  const handlers = graph.successors(innerId, ['triggers']);
+  const ownWork = handlers.some((handler) =>
+    graph
+      .edgesFrom(handler.id)
+      .some(
+        (edge) =>
+          edge.meta?.['viaProp'] === undefined &&
+          (edge.kind === 'writes-state' || edge.kind === 'calls' || edge.kind === 'requests'),
+      ),
+  );
+  const called = new Set(links.filter((link) => link.kind === 'calls').map((link) => link.to));
+  const runs = here.filter((outer) =>
+    graph.successors(outer.id, ['triggers']).some((handler) => called.has(handler.id)),
+  );
+  if (!ownWork) {
+    inner.meta = { ...inner.meta, relayedBy: here.map((outer) => outer.id) };
+    return;
+  }
+  // "Save update" checks, sends and only then calls `onClose`: more than the
+  // page's close, so it is its own action, not a relay of that one.
+  const { relayedBy: _relay, ...unrelayed } = inner.meta ?? {};
+  if (runs.length === 0) {
+    inner.meta = unrelayed;
+    return;
+  }
+  const { relayedBy: _hidden, ...meta } = inner.meta ?? {};
+  inner.label = runs[0]!.label;
+  inner.meta = {
+    ...meta,
+    action: runs[0]!.label,
+    ...(typeof meta['screen'] === 'string'
+      ? { title: composeTitle(meta['screen'], runs[0]!.label) }
+      : {}),
+  };
+  for (const outer of runs) outer.meta = { ...outer.meta, relayedBy: [innerId] };
+}
+
+/** The component an element is drawn in: the nearest capitalised function around it. */
+function siteComponentName(node: Node): string | undefined {
+  for (let current = node.getParent(); current; current = current.getParent()) {
+    if (Node.isFunctionDeclaration(current)) {
+      const name = current.getName();
+      if (name && /^[A-Z]/.test(name)) return name;
+    }
+    if (Node.isArrowFunction(current) || Node.isFunctionExpression(current)) {
+      const variable = current.getParent();
+      if (Node.isVariableDeclaration(variable) && /^[A-Z]/.test(variable.getName()))
+        return variable.getName();
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A click that sets the page, a filter or the sort fetches the list again:
+ * React Query (or SWR) refetches whenever a query's input changes. Nothing
+ * calls the hook from the handler, so every such click read "No request".
+ * Linked here from the handler writing a state to the query hook that reads it.
+ */
+function linkStateRefetches(graph: FlowGraph, loaded: LoadedProject): void {
+  const files = new Map(loaded.sourceFiles.map((file) => [loaded.rel(file), file] as const));
+  for (const component of graph.nodesOfKind('component')) {
+    const states = new Map(
+      graph
+        .successors(component.id, ['defines'])
+        .filter((node) => node.kind === 'state')
+        .map((node) => [node.label, node.id] as const),
+    );
+    if (states.size === 0) continue;
+    // `const debouncedSearch = useDebounce(search)`: the query reads the state
+    // through a delay — it fetches once the typing has stopped for that long.
+    const debounced = debouncedStates(files, component, states);
+    for (const edge of graph.edgesFrom(component.id, ['calls'])) {
+      const hook = graph.node(edge.to);
+      if (hook?.kind !== 'hook' || hook.meta?.['fetchesOnMount'] !== true) continue;
+      const reads = (edge.meta?.['reads'] as string[] | undefined) ?? [];
+      const delays = new Map<string, number>();
+      const watched = reads
+        .map((name) => {
+          const through = debounced.get(name);
+          if (through) {
+            delays.set(through.stateId, through.ms);
+            return through.stateId;
+          }
+          return states.get(name);
+        })
+        .filter(Boolean) as string[];
+      if (watched.length === 0) continue;
+      for (const stateId of watched) {
+        const state = graph.node(stateId)?.label ?? '';
+        for (const writer of graph.edgesTo(stateId, ['writes-state'])) {
+          const handler = graph.node(writer.from);
+          if (handler?.kind !== 'handler') continue;
+          if (switchesOff(files, component, edge.meta?.['line'], handler, state, hook)) continue;
+          graph.addEdge({
+            from: writer.from,
+            to: hook.id,
+            kind: 'calls',
+            meta: {
+              refetch: true,
+              state: graph.node(stateId)?.label,
+              ...(delays.has(stateId) ? { debounceMs: delays.get(stateId) } : {}),
+            },
+          });
+        }
+      }
+    }
+  }
+}
+
+/**
+ * `const debouncedSearch = useDebounce(search, 300)` in a component: the
+ * debounced name, the state it follows, and the delay — written at the call,
+ * or the default the hook declares (`delay = 350`).
+ */
+function debouncedStates(
+  files: Map<string, SourceFile>,
+  component: FlowNode,
+  states: Map<string, string>,
+): Map<string, { stateId: string; ms: number }> {
+  const found = new Map<string, { stateId: string; ms: number }>();
+  const file = component.source ? files.get(component.source.file) : undefined;
+  if (!file) return found;
+  for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+    const name = call.getExpression().getText();
+    if (!/^useDebounce(d(Value)?)?$/.test(name)) continue;
+    const [value, delay] = call.getArguments();
+    const holder = call.getParent();
+    if (!value || !holder || !Node.isVariableDeclaration(holder)) continue;
+    if (!Node.isIdentifier(holder.getNameNode())) continue;
+    const stateId = states.get(value.getText());
+    if (!stateId) continue;
+    let ms = delay && Node.isNumericLiteral(delay) ? Number(delay.getText()) : undefined;
+    if (ms === undefined) {
+      // The default the hook declares, wherever it is written.
+      for (const source of files.values()) {
+        const declared = source.getFunction(name);
+        const initial = declared?.getParameters()[1]?.getInitializer();
+        if (initial && Node.isNumericLiteral(initial)) {
+          ms = Number(initial.getText());
+          break;
+        }
+      }
+    }
+    if (ms !== undefined) found.set(holder.getName(), { stateId, ms });
+  }
+  return found;
+}
+
+/**
+ * `<MedicineForm onSubmit={create} />` has no words of its own: the user
+ * presses the form's own "Save medicine" button, whose handler validates and
+ * then calls `onSubmit`. That button names the action here — the form's
+ * `mode === "create" ? "Save medicine" : "Update medicine"` decided by the
+ * `mode` this page passes — and the inner action is marked as relayed, since
+ * this one already runs it (with the request it leads to).
+ */
+function nameComponentEvents(graph: FlowGraph): void {
+  const actions = graph.nodesOfKind('ui-action');
+  for (const outer of actions) {
+    const tag = outer.meta?.['tag'];
+    const event = outer.meta?.['event'];
+    const wordless = outer.meta?.['unlabelled'] || outer.meta?.['namedByHandler'];
+    if (typeof tag !== 'string' || !/^[A-Z]/.test(tag)) continue;
+    const callers = actions.filter(
+      (candidate) =>
+        candidate.meta?.['component'] === tag &&
+        (candidate.meta?.['callsProps'] as string[] | undefined)?.includes(String(event)),
+    );
+    // `<Tabs onChange={…}>` already named ("Paid / Outstanding"): the tab button
+    // inside that calls `onChange` is the same click, said once.
+    if (!wordless) {
+      for (const inner of callers)
+        inner.meta = {
+          ...inner.meta,
+          relayedBy: [...((inner.meta?.['relayedBy'] as string[] | undefined) ?? []), outer.id],
+        };
+      continue;
+    }
+    const inner = callers.find((candidate) => !candidate.meta?.['unlabelled']);
+    if (!inner) {
+      // `<button onClick={onCancel}>Cancel</button>` inside it, passed straight through.
+      const relayed = graph
+        .nodesOfKind('component')
+        .filter((component) => component.label === tag)
+        .map(
+          (component) =>
+            (component.meta?.['relayLabels'] as Record<string, string> | undefined)?.[
+              String(event)
+            ],
+        )
+        .find(Boolean);
+      if (relayed) rename(outer, relayed);
+      continue;
+    }
+    const choice = inner.meta?.['labelByProp'] as
+      { prop: string; value: string; whenTrue: string; whenFalse: string } | undefined;
+    const site = (outer.meta?.['siteProps'] ?? {}) as Record<string, string>;
+    const label =
+      choice && choice.prop in site
+        ? site[choice.prop] === choice.value
+          ? choice.whenTrue
+          : choice.whenFalse
+        : inner.label;
+    rename(outer, label);
+    inner.meta = {
+      ...inner.meta,
+      relayedBy: [...((inner.meta?.['relayedBy'] as string[] | undefined) ?? []), outer.id],
+    };
+  }
+}
+
+/**
+ * Two "Sign out" buttons in one component — one on its "No clinic access"
+ * screen, one under "Choose a clinic" — read as the same row twice. Each is
+ * named by the screen it is on: the heading of the `return` it is drawn in.
+ */
+function distinguishTwins(graph: FlowGraph, loaded: LoadedProject): void {
+  const files = new Map(loaded.sourceFiles.map((file) => [loaded.rel(file), file] as const));
+  const groups = new Map<string, FlowNode[]>();
+  for (const action of graph.nodesOfKind('ui-action')) {
+    if (action.meta?.['event'] === 'mount' || !action.source) continue;
+    const key = `${String(action.meta?.['component'])}|${action.label}`;
+    groups.set(key, [...(groups.get(key) ?? []), action]);
+  }
+  for (const twins of groups.values()) {
+    if (twins.length < 2) continue;
+    const contexts = twins.map((action) => {
+      const file = files.get(action.source!.file);
+      const attr = file
+        ?.getDescendantsOfKind(SyntaxKind.JsxAttribute)
+        .find(
+          (candidate) =>
+            candidate.getNameNode().getText() === action.meta?.['event'] &&
+            candidate.getStartLineNumber() === action.source!.line,
+        );
+      const drawn = attr?.getFirstAncestorByKind(SyntaxKind.ReturnStatement);
+      return drawn ? screenHeading(drawn) : undefined;
+    });
+    // Only when it tells them apart: each its own, and no two the same.
+    if (contexts.some((context) => !context) || new Set(contexts).size !== contexts.length)
+      continue;
+    twins.forEach((action, index) => rename(action, `${action.label} — on "${contexts[index]}"`));
+  }
+}
+
+/** The title a returned screen shows: its first heading, or its first line of bold words. */
+function screenHeading(drawn: Node): string | undefined {
+  const elements = drawn.getDescendantsOfKind(SyntaxKind.JsxElement);
+  const heading = elements.find((element) =>
+    /^(h[1-6]|legend|\w*Title)$/.test(element.getOpeningElement().getTagNameNode().getText()),
+  );
+  const strong = elements.find((element) =>
+    /font-(semibold|bold)/.test(
+      element.getOpeningElement().getAttribute('className')?.getText() ?? '',
+    ),
+  );
+  for (const candidate of [heading, strong]) {
+    const text = candidate ? directText(candidate) : '';
+    if (text && text.length <= 40) return text;
+  }
+  return undefined;
+}
+
+function rename(action: FlowNode, label: string): void {
+  action.label = label;
+  const { unlabelled: _unlabelled, namedByHandler: _named, ...rest } = action.meta ?? {};
+  action.meta = {
+    ...rest,
+    action: label,
+    title: composeTitle(String(action.meta?.['screen'] ?? ''), label),
+  };
+}
+
+/**
+ * `setStep("map")` with the hook called as `useStatus(step === "processing" ?
+ * jobId : null)`: the query's input becomes `null`, which is the hook's way of
+ * not fetching. Only a literal the setter is given, compared with `===`, is
+ * read; anything else may well fetch, and is linked.
+ */
+function switchesOff(
+  files: Map<string, SourceFile>,
+  component: FlowNode,
+  callLine: unknown,
+  handler: FlowNode,
+  state: string,
+  hook: FlowNode,
+): boolean {
+  const componentFile = component.source ? files.get(component.source.file) : undefined;
+  const handlerFile = handler.source ? files.get(handler.source.file) : undefined;
+  if (!componentFile || !handlerFile || typeof callLine !== 'number' || !handler.source)
+    return false;
+  const hookCall = componentFile
+    .getDescendantsOfKind(SyntaxKind.CallExpression)
+    .find(
+      (call) =>
+        call.getStartLineNumber() === callLine && /^use[A-Z]/.test(call.getExpression().getText()),
+    );
+  if (!hookCall) return false;
+  // What the handler sets the state to: the arguments of its setter calls.
+  const body = handlerFile
+    .getDescendants()
+    .find(
+      (node) =>
+        (Node.isArrowFunction(node) ||
+          Node.isFunctionExpression(node) ||
+          Node.isFunctionDeclaration(node) ||
+          Node.isVariableDeclaration(node)) &&
+        node.getStartLineNumber() === handler.source!.line,
+    );
+  const setter = `set${state.charAt(0).toUpperCase()}${state.slice(1)}`;
+  const written = (body?.getDescendantsOfKind(SyntaxKind.CallExpression) ?? [])
+    .filter((call) => call.getExpression().getText() === setter)
+    .map((call) => call.getArguments()[0]);
+  if (written.length === 0) return false;
+
+  // `setJobId(null)` where `jobId` is what switches the query on.
+  const param = hook.meta?.['enabledByParam'];
+  const gated = typeof param === 'number' ? hookCall.getArguments()[param] : undefined;
+  if (
+    gated &&
+    new RegExp(`\\b${state}\\b`).test(gated.getText()) &&
+    written.every((arg) => arg !== undefined && EMPTY.test(arg.getText()))
+  )
+    return true;
+
+  // `setStep("map")` against `step === "processing" ? jobId : null`.
+  const gate = hookCall
+    .getArguments()
+    .find(
+      (arg) => Node.isConditionalExpression(arg) && arg.getCondition().getText().includes(state),
+    );
+  if (!gate || !Node.isConditionalExpression(gate)) return false;
+  const test = gate.getCondition();
+  if (!Node.isBinaryExpression(test) || test.getOperatorToken().getText() !== '===') return false;
+  const right = test.getRight();
+  if (test.getLeft().getText() !== state || !Node.isStringLiteral(right)) return false;
+  // Off only if every value it sets turns the query off.
+  return written.every((arg) => {
+    if (!arg || !Node.isStringLiteral(arg)) return false;
+    const chosen =
+      arg.getLiteralValue() === right.getLiteralValue() ? gate.getWhenTrue() : gate.getWhenFalse();
+    return EMPTY.test(chosen.getText());
+  });
+}
+
+/**
+ * What a component event needs to be named and joined up: the element's tag,
+ * the literal props it is given (`mode="create"`), the props its handler calls
+ * (`handleSubmit` calls `onSubmit`), and a submit button whose words depend on
+ * a prop.
+ */
+function componentEventMeta(
+  attribute: JsxAttribute,
+  fn: Functionish,
+  props: Map<string, string>,
+  declared: Array<{ name: string; node: Node }>,
+): Record<string, unknown> {
+  const element = attribute.getFirstAncestor(
+    (node) => Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node),
+  );
+  if (!element || (!Node.isJsxOpeningElement(element) && !Node.isJsxSelfClosingElement(element)))
+    return {};
+  const tag = element.getTagNameNode().getText();
+  const meta: Record<string, unknown> = { tag };
+  // `<Link href={item.href} onClick={onNavigate}>`: the click also goes to a page.
+  const links = linkTargets(element);
+  if (links.length) meta['linksTo'] = links;
+  if (/^[A-Z]/.test(tag)) {
+    const site: Record<string, string> = {};
+    for (const attr of element.getAttributes()) {
+      if (!Node.isJsxAttribute(attr)) continue;
+      const init = attr.getInitializer();
+      if (init && Node.isStringLiteral(init))
+        site[attr.getNameNode().getText()] = init.getLiteralValue();
+    }
+    if (Object.keys(site).length) meta['siteProps'] = site;
+  }
+  if (props.size === 0) return meta;
+  // The handler, or the local function it names, calling one of the props.
+  const init = attribute.getInitializer();
+  const handler = init && Node.isJsxExpression(init) ? init.getExpression() : undefined;
+  const bodies: Node[] = handler ? [handler] : [];
+  if (handler && Node.isIdentifier(handler)) {
+    const local = declared.find((candidate) => candidate.name === handler.getText());
+    if (local) bodies.push(local.node);
+  }
+  const called = new Set<string>();
+  for (const body of bodies) {
+    for (const call of body.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      const prop = props.get(call.getExpression().getText());
+      if (prop && /^on[A-Z]/.test(prop)) called.add(prop);
+    }
+  }
+  if (called.size) meta['callsProps'] = [...called];
+  // `{mode === "create" ? "Save medicine" : "Update medicine"}` on its submit button.
+  if (tag === 'form' && attribute.getNameNode().getText() === 'onSubmit') {
+    const form = element.getParent();
+    for (const conditional of form?.getDescendantsOfKind(SyntaxKind.ConditionalExpression) ?? []) {
+      if (!Node.isJsxExpression(conditional.getParent())) continue;
+      // The submit button's own words, not a section title switched the same way.
+      const button = conditional.getFirstAncestorByKind(SyntaxKind.JsxElement)?.getOpeningElement();
+      const type = button?.getAttribute('type');
+      const typeValue =
+        type && Node.isJsxAttribute(type) ? type.getInitializer()?.getText() : undefined;
+      if (typeValue !== '"submit"' && typeValue !== "'submit'") continue;
+      const test = conditional.getCondition();
+      const yes = conditional.getWhenTrue();
+      const no = conditional.getWhenFalse();
+      if (!Node.isBinaryExpression(test) || !/^===?$/.test(test.getOperatorToken().getText()))
+        continue;
+      const prop = props.get(test.getLeft().getText());
+      const value = test.getRight();
+      if (
+        !prop ||
+        !Node.isStringLiteral(value) ||
+        !Node.isStringLiteral(yes) ||
+        !Node.isStringLiteral(no)
+      )
+        continue;
+      meta['labelByProp'] = {
+        prop,
+        value: value.getLiteralValue(),
+        whenTrue: yes.getLiteralValue(),
+        whenFalse: no.getLiteralValue(),
+      };
+      break;
+    }
+  }
+  return meta;
 }
 
 function message(error: unknown): string {
@@ -292,10 +1481,13 @@ function analyzeFrontendFile(
   globals: Map<string, DeclaredSymbol[]>,
   pending: PendingCall[],
   aliases: PendingAlias[],
+  contexts: ContextIndex,
   actionProps: ActionProps,
 ): void {
   /** Names declared in this file -> node id. Local wins over global. */
   const locals = new Map<string, DeclaredSymbol>();
+  /** `useMutation(...)` calls written in a component, as hooks of their own. */
+  const inlineHooks = new Map<Node, DeclaredSymbol>();
 
   const declare = (name: string, symbol: DeclaredSymbol) => {
     locals.set(name, symbol);
@@ -324,10 +1516,14 @@ function analyzeFrontendFile(
          */
         meta: {
           ...(fetchesOnMount(fn) ? { fetchesOnMount: true } : {}),
+          ...enabledBy(fn),
+          ...queryKeyOf(fn),
           ...aftermathMeta(fn),
         },
       });
       declare(name, { id, kind: 'hook', file: rel, ensure: noop });
+      const context = contextRead(fn);
+      if (context) contexts.hooks.set(name, context);
       continue;
     }
 
@@ -399,13 +1595,33 @@ function analyzeFrontendFile(
   for (const declaration of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = declaration.getInitializer();
     if (!initializer || !Node.isCallExpression(initializer)) continue;
-    const hookName = calleeName(initializer);
+    let hookName = calleeName(initializer);
     if (hookName.includes('.') || !HOOK_NAME.test(hookName)) continue;
+    /**
+     * `const remove = useMutation({ mutationFn, onSuccess })` written in the
+     * component: a hook of its own, named for the variable. What its options
+     * call — the request, the toast, the invalidation — is its; a click on
+     * `remove.mutate()` runs it. Without this, the click reached nothing.
+     */
+    const inline = inlineLibraryHook(initializer, declaration, rel, graph);
+    if (inline) {
+      hookName = inline.name;
+      inlineHooks.set(initializer, inline.symbol);
+      declare(inline.name, inline.symbol);
+      if (inline.fetches && inline.componentId)
+        graph.addEdge({
+          from: inline.componentId,
+          to: inline.symbol.id,
+          kind: 'calls',
+          meta: { line: lineOf(initializer), end: initializer.getEnd() },
+        });
+    }
 
     const nameNode = declaration.getNameNode();
     if (Node.isObjectBindingPattern(nameNode)) {
       for (const element of nameNode.getElements()) {
-        aliases.push({ file: rel, localName: element.getName(), hookName });
+        const member = element.getPropertyNameNode()?.getText() ?? element.getName();
+        aliases.push({ file: rel, localName: element.getName(), hookName, member });
       }
     } else if (Node.isArrayBindingPattern(nameNode)) {
       for (const element of nameNode.getElements()) {
@@ -418,9 +1634,16 @@ function analyzeFrontendFile(
     }
   }
 
+  // ---- 3b. What a context provider hands out ------------------------------
+  for (const [context, members] of providedMembers(file)) {
+    for (const [member, { component, local }] of members) {
+      contexts.members.set(`${context}::${member}`, ids.handler(rel, component, local));
+    }
+  }
+
   // ---- 4. HTTP calls and code calls --------------------------------------
   for (const call of callsIn(file)) {
-    const owner = ownerOf(call, rel, locals, graph);
+    const owner = inlineHookOf(call, inlineHooks) ?? ownerOf(call, rel, locals, graph);
     const request = readHttpCall(call, config);
     if (request) {
       // Still an HTTP call, so never fall through to code-call handling —
@@ -436,7 +1659,7 @@ function analyzeFrontendFile(
     // happens later, once every file has declared what it exports.
     const callee = calleeName(call);
     if (!callee.includes('.') && owner) {
-      pending.push({ from: owner, name: callee, file: rel });
+      pending.push({ from: owner, name: callee, file: rel, ...callPlacement(call) });
       continue;
     }
 
@@ -455,7 +1678,15 @@ function analyzeFrontendFile(
     if (owner && callee.includes('.')) {
       const receiver = callee.split('.')[0];
       if (receiver && /^[A-Za-z_$][\w$]*$/.test(receiver)) {
-        pending.push({ from: owner, name: receiver, file: rel, receiverOnly: true });
+        pending.push({
+          from: owner,
+          name: receiver,
+          file: rel,
+          receiverOnly: true,
+          // `data.map(…)`, `adjust.mutate(…)`: where and when, but these are not
+          // the hook's own arguments.
+          ...withoutArguments(callPlacement(call)),
+        });
       }
     }
   }
@@ -477,6 +1708,11 @@ function analyzeComponentBody(
     if (!initializer || !Node.isCallExpression(initializer)) continue;
     const hook = calleeMember(initializer);
     if (!STATE_HOOKS.has(hook)) continue;
+    // The setter as written: `[openBillingPopup, setOpenBIllingPopup]` pairs by
+    // position, whatever the spelling — React does not read the names.
+    const pair = declaration.getNameNode();
+    const second = Node.isArrayBindingPattern(pair) ? pair.getElements()[1] : undefined;
+    const setter = second && Node.isBindingElement(second) ? second.getName() : undefined;
     for (const stateName of stateNamesOf(declaration)) {
       const id = ids.state(componentId, stateName);
       graph.addNode({
@@ -484,7 +1720,7 @@ function analyzeComponentBody(
         kind: 'state',
         label: stateName,
         source: { file: rel, line: lineOf(declaration) },
-        meta: { hook, component: componentName },
+        meta: { hook, component: componentName, ...(setter ? { setter } : {}) },
       });
       graph.addEdge({ from: componentId, to: id, kind: 'defines' });
     }
@@ -505,8 +1741,8 @@ function analyzeComponentBody(
    */
   const declaredFunctions: { name: string; node: Node; line: number }[] = [];
   for (const declaration of fn.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
-    const initializer = declaration.getInitializer();
-    if (!initializer || !isFunctionish(initializer)) continue;
+    const initializer = callbackOf(declaration.getInitializer());
+    if (!initializer) continue;
     declaredFunctions.push({
       name: declaration.getName(),
       node: initializer,
@@ -522,8 +1758,10 @@ function analyzeComponentBody(
   }
 
   for (const { name, node: initializer, line } of declaredFunctions) {
-    // A nested component, not a function of this one.
-    if (COMPONENT_NAME.test(name)) continue;
+    // A nested component, not a function of this one — if it draws anything.
+    // `const Discard = () => { setOpen(false); save() }` is a handler with a
+    // capital letter; skipped, its calls were charged to the page as it loads.
+    if (COMPONENT_NAME.test(name) && containsJsx(initializer)) continue;
     const id = ids.handler(rel, componentName, name);
     graph.addNode({
       id,
@@ -547,10 +1785,34 @@ function analyzeComponentBody(
   }
 
   // JSX elements the user can interact with
+  const props = componentProps(fn);
   for (const attribute of fn.getDescendantsOfKind(SyntaxKind.JsxAttribute)) {
     const propName = attribute.getNameNode().getText();
     if (!actionProps.all.has(propName)) continue;
     const eventClass = actionProps.gestures.has(propName) ? 'gesture' : 'input';
+    const needs = propsNeeded(attribute, fn, props);
+    /**
+     * `<button onClick={onClick}>` inside `IconBtn`: the click is whatever the
+     * page passed as `onClick`, and `<IconBtn onClick={…}>` on that page is
+     * already its own action. Recorded here too, it was a second, wordless
+     * "button onClick" beside every real one.
+     */
+    if (needs?.relay && actionProps.all.has(needs.relay)) {
+      // Its words still name the page's `<MedicineForm onCancel>`: "Cancel".
+      const words = actionLabel(attribute, propName, undefined, componentName);
+      const component = graph.node(componentId);
+      if (component && !UNLABELLED.test(words))
+        component.meta = {
+          ...component.meta,
+          relayLabels: {
+            ...(component.meta?.['relayLabels'] as Record<string, string> | undefined),
+            [needs.relay]: words,
+          },
+        };
+      continue;
+    }
+    // `onMouseDown={(e) => e.preventDefault()}` keeps focus; the user does nothing.
+    if (onlyStopsDefault(attribute)) continue;
 
     // Resolve the handler first: its name is the best label for the very common
     // case of an icon or wrapper element with no text of its own.
@@ -560,6 +1822,7 @@ function analyzeComponentBody(
       attribute,
       propName,
       typeof handlerName === 'string' ? handlerName : undefined,
+      componentName,
     );
 
     /**
@@ -575,8 +1838,14 @@ function analyzeComponentBody(
      * `action` unset, since there are no words on the element to show.
      */
     const wordless = !hasWords(label) || UNLABELLED.test(label);
-    const phrase = wordless ? `${humanizeName(componentName)} ${eventVerb(propName)}` : label;
-    const actionId = ids.uiAction(componentId, `${propName}-${label}`);
+    const phrase = wordless
+      ? `${componentPhrase(componentName, place.screen)} ${eventVerb(propName)}`
+      : label;
+    // Two "Back" buttons on two steps of one dialog are two actions, not one.
+    let actionId = ids.uiAction(componentId, `${propName}-${label}`);
+    const twin = graph.node(actionId);
+    if (twin && twin.source?.line !== lineOf(attribute))
+      actionId = ids.uiAction(componentId, `${propName}-${label}@${lineOf(attribute)}`);
     graph.addNode({
       id: actionId,
       kind: 'ui-action',
@@ -591,6 +1860,14 @@ function analyzeComponentBody(
         title: composeTitle(place.screen, phrase),
         ...(place.page ? { page: place.page } : {}),
         ...(place.area ? { area: place.area } : {}),
+        // Only where the component is given these does the element do anything.
+        ...(needs ? { needsProps: { any: needs.any, all: needs.all } } : {}),
+        ...componentEventMeta(attribute, fn, props, declaredFunctions),
+        // Named after the handler, not words on screen: a component's own
+        // button names it better.
+        ...(typeof handlerName === 'string' && label === humanizeHandler(handlerName)
+          ? { namedByHandler: true }
+          : {}),
       },
     });
     graph.addEdge({ from: componentId, to: actionId, kind: 'renders' });
@@ -599,6 +1876,85 @@ function analyzeComponentBody(
       graph.addEdge({ from: actionId, to: handlerId, kind: 'triggers' });
     }
   }
+}
+
+/** A component's props, local name -> prop name: `{ onClick: open }` -> open: onClick. */
+function componentProps(fn: Functionish): Map<string, string> {
+  const props = new Map<string, string>();
+  const param = fn.getParameters()[0];
+  const binding = param?.getNameNode();
+  if (binding && Node.isObjectBindingPattern(binding)) {
+    for (const element of binding.getElements()) {
+      if (element.getDotDotDotToken()) continue;
+      props.set(element.getName(), element.getPropertyNameNode()?.getText() ?? element.getName());
+    }
+  } else if (binding && Node.isIdentifier(binding)) {
+    // `props.onSort`
+    for (const access of fn.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)) {
+      if (access.getExpression().getText() === binding.getText())
+        props.set(access.getText(), access.getName());
+    }
+  }
+  return props;
+}
+
+/**
+ * The props an element's handler needs from whoever renders the component:
+ * the ones its handler calls (`any`: one is enough to wire it), and the ones
+ * guarding it (`all`: `{sortable ? <button onClick={onSort}> : …}`). `relay`
+ * when the handler is nothing but one prop, passed straight through.
+ */
+function propsNeeded(
+  attribute: JsxAttribute,
+  fn: Functionish,
+  props: Map<string, string>,
+): { any: string[]; all: string[]; relay?: string } | undefined {
+  if (props.size === 0) return undefined;
+  const init = attribute.getInitializer();
+  const handler = init && Node.isJsxExpression(init) ? init.getExpression() : undefined;
+  if (!handler) return undefined;
+  const mentioned = (node: Node): string[] => {
+    const found = new Set<string>();
+    const texts = [
+      node,
+      ...node.getDescendantsOfKind(SyntaxKind.Identifier),
+      ...node.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression),
+    ].map((part) => part.getText());
+    for (const text of texts) {
+      const prop = props.get(text);
+      if (prop) found.add(prop);
+    }
+    return [...found];
+  };
+  const any = mentioned(handler).filter((prop) => /^on[A-Z]/.test(prop));
+  // `onClick={onSort}`, `onClick={() => onSort()}`, `onClick={() => onSort?.()}`
+  let body: Node = handler;
+  if (Node.isArrowFunction(body) && body.getParameters().length === 0) body = body.getBody();
+  const called =
+    Node.isCallExpression(body) && body.getArguments().length === 0 ? body.getExpression() : body;
+  const relay = props.get(called.getText().replace(/\?\.$/, '')) ?? props.get(called.getText());
+  const all = new Set<string>();
+  for (
+    let node: Node | undefined = attribute.getParent();
+    node && node !== fn;
+    node = node.getParent()
+  ) {
+    const parent = node.getParent();
+    if (Node.isConditionalExpression(parent) && parent.getWhenTrue() === node)
+      for (const prop of mentioned(parent.getCondition())) all.add(prop);
+    if (
+      Node.isBinaryExpression(parent) &&
+      parent.getOperatorToken().getKind() === SyntaxKind.AmpersandAmpersandToken &&
+      parent.getRight() === node
+    )
+      for (const prop of mentioned(parent.getLeft())) all.add(prop);
+  }
+  if (any.length === 0 && all.size === 0) return undefined;
+  return {
+    any,
+    all: [...all],
+    ...(relay && relay === any[0] && any.length === 1 ? { relay } : {}),
+  };
 }
 
 /** `const [value, setValue] = useState()` -> ["value"] (the setter is noise). */
@@ -622,7 +1978,28 @@ function linkStateReads(fn: Node, handlerId: string, componentId: string, graph:
   const stateNodes = graph.successors(componentId, ['defines']).filter((n) => n.kind === 'state');
   if (stateNodes.length === 0) return;
   const byName = new Map(stateNodes.map((node) => [node.label, node] as const));
-  const setterOf = new Map(stateNodes.map((node) => [setterName(node.label), node] as const));
+  const setterOf = new Map(stateNodes.map((node) => [setterOfState(node), node] as const));
+
+  // What it sets each state to, when written out: `setTab("excels")`. Keyed by
+  // the conventional setter name, whatever the code spells it.
+
+  const sets: Record<string, string[]> = {};
+  for (const call of fn.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+    const setter = call.getExpression().getText();
+    if (!setterOf.has(setter)) continue;
+    const arg = call.getArguments()[0];
+    const value =
+      arg && (Node.isStringLiteral(arg) || Node.isNoSubstitutionTemplateLiteral(arg))
+        ? arg.getLiteralValue()
+        : arg && /^(true|false|null|undefined|0)$/.test(arg.getText())
+          ? `#${arg.getText()}`
+          : '*';
+    (sets[setterName(setterOf.get(setter)!.label)] ??= []).push(value);
+  }
+  if (Object.keys(sets).length) {
+    const handler = graph.node(handlerId);
+    if (handler) handler.meta = { ...handler.meta, sets };
+  }
 
   for (const identifier of fn.getDescendantsOfKind(SyntaxKind.Identifier)) {
     const text = identifier.getText();
@@ -642,11 +2019,79 @@ function setterName(state: string): string {
   return `set${state.charAt(0).toUpperCase()}${state.slice(1)}`;
 }
 
+/** A state node's setter as the code names it. */
+function setterOfState(node: FlowNode): string {
+  const written = node.meta?.['setter'];
+  return typeof written === 'string' ? written : setterName(node.label);
+}
+
 /**
  * Label a user action the way the user would describe it.
  * Text child first ("Submit Order"), then labelling props, then the tag.
  */
-function actionLabel(attribute: JsxAttribute, propName: string, handlerName?: string): string {
+/** The words written just before a control, in the element around it: its unlabelled caption. */
+function textBeside(element: Node): string | undefined {
+  const own = Node.isJsxSelfClosingElement(element) ? element : element.getParent();
+  const parent = own?.getParent();
+  if (!own || !parent || !Node.isJsxElement(parent)) return undefined;
+  const siblings = parent.getJsxChildren();
+  for (let index = siblings.indexOf(own as never) - 1; index >= 0; index--) {
+    const sibling = siblings[index]!;
+    if (!Node.isJsxElement(sibling)) continue;
+    // A caption, not another control's words: `<button>Help</button>` names the button.
+    if (
+      /^(button|a|Link|Button)$/.test(sibling.getOpeningElement().getTagNameNode().getText()) ||
+      sibling
+        .getDescendantsOfKind(SyntaxKind.JsxAttribute)
+        .some((attr) => /^on[A-Z]/.test(attr.getNameNode().getText()))
+    )
+      continue;
+    const text =
+      sibling
+        .getDescendantsOfKind(SyntaxKind.JsxText)
+        .map((piece) => piece.getText().replace(/\s+/g, ' ').trim())
+        .find((piece) => piece.length > 1) ?? '';
+    if (text && text.length <= 40) return text;
+  }
+  return undefined;
+}
+
+/** The label of the field wrapping a control: `<FormField label="…">` or `<label>…</label>`. */
+function fieldLabelAround(element: Node): string | undefined {
+  let current: Node | undefined = element.getParent();
+  for (let depth = 0; current && depth < 4; current = current.getParent()) {
+    if (Node.isArrowFunction(current) || Node.isFunctionDeclaration(current)) return undefined;
+    if (!Node.isJsxElement(current)) continue;
+    depth += 1;
+    const opening = current.getOpeningElement();
+    if (opening.getTagNameNode().getText() === 'label') {
+      const text = directText(current);
+      if (text) return text;
+    }
+    const label = opening.getAttribute('label');
+    const value = label && Node.isJsxAttribute(label) ? label.getInitializer() : undefined;
+    if (value && Node.isStringLiteral(value)) return value.getLiteralValue();
+  }
+  return undefined;
+}
+
+function actionLabel(
+  attribute: JsxAttribute,
+  propName: string,
+  handlerName?: string,
+  componentName?: string,
+): string {
+  const label = elementLabel(attribute, propName, handlerName, componentName);
+  // The same box is clicked to pick a file and dropped on: two actions, two names.
+  return propName === 'onDrop' && !/^drop/i.test(label) ? `Drop a file on "${label}"` : label;
+}
+
+function elementLabel(
+  attribute: JsxAttribute,
+  propName: string,
+  handlerName?: string,
+  componentName?: string,
+): string {
   const element = attribute.getFirstAncestor(
     (node) => Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node),
   );
@@ -656,22 +2101,66 @@ function actionLabel(attribute: JsxAttribute, propName: string, handlerName?: st
     Node.isJsxOpeningElement(element) || Node.isJsxSelfClosingElement(element)
       ? element.getTagNameNode().getText()
       : 'element';
+  const stringProp = (name: string): string | undefined => {
+    if (!Node.isJsxOpeningElement(element) && !Node.isJsxSelfClosingElement(element)) return;
+    const init = element.getAttribute(name);
+    const value = init && Node.isJsxAttribute(init) ? init.getInitializer() : undefined;
+    return value && Node.isStringLiteral(value) ? value.getLiteralValue() : undefined;
+  };
+
+  /**
+   * `<Dialog title="Import inventory" onClose={…}>` is closing that dialog,
+   * not "Import inventory"; `<AddMedicineDialog onClose={…}>` is "Close add
+   * medicine dialog", not "View close (line 373)".
+   */
+  if (/^on(Close|Dismiss|Hide)$/.test(propName) && /^[A-Z]/.test(tag)) {
+    const what = stringProp('title') ?? stringProp('aria-label') ?? stringProp('label');
+    return `Close ${what ? `"${what}"` : humanizeName(tag).toLowerCase()}`;
+  }
+  // `<input type="file" onChange={…}>`: what the user does with it.
+  if (tag === 'input' && stringProp('type') === 'file') return 'Choose a file';
+  // `<div role="option" onClick={() => choose(o)}>`: one row of a dropdown.
+  if (stringProp('role') === 'option') return 'Pick an option';
+  if (stringProp('aria-haspopup') === 'listbox') return 'Open the list';
+  // `<button aria-haspopup="menu">` with only an avatar and a name in it.
+  if (stringProp('aria-haspopup') && componentName)
+    return `Open ${humanizeName(componentName).toLowerCase()}`;
+  // `<div className="fixed inset-0" onClick={close} />`: the dimmed page behind a panel.
+  if (Node.isJsxSelfClosingElement(element) && /^(div|span)$/.test(tag) && propName === 'onClick')
+    return 'Click outside to close';
+
+  // `<Tabs tabs={tabList} onChange={…}>` with `tabList = [{ label: "Paid" }, …]`.
+  const listed = listProp(element);
+  if (listed) return listed;
+
+  // A row of a list with only its data in it — a patient's name and age, a
+  // page number: what the click does names it ("Select patient", "Go to page").
+  const inList = element.getFirstAncestor(
+    (node) => Node.isCallExpression(node) && /\.map$/.test(node.getExpression().getText()),
+  );
+  const said = singleCallName(attribute);
+  if (
+    inList &&
+    said &&
+    /^(Select |Go to page$)/.test(said) &&
+    !(Node.isJsxOpeningElement(element) && directText(element.getParent()!))
+  )
+    return said;
 
   if (Node.isJsxOpeningElement(element)) {
     const parent = element.getParent();
     if (Node.isJsxElement(parent)) {
       const text = directText(parent);
-      if (text) return text;
+      if (text && !isFragment(text)) return text;
+      // `{ACTIONS.map((a) => <button>{a.label}</button>)}`: the list says the words.
+      const listed = labelsFromList(parent);
+      if (listed) return listed;
 
       // `<form onSubmit={...}>` has no text of its own — the user identifies it
       // by its submit button ("Create Customer"), so borrow that label.
       if (propName === 'onSubmit') {
-        for (const descendant of parent.getDescendantsOfKind(SyntaxKind.JsxElement)) {
-          const tagName = descendant.getOpeningElement().getTagNameNode().getText();
-          if (!/^(button|Button|SubmitButton)$/.test(tagName)) continue;
-          const buttonText = directText(descendant);
-          if (buttonText) return buttonText;
-        }
+        const buttonText = submitButtonText(parent);
+        if (buttonText) return buttonText;
       }
     }
   }
@@ -680,13 +2169,38 @@ function actionLabel(attribute: JsxAttribute, propName: string, handlerName?: st
     Node.isJsxOpeningElement(element) || Node.isJsxSelfClosingElement(element)
       ? element.getAttributes()
       : [];
-  for (const candidate of attributes) {
-    if (!Node.isJsxAttribute(candidate)) continue;
-    if (!LABEL_PROPS.includes(candidate.getNameNode().getText())) continue;
-    const initializer = candidate.getInitializer();
-    const value =
-      initializer && Node.isStringLiteral(initializer) ? initializer.getLiteralValue() : undefined;
-    if (value) return value;
+  const fromProps = (names: string[]): string | undefined => {
+    for (const candidate of attributes) {
+      if (!Node.isJsxAttribute(candidate)) continue;
+      if (!names.includes(candidate.getNameNode().getText())) continue;
+      const initializer = candidate.getInitializer();
+      const value =
+        initializer && Node.isStringLiteral(initializer)
+          ? initializer.getLiteralValue()
+          : undefined;
+      if (value) return value;
+    }
+    return undefined;
+  };
+  const own = fromProps(LABEL_PROPS.filter((name) => !/^(placeholder|data-testid)$/.test(name)));
+  if (own) return own;
+  // `<FormField label="Medicine name"><Input placeholder="Paracetamol 500mg" …/>`:
+  // the field's label names it; the placeholder is an example value.
+  if (/^on(Change|Input)$/.test(propName)) {
+    const wrapper = fieldLabelAround(element);
+    if (wrapper) return wrapper;
+  }
+  const fallback = fromProps(['placeholder', 'data-testid']);
+  if (fallback) return fallback;
+  if (/^on(Change|Input)$/.test(propName)) {
+    // `<p>Column in your file</p> … <Select onChange={…} />` in each row of a list.
+    const beside = textBeside(element);
+    if (beside) {
+      const inRows = element.getFirstAncestor(
+        (node) => Node.isCallExpression(node) && /\.map$/.test(node.getExpression().getText()),
+      );
+      return inRows ? `${beside} (each row)` : beside;
+    }
   }
 
   /**
@@ -702,13 +2216,20 @@ function actionLabel(attribute: JsxAttribute, propName: string, handlerName?: st
       Node.isJsxElement(parent) &&
       parent.getDescendantsOfKind(SyntaxKind.JsxElement).length <= 6
     ) {
-      const nested = parent
-        .getDescendantsOfKind(SyntaxKind.JsxText)
-        .map((text) => text.getLiteralText().replace(/\s+/g, ' ').trim())
-        .find((text) => text.length > 0);
-      if (nested) return nested.slice(0, 40);
+      const nested = nestedText(parent);
+      if (nested && !isFragment(nested)) return nested.slice(0, 40);
     }
   }
+
+  // `<Select value={category} onChange={…}>`: the field is named by what it holds.
+  const bound =
+    Node.isJsxOpeningElement(element) || Node.isJsxSelfClosingElement(element)
+      ? (element.getAttribute('value') ?? element.getAttribute('checked'))
+      : undefined;
+  const boundTo = bound && Node.isJsxAttribute(bound) ? bound.getInitializer() : undefined;
+  const held = boundTo && Node.isJsxExpression(boundTo) ? boundTo.getExpression() : undefined;
+  if (held && (Node.isIdentifier(held) || Node.isPropertyAccessExpression(held)))
+    return humanizeName(held.getText().split('.').pop()!).replace(/^./, (c) => c.toUpperCase());
 
   // Icon buttons have no text at all, but their handler is named for the job.
   if (handlerName) {
@@ -716,7 +2237,232 @@ function actionLabel(attribute: JsxAttribute, propName: string, handlerName?: st
     if (humanized) return humanized;
   }
 
+  // `onMouseDown={() => { if (!open) openMenu(); }}`: what it opens says it.
+  const opened = opensOrCloses(attribute);
+  if (opened) return opened;
+
+  // A row in a list under "Switch clinic": the heading says what picking it does.
+  // Only for a plain element the user clicks: a component's event is named by
+  // what the component does, and a field by its own label.
+  const heading = /^[a-z]/.test(tag) && propName === 'onClick' ? headingAbove(element) : undefined;
+  if (heading) return heading;
+
+  // A trash icon with `onClick={() => remove(index)}`: "Remove". Plain elements
+  // only: a component's event is named by the component, after the scan.
+  if (said && /^[a-z]/.test(tag)) return said;
+
   return `${tag} ${propName}`;
+}
+
+/**
+ * `{a.label}` inside `ACTIONS.map((a) => …)`, with `ACTIONS` a literal list in
+ * the file: "Increase / Decrease / Set to".
+ */
+/**
+ * Where a link element goes: `href="/stock"`, or each `href` of the constant
+ * list it is mapped from — `NAV.map((item) => <Link href={item.href}>)`.
+ */
+function linkTargets(element: JsxOpeningElement | JsxSelfClosingElement): string[] {
+  if (!/^(a|Link|NavLink|NextLink)$/.test(element.getTagNameNode().getText())) return [];
+  const attr = element.getAttribute('href') ?? element.getAttribute('to');
+  const init = attr && Node.isJsxAttribute(attr) ? attr.getInitializer() : undefined;
+  if (init && Node.isStringLiteral(init)) return [init.getLiteralValue()];
+  const value = init && Node.isJsxExpression(init) ? init.getExpression() : undefined;
+  if (!value || !Node.isPropertyAccessExpression(value)) return [];
+  const item = value.getExpression().getText();
+  const map = element.getFirstAncestor(
+    (node: Node) =>
+      Node.isCallExpression(node) &&
+      /\.map$/.test(node.getExpression().getText()) &&
+      (node.getArguments()[0] as Node | undefined)?.getText().startsWith(`(${item}`) === true,
+  );
+  const callee = map && Node.isCallExpression(map) ? map.getExpression() : undefined;
+  if (!callee || !Node.isPropertyAccessExpression(callee)) return [];
+  const list = element
+    .getSourceFile()
+    .getVariableDeclaration(callee.getExpression().getText())
+    ?.getInitializer();
+  if (!list || !Node.isArrayLiteralExpression(list)) return [];
+  return list.getElements().flatMap((entry) => {
+    const property = Node.isObjectLiteralExpression(entry)
+      ? entry.getProperty(value.getName())
+      : undefined;
+    const target =
+      property && Node.isPropertyAssignment(property) ? property.getInitializer() : undefined;
+    return target && Node.isStringLiteral(target) ? [target.getLiteralValue()] : [];
+  });
+}
+
+function labelsFromList(element: JsxElement): string | undefined {
+  for (const child of element.getJsxChildren()) {
+    if (!Node.isJsxExpression(child)) continue;
+    const value = child.getExpression();
+    if (!value || !Node.isPropertyAccessExpression(value)) continue;
+    const item = value.getExpression().getText();
+    const map = element.getFirstAncestor(
+      (node) =>
+        Node.isCallExpression(node) &&
+        /\.map$/.test(node.getExpression().getText()) &&
+        (node.getArguments()[0] as Node | undefined)?.getText().startsWith(`(${item}`) === true,
+    );
+    if (!map || !Node.isCallExpression(map)) continue;
+    const callee = map.getExpression();
+    if (!Node.isPropertyAccessExpression(callee)) continue;
+    const list = element
+      .getSourceFile()
+      .getVariableDeclaration(callee.getExpression().getText())
+      ?.getInitializer();
+    if (!list || !Node.isArrayLiteralExpression(list)) continue;
+    const words = list
+      .getElements()
+      .map((entry) =>
+        Node.isObjectLiteralExpression(entry) ? entry.getProperty(value.getName()) : undefined,
+      )
+      .map((property) =>
+        property && Node.isPropertyAssignment(property) ? property.getInitializer() : undefined,
+      )
+      .map((init) => (init && Node.isStringLiteral(init) ? init.getLiteralValue() : undefined));
+    if (words.length > 0 && words.every(Boolean)) return words.join(' / ');
+  }
+  return undefined;
+}
+
+/** "as", "of", "&": text with no word a person would read as the button's name. */
+function isFragment(text: string): boolean {
+  const words = text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  return !words.some(
+    (word) =>
+      (word.length > 2 || /^\d+$/.test(word)) &&
+      !/^(and|the|for|you|are|was|not|but|via|per)$/.test(word),
+  );
+}
+
+/**
+ * The text just before the element's container — `<p>Switch clinic</p>` above
+ * a list of clinic buttons — a few levels out, never past the component.
+ */
+function headingAbove(element: Node): string | undefined {
+  let node: Node | undefined = element.getParent();
+  // Through `{items.map((item) => (…))}`: a paren, an arrow, a call, an expression.
+  for (let depth = 0; node && depth < 8; depth++, node = node.getParent()) {
+    if (Node.isFunctionDeclaration(node)) break;
+    const parent = node.getParent();
+    if (!parent || !Node.isJsxElement(parent)) continue;
+    const siblings = parent.getJsxChildren();
+    const index = siblings.findIndex((sibling) => sibling === node);
+    for (let i = index - 1; i >= 0; i--) {
+      const sibling = siblings[i]!;
+      if (!Node.isJsxElement(sibling)) continue;
+      // Its own words, or the heading inside it: `<div><h1>Choose a clinic</h1>…`.
+      const heading = sibling
+        .getDescendantsOfKind(SyntaxKind.JsxElement)
+        .find((inner) =>
+          /^(h[1-6]|legend|CardTitle|DialogTitle)$/.test(
+            inner.getOpeningElement().getTagNameNode().getText(),
+          ),
+        );
+      for (const candidate of [directText(sibling), heading ? directText(heading) : '']) {
+        if (candidate && !isFragment(candidate) && candidate.length <= 40) return candidate;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * An inline handler that makes one call, said as an action: `setSelectedPatient(p)`
+ * -> "Select patient", `setPage(p)` -> "Go to page", `remove(index)` -> "Remove".
+ */
+function singleCallName(attribute: JsxAttribute): string | undefined {
+  const init = attribute.getInitializer();
+  const handler = init && Node.isJsxExpression(init) ? init.getExpression() : undefined;
+  if (!handler || (!Node.isArrowFunction(handler) && !Node.isFunctionExpression(handler)))
+    return undefined;
+  const calls = handler
+    .getDescendantsOfKind(SyntaxKind.CallExpression)
+    .filter((call) => !/\.(preventDefault|stopPropagation)$/.test(call.getExpression().getText()));
+  if (calls.length !== 1) return undefined;
+  const callee = calls[0]!.getExpression();
+  if (!Node.isIdentifier(callee)) return undefined;
+  const name = callee.getText();
+  const selected = /^setSelected([A-Z]\w*)$/.exec(name);
+  if (selected) return `Select ${humanizeName(selected[1]!).toLowerCase()}`;
+  if (/^set(Page|CurrentPage|PageNumber)$/.test(name)) return 'Go to page';
+  const set = /^set([A-Z]\w*)$/.exec(name);
+  if (set) return `Choose ${humanizeName(set[1]!).toLowerCase()}`;
+  return humanizeHandler(name);
+}
+
+/** `tabs={tabList}` / `options={…}` naming a literal list of `{ label }`: "Paid / Outstanding". */
+function listProp(element: Node): string | undefined {
+  if (!Node.isJsxOpeningElement(element) && !Node.isJsxSelfClosingElement(element))
+    return undefined;
+  for (const name of ['tabs', 'items', 'options', 'tabList']) {
+    const attr = element.getAttribute(name);
+    const init = attr && Node.isJsxAttribute(attr) ? attr.getInitializer() : undefined;
+    const value = init && Node.isJsxExpression(init) ? init.getExpression() : undefined;
+    let list: Node | undefined = value;
+    if (value && Node.isIdentifier(value)) {
+      const declared = value
+        .getSourceFile()
+        .getDescendantsOfKind(SyntaxKind.VariableDeclaration)
+        .find((declaration) => declaration.getName() === value.getText());
+      list = declared?.getInitializer();
+    }
+    if (!list || !Node.isArrayLiteralExpression(list)) continue;
+    const words = list.getElements().map((entry) => {
+      if (Node.isStringLiteral(entry)) return entry.getLiteralValue();
+      if (!Node.isObjectLiteralExpression(entry)) return undefined;
+      const label =
+        entry.getProperty('label') ?? entry.getProperty('title') ?? entry.getProperty('name');
+      const text = label && Node.isPropertyAssignment(label) ? label.getInitializer() : undefined;
+      return text && Node.isStringLiteral(text) ? text.getLiteralValue() : undefined;
+    });
+    if (words.length > 1 && words.length <= 8 && words.every(Boolean)) return words.join(' / ');
+  }
+  return undefined;
+}
+
+/** An inline handler whose only calls open, close or toggle something: "Open menu". */
+function opensOrCloses(attribute: JsxAttribute): string | undefined {
+  const init = attribute.getInitializer();
+  const handler = init && Node.isJsxExpression(init) ? init.getExpression() : undefined;
+  if (!handler || (!Node.isArrowFunction(handler) && !Node.isFunctionExpression(handler)))
+    return undefined;
+  const names = handler
+    .getDescendantsOfKind(SyntaxKind.CallExpression)
+    .map((call) => call.getExpression().getText())
+    // Moving focus along with it is not what the control is for.
+    .filter((name) => !/\.(focus|blur|select|preventDefault|stopPropagation)$/.test(name));
+  if (
+    names.length === 0 ||
+    !names.every((name) => /^(open|close|toggle|show|hide)[A-Z]\w*$/.test(name))
+  )
+    return undefined;
+  // `openMenu`, `closeMenu` -> "Open or close menu".
+  const parts = names.map((name) => /^([a-z]+)(.*)$/.exec(name)!);
+  const verbs = [...new Set(parts.map((part) => part[1]!))].sort((a, b) =>
+    a === 'open' ? -1 : b === 'open' ? 1 : 0,
+  );
+  const nouns = [...new Set(parts.map((part) => humanizeName(part[2]!).toLowerCase()))];
+  const said = `${verbs.join(' or ')} ${nouns.join(' or ')}`.trim();
+  return said.charAt(0).toUpperCase() + said.slice(1);
+}
+
+/** A handler that only calls `e.preventDefault()` / `e.stopPropagation()`. */
+function onlyStopsDefault(attribute: JsxAttribute): boolean {
+  const init = attribute.getInitializer();
+  const handler = init && Node.isJsxExpression(init) ? init.getExpression() : undefined;
+  if (!handler || (!Node.isArrowFunction(handler) && !Node.isFunctionExpression(handler)))
+    return false;
+  const body = handler.getBody();
+  const statements = Node.isBlock(body) ? body.getStatements() : [body];
+  return (
+    statements.length > 0 &&
+    statements.every((statement) =>
+      /^\w+\.(preventDefault|stopPropagation)\(\);?$/.test(statement.getText().trim()),
+    )
+  );
 }
 
 /**
@@ -736,18 +2482,195 @@ export function humanizeHandler(name: string): string | undefined {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+/**
+ * What to call a component in a title.
+ *
+ * `export default function Index()` is how a Next.js page is very often
+ * written, and "Medication · Index loads" names the file convention rather
+ * than anything on the screen. A name that only says "this is the component"
+ * gives way to the screen it is on: "Medication loads".
+ */
+function componentPhrase(componentName: string, screen: string): string {
+  if (isGenericComponentName(componentName) && screen) return screen;
+  return humanizeName(componentName);
+}
+
 /** Does this text contain anything a person could read out loud? */
 function hasWords(text: string): boolean {
   return /[A-Za-z0-9]/.test(text);
 }
 
+/**
+ * The words on the button that submits this form.
+ *
+ * `type="submit"` says so outright, on any component — `<PrimaryButton
+ * type="submit">` is as common as `<button>`. Failing that, a plain button with
+ * no type submits by default. A `type="button"` never does: a form full of
+ * "Add relative" and "Remove" buttons is named by none of them.
+ */
+function submitButtonText(form: Node): string {
+  const elements = [
+    ...form.getDescendantsOfKind(SyntaxKind.JsxElement).map((el) => ({
+      opening: el.getOpeningElement() as Node,
+      body: el as Node,
+    })),
+    ...form
+      .getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement)
+      .map((el) => ({ opening: el as Node, body: el as Node })),
+  ];
+  const typeOf = (opening: Node): string | undefined => stringAttribute(opening, 'type');
+  const tagOf = (opening: Node): string =>
+    Node.isJsxOpeningElement(opening) || Node.isJsxSelfClosingElement(opening)
+      ? opening.getTagNameNode().getText()
+      : '';
+  const textOf = (body: Node): string =>
+    directText(body) || nestedText(body) || labelPropOf(body) || '';
+
+  for (const { opening, body } of elements) {
+    if (typeOf(opening) !== 'submit') continue;
+    const text = textOf(body);
+    if (text) return text;
+  }
+  /**
+   * `<button type="submit" form="addPatientForm">` in a footer outside the
+   * `<form id="addPatientForm">` it submits — the pinned-footer layout puts it
+   * there on purpose, so look for it by the form's id.
+   */
+  const formId = Node.isJsxElement(form)
+    ? stringAttribute(form.getOpeningElement(), 'id')
+    : undefined;
+  if (formId) {
+    for (const opening of [
+      ...form.getSourceFile().getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
+      ...form.getSourceFile().getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
+    ]) {
+      if (stringAttribute(opening, 'form') !== formId) continue;
+      const body = Node.isJsxOpeningElement(opening) ? opening.getParent() : opening;
+      const text = body ? textOf(body) : '';
+      if (text) return text;
+    }
+  }
+  for (const { opening, body } of elements) {
+    if (!/^(button|Button|SubmitButton)$/.test(tagOf(opening))) continue;
+    if (typeOf(opening) !== undefined) continue;
+    const text = textOf(body);
+    if (text) return text;
+  }
+  return '';
+}
+
+/** `type="submit"` and `type={"submit"}` -> "submit". */
+function stringAttribute(opening: Node, name: string): string | undefined {
+  if (!Node.isJsxOpeningElement(opening) && !Node.isJsxSelfClosingElement(opening))
+    return undefined;
+  const attribute = opening.getAttribute(name);
+  if (!attribute || !Node.isJsxAttribute(attribute)) return undefined;
+  const initializer = attribute.getInitializer();
+  if (initializer && Node.isStringLiteral(initializer)) return initializer.getLiteralValue();
+  const expression =
+    initializer && Node.isJsxExpression(initializer) ? initializer.getExpression() : undefined;
+  return expression && Node.isStringLiteral(expression) ? expression.getLiteralValue() : undefined;
+}
+
+/** `<PrimaryButton label="Save" type="submit" />`: a labelling prop on the element itself. */
+function labelPropOf(element: Node): string {
+  const opening = Node.isJsxElement(element) ? element.getOpeningElement() : element;
+  if (!Node.isJsxOpeningElement(opening) && !Node.isJsxSelfClosingElement(opening)) return '';
+  for (const name of ['label', 'text', 'title', 'aria-label']) {
+    const attribute = opening.getAttribute(name);
+    const initializer =
+      attribute && Node.isJsxAttribute(attribute) ? attribute.getInitializer() : undefined;
+    if (initializer && Node.isStringLiteral(initializer)) return initializer.getLiteralValue();
+  }
+  return '';
+}
+
+/**
+ * The first readable words anywhere inside an element: its text, or a string
+ * it shows (`{saving ? "Saving..." : "Save"}`).
+ *
+ * Progress text — "Saving...", "Adding…", "Loading" — is what the button says
+ * for a second while it works, not what the user pressed, so it is passed over
+ * whenever the element says anything else.
+ */
+function nestedText(element: Node): string {
+  const candidates: Array<{ position: number; text: string }> = [];
+  for (const text of element.getDescendantsOfKind(SyntaxKind.JsxText)) {
+    const value = text.getLiteralText().replace(/\s+/g, ' ').trim();
+    if (hasWords(value)) candidates.push({ position: text.getStart(), text: value });
+  }
+  const literals: Node[] = [
+    ...element.getDescendantsOfKind(SyntaxKind.StringLiteral),
+    ...element.getDescendantsOfKind(SyntaxKind.NoSubstitutionTemplateLiteral),
+    ...element.getDescendantsOfKind(SyntaxKind.TemplateExpression),
+  ];
+  for (const literal of literals) {
+    // Attribute values are class names and ids, not words on the screen.
+    if (literal.getFirstAncestorByKind(SyntaxKind.JsxAttribute)) continue;
+    if (!literal.getFirstAncestorByKind(SyntaxKind.JsxExpression)) continue;
+    // `cond === "x"` compares; only a branch of `? :` or `&&` is shown.
+    const parent = literal.getParent();
+    if (Node.isBinaryExpression(parent) && !/^&&|\|\|$/.test(parent.getOperatorToken().getText())) {
+      continue;
+    }
+    if (Node.isCallExpression(parent) || Node.isElementAccessExpression(parent)) continue;
+    const value = shownText(literal).replace(/\s+/g, ' ').trim();
+    if (hasWords(value)) candidates.push({ position: literal.getStart(), text: value });
+  }
+  candidates.sort((a, b) => a.position - b.position);
+  // Only progress text — the handler's name says more than "Cancelling...".
+  const found = candidates.find((candidate) => !isProgressText(candidate.text))?.text ?? '';
+  // `Create &quot;` as written in JSX is `Create "` on screen.
+  return found
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;|&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&nbsp;/g, ' ');
+}
+
+/** A string as the screen shows it: `Cancel ${count} & Remove` -> "Cancel & Remove". */
+function shownText(literal: Node): string {
+  if (Node.isStringLiteral(literal) || Node.isNoSubstitutionTemplateLiteral(literal)) {
+    return literal.getLiteralValue();
+  }
+  if (Node.isTemplateExpression(literal)) {
+    return [
+      literal.getHead().getLiteralText(),
+      ...literal.getTemplateSpans().map((span) => span.getLiteral().getLiteralText()),
+    ].join(' ');
+  }
+  return '';
+}
+
+/** "Saving...", "Adding…", "Loading": a button's busy state. */
+function isProgressText(text: string): boolean {
+  return /(?:\.\.\.|…)\s*$/.test(text) || /^(?:loading|please wait)\b/i.test(text);
+}
+
 /** Immediate text children of a JSX element, collapsed to one line. */
 function directText(element: Node): string {
   if (!Node.isJsxElement(element)) return '';
-  return element
-    .getJsxChildren()
-    .map((child) => (Node.isJsxText(child) ? child.getLiteralText() : ''))
-    .join(' ')
+  let text = '';
+  for (const child of element.getJsxChildren()) {
+    if (Node.isJsxText(child)) text += ` ${child.getLiteralText()}`;
+    // `row{count === 1 ? "" : "s"}`: the plural, joined to its word.
+    else if (Node.isJsxExpression(child)) {
+      const value = child.getExpression();
+      if (value && Node.isConditionalExpression(value)) {
+        const branches = [value.getWhenTrue(), value.getWhenFalse()].map((branch) =>
+          Node.isStringLiteral(branch) ? branch.getLiteralValue() : undefined,
+        );
+        const suffix = branches.find((branch) => branch && /^[a-z]{1,2}$/.test(branch));
+        if (suffix && branches.includes('') && /\w$/.test(text)) text += suffix;
+      }
+    }
+  }
+  // `Create &quot;` as written in JSX is `Create "` on screen.
+  return text
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;|&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&nbsp;/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -767,8 +2690,9 @@ function resolveActionHandler(
   const initializer = attribute.getInitializer();
   if (!initializer) return undefined;
 
-  const expression = Node.isJsxExpression(initializer) ? initializer.getExpression() : initializer;
-  if (!expression) return undefined;
+  const written = Node.isJsxExpression(initializer) ? initializer.getExpression() : initializer;
+  if (!written) return undefined;
+  const expression = unwrapSubmitWrapper(written);
 
   if (Node.isIdentifier(expression)) {
     const name = expression.getText();
@@ -801,7 +2725,13 @@ function resolveActionHandler(
       kind: 'handler',
       label: `${componentName}.${attribute.getNameNode().getText()} (inline)`,
       source: { file: rel, line: lineOf(expression) },
-      meta: { component: componentName, inline: true, ...(wrapped ? { function: wrapped } : {}) },
+      meta: {
+        component: componentName,
+        inline: true,
+        ...(wrapped ? { function: wrapped } : {}),
+        // `onClick={() => router.push(\`/medicines/${m.id}\`)}` goes to another page.
+        ...aftermathMeta(expression),
+      },
     });
     graph.addEdge({ from: componentId, to: id, kind: 'defines' });
     linkStateReads(expression, id, componentId, graph);
@@ -824,6 +2754,21 @@ function resolveActionHandler(
   }
 
   return undefined;
+}
+
+/**
+ * `onSubmit={handleSubmit(save)}` -> `save`.
+ *
+ * React Hook Form's `handleSubmit` (and `form.handleSubmit`) validates and then
+ * calls the function it was given, so that function is the handler. Read as a
+ * call, the form pointed at nothing, and the most important button on the
+ * screen was missing from the list.
+ */
+function unwrapSubmitWrapper(expression: Node): Node {
+  if (!Node.isCallExpression(expression)) return expression;
+  if (!/(?:^|\.)handleSubmit$/.test(expression.getExpression().getText())) return expression;
+  const handler = expression.getArguments()[0];
+  return handler && (Node.isIdentifier(handler) || isFunctionish(handler)) ? handler : expression;
 }
 
 export interface DetectedRequest {
@@ -1263,6 +3208,12 @@ function ownerOf(
         const inlineId = ids.handler(rel, component, `inline@${lineOf(current)}`);
         if (graph.hasNode(inlineId)) return existing(inlineId);
       }
+      /**
+       * `sendBill={() => sendBill(id)}` handed to a child: it runs when the
+       * child calls it, never as this component draws. Charged to the
+       * component, its request counted as part of the page loading.
+       */
+      if (current.getParent() && Node.isJsxExpression(current.getParent()!)) return undefined;
     }
     current = enclosingFunction(current);
   }
@@ -1317,6 +3268,19 @@ function addMountActions(graph: FlowGraph): void {
        * is exactly what a mount action should be built from.
        */
       .filter((node) => node.kind !== 'hook' || node.meta?.['fetchesOnMount'] === true)
+      /**
+       * `useImportJobStatus(step === "processing" ? jobId : null)` with
+       * `enabled: !!jobId`: switched off until a job is queued, so it is the
+       * polling an import starts, not something the dialog loads as it opens.
+       */
+      .filter((node) => {
+        const param = node.meta?.['enabledByParam'];
+        if (typeof param !== 'number') return true;
+        if (param < 0) return false;
+        const empty = graph.edgesFrom(component.id, ['calls']).find((edge) => edge.to === node.id)
+          ?.meta?.['emptyArgs'] as number[] | undefined;
+        return !empty?.includes(param);
+      })
       .map((node) => node.id)
       .filter((id) => !triggered.has(id))
       .filter((id) => reachesApiCall(graph, id));
@@ -1359,7 +3323,10 @@ function addMountActions(graph: FlowGraph): void {
          * several components, and two of them fetching on mount would otherwise
          * produce two tiles reading "Customer detail loads".
          */
-        title: composeTitle(place.screen, `${humanizeName(component.label)} ${label}`),
+        title: composeTitle(
+          place.screen,
+          `${componentPhrase(component.label, place.screen)} ${label}`,
+        ),
         ...(place.page ? { page: place.page } : {}),
         ...(place.area ? { area: place.area } : {}),
       },
@@ -1397,6 +3364,7 @@ function aftermathMeta(fn: Node): Record<string, unknown> {
   return {
     ...(after.navigatesTo.length > 0 ? { navigatesTo: after.navigatesTo } : {}),
     ...(after.invalidates.length > 0 ? { invalidates: after.invalidates } : {}),
+    ...(after.invalidatePrefixes ? { invalidatePrefixes: after.invalidatePrefixes } : {}),
     ...(after.errorStates.length > 0 ? { errorStates: after.errorStates } : {}),
     ...(after.notifies.length > 0 ? { notifies: after.notifies } : {}),
     ...(after.handlesErrors ? { handlesErrors: true } : {}),
@@ -1416,19 +3384,42 @@ function resolvePendingCalls(
   globals: Map<string, DeclaredSymbol[]>,
   pending: PendingCall[],
   aliases: PendingAlias[],
+  contexts: ContextIndex,
 ): void {
-  const aliasTable = new Map<string, string>();
+  const aliasTable = new Map<string, PendingAlias>();
   for (const alias of aliases) {
-    aliasTable.set(`${alias.file}::${alias.localName}`, alias.hookName);
+    aliasTable.set(`${alias.file}::${alias.localName}`, alias);
+  }
+
+  // `onClick={logout}` with `const { logout } = useAuth()`: the handler is
+  // the hook's member, so it calls whatever that member turns out to be.
+  for (const node of graph.allNodes()) {
+    const name = node.meta?.['function'];
+    if (node.kind !== 'handler' || !node.meta?.['unresolved'] || typeof name !== 'string') continue;
+    if (!node.source || !aliasTable.has(`${node.source.file}::${name}`)) continue;
+    pending.push({
+      from: { id: node.id, kind: 'handler', file: node.source.file, ensure: noop },
+      name,
+      file: node.source.file,
+    });
   }
 
   const touched = new Set<string>();
 
   for (const call of pending) {
     // `createCustomer()` in this file may really mean `useCreateCustomer()`.
-    const aliased = aliasTable.get(`${call.file}::${call.name}`);
+    const alias = aliasTable.get(`${call.file}::${call.name}`);
+    const aliased = alias?.hookName;
     // A receiver is only ever a hook result; anything else is not a call edge.
     if (call.receiverOnly && !aliased) continue;
+    // `logout()` from `useAuth()` is the provider's own `logout`, not the hook.
+    const context = !call.receiverOnly && aliased ? contexts.hooks.get(aliased) : undefined;
+    const provided = context ? contexts.members.get(`${context}::${alias?.member}`) : undefined;
+    if (provided && graph.hasNode(provided) && provided !== call.from.id) {
+      call.from.ensure();
+      graph.addEdge({ from: call.from.id, to: provided, kind: 'calls', ...edgeMeta(call) });
+      continue;
+    }
     const name = aliased ?? call.name;
     const candidates = globals.get(name);
     if (!candidates || candidates.length === 0) continue;
@@ -1444,10 +3435,145 @@ function resolvePendingCalls(
     if (call.from.kind === 'module-fn') touched.add(call.from.id);
     if (target.kind === 'module-fn') touched.add(target.id);
 
-    graph.addEdge({ from: call.from.id, to: target.id, kind: 'calls' });
+    graph.addEdge({ from: call.from.id, to: target.id, kind: 'calls', ...edgeMeta(call) });
   }
 
   pruneUnusedModuleFunctions(graph, touched);
+}
+
+/** A call edge's meta: where it is written, and whether it waits for a response. */
+function edgeMeta(call: PendingCall): { meta?: Record<string, unknown> } {
+  if (call.line === undefined) return {};
+  return {
+    meta: {
+      line: call.line,
+      ...(call.end !== undefined ? { end: call.end } : {}),
+      ...(call.emptyArgs?.length ? { emptyArgs: call.emptyArgs } : {}),
+      ...(call.reads?.length ? { reads: call.reads } : {}),
+      ...(call.afterResponse ? { afterResponse: true } : {}),
+    },
+  };
+}
+
+const RESPONSE_CALLBACKS = new Set(['onSuccess', 'onError', 'onSettled']);
+const PROMISE_CALLBACKS = new Set(['then', 'catch', 'finally']);
+
+/**
+ * The line of a call, and whether it only runs once a request has answered:
+ * inside an `onSuccess`/`onError`/`onSettled` option, or a `.then`/`.catch`
+ * callback. Without this, the toast an `onSuccess` shows read as if it came
+ * before the request it reports on.
+ */
+function callPlacement(
+  call: CallExpression,
+): Pick<PendingCall, 'line' | 'end' | 'afterResponse' | 'emptyArgs' | 'reads'> {
+  let afterResponse = false;
+  for (let node: Node | undefined = call.getParent(); node; node = node.getParent()) {
+    if (!Node.isArrowFunction(node) && !Node.isFunctionExpression(node)) continue;
+    const parent = node.getParent();
+    if (Node.isPropertyAssignment(parent) && RESPONSE_CALLBACKS.has(parent.getName())) {
+      afterResponse = true;
+      break;
+    }
+    if (Node.isCallExpression(parent)) {
+      const expression = parent.getExpression();
+      if (
+        Node.isPropertyAccessExpression(expression) &&
+        PROMISE_CALLBACKS.has(expression.getName())
+      ) {
+        afterResponse = true;
+        break;
+      }
+    }
+    // The handler itself: what encloses it is not part of this call's timing.
+    if (!Node.isCallExpression(parent) && !Node.isPropertyAssignment(parent)) break;
+  }
+  const emptyArgs = call
+    .getArguments()
+    .map((arg, index) => (startsEmpty(arg) ? index : -1))
+    .filter((index) => index >= 0);
+  const reads = argumentNames(call);
+  return {
+    line: call.getStartLineNumber(),
+    end: call.getEnd(),
+    ...(afterResponse ? { afterResponse } : {}),
+    ...(emptyArgs.length ? { emptyArgs } : {}),
+    ...(reads.length ? { reads } : {}),
+  };
+}
+
+/**
+ * The names a call's arguments are made of, two declarations deep:
+ * `useMedicines(query)` with `const query = useMemo(() => ({ page, sortBy }))`
+ * reads `query`, `page` and `sortBy` — so a click that sets `page` fetches again.
+ */
+function argumentNames(call: CallExpression): string[] {
+  const found = new Set<string>();
+  const scope = call.getFirstAncestor(
+    (node) =>
+      Node.isFunctionDeclaration(node) ||
+      Node.isArrowFunction(node) ||
+      Node.isFunctionExpression(node),
+  );
+  let frontier: Node[] = call.getArguments();
+  for (let depth = 0; depth < 3 && frontier.length > 0; depth++) {
+    const next: Node[] = [];
+    for (const node of frontier) {
+      const identifiers = Node.isIdentifier(node)
+        ? [node]
+        : node.getDescendantsOfKind(SyntaxKind.Identifier);
+      for (const identifier of identifiers) {
+        const name = identifier.getText();
+        if (found.has(name)) continue;
+        found.add(name);
+        const declaration = scope
+          ?.getDescendantsOfKind(SyntaxKind.VariableDeclaration)
+          .find(
+            (candidate) =>
+              Node.isIdentifier(candidate.getNameNode()) && candidate.getName() === name,
+          );
+        const init = declaration?.getInitializer();
+        if (init && !/^use(State|Reducer)\b/.test(init.getText())) next.push(init);
+      }
+    }
+    frontier = next;
+  }
+  return [...found].slice(0, 40);
+}
+
+function withoutArguments<T extends { emptyArgs?: number[]; reads?: string[] }>(
+  placement: T,
+): Omit<T, 'emptyArgs' | 'reads'> {
+  const { emptyArgs: _empty, reads: _reads, ...rest } = placement;
+  return rest;
+}
+
+const EMPTY = /^(null|undefined|false|''|""|``)$/;
+
+/**
+ * Empty when the component first draws: `null`, `step === "x" ? jobId : null`,
+ * or a state declared `useState(null)` that a handler fills in later.
+ */
+function startsEmpty(arg: Node): boolean {
+  if (EMPTY.test(arg.getText())) return true;
+  if (Node.isConditionalExpression(arg))
+    return EMPTY.test(arg.getWhenFalse().getText()) || EMPTY.test(arg.getWhenTrue().getText());
+  if (!Node.isIdentifier(arg)) return false;
+  const name = arg.getText();
+  for (const declaration of arg
+    .getSourceFile()
+    .getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    const binding = declaration.getNameNode();
+    if (!Node.isArrayBindingPattern(binding)) continue;
+    const first = binding.getElements()[0];
+    if (!first || !Node.isBindingElement(first) || first.getName() !== name) continue;
+    const init = declaration.getInitializer();
+    if (!init || !Node.isCallExpression(init) || !/useState$/.test(init.getExpression().getText()))
+      continue;
+    const initial = init.getArguments()[0];
+    return !initial || EMPTY.test(initial.getText());
+  }
+  return false;
 }
 
 /**
@@ -1489,6 +3615,98 @@ function topLevelFunctions(file: SourceFile): Functionish[] {
     }
   }
   return out;
+}
+
+/** `useContext(AuthContext)` inside a hook -> `AuthContext`. */
+function contextRead(fn: Functionish): string | undefined {
+  for (const call of callsIn(fn)) {
+    if (!/^(React\.)?useContext$/.test(calleeName(call))) continue;
+    const [arg] = call.getArguments();
+    if (arg && Node.isIdentifier(arg)) return arg.getText();
+  }
+  return undefined;
+}
+
+/**
+ * `<AuthContext.Provider value={value}>` with
+ * `const value = useMemo(() => ({ user, login, logout }), […])` ->
+ * AuthContext: { login -> AuthProvider.login, logout -> AuthProvider.logout }.
+ *
+ * shortcut: only `X.Provider` with an object literal (direct, via a local
+ * variable, or a `useMemo` returning one); React 19's `<X value>` is not read.
+ */
+function providedMembers(
+  file: SourceFile,
+): Map<string, Map<string, { component: string; local: string }>> {
+  const out = new Map<string, Map<string, { component: string; local: string }>>();
+  const elements = [
+    ...file.getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
+    ...file.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
+  ];
+  for (const element of elements) {
+    const tag = /^(\w+)\.Provider$/.exec(element.getTagNameNode().getText());
+    const component = ownerComponentName(element);
+    if (!tag?.[1] || !component) continue;
+    const attribute = element
+      .getAttributes()
+      .find(
+        (candidate) =>
+          Node.isJsxAttribute(candidate) && candidate.getNameNode().getText() === 'value',
+      );
+    const initializer =
+      attribute && Node.isJsxAttribute(attribute) ? attribute.getInitializer() : undefined;
+    const written =
+      initializer && Node.isJsxExpression(initializer) ? initializer.getExpression() : undefined;
+    const object = providedObject(written, element);
+    if (!object) continue;
+    const members = new Map<string, { component: string; local: string }>();
+    for (const property of object.getProperties()) {
+      if (Node.isShorthandPropertyAssignment(property)) {
+        members.set(property.getName(), { component, local: property.getName() });
+      } else if (Node.isPropertyAssignment(property)) {
+        const value = property.getInitializer();
+        if (value && Node.isIdentifier(value))
+          members.set(stripQuotes(property.getName()), { component, local: value.getText() });
+      }
+    }
+    out.set(tag[1], members);
+  }
+  return out;
+}
+
+function providedObject(node: Node | undefined, at: Node): ObjectLiteralExpression | undefined {
+  let value = node;
+  while (value && Node.isParenthesizedExpression(value)) value = value.getExpression();
+  if (!value) return undefined;
+  if (Node.isObjectLiteralExpression(value)) return value;
+  if (Node.isIdentifier(value)) {
+    const scope = enclosingFunction(at);
+    const declaration = scope
+      ?.getDescendantsOfKind(SyntaxKind.VariableDeclaration)
+      .find((candidate) => candidate.getName() === value!.getText());
+    return declaration ? providedObject(declaration.getInitializer(), at) : undefined;
+  }
+  if (Node.isCallExpression(value) && /^(React\.)?useMemo$/.test(calleeName(value))) {
+    const [factory] = value.getArguments();
+    if (!factory || !Node.isArrowFunction(factory)) return undefined;
+    const body = factory.getBody();
+    if (!Node.isBlock(body)) return providedObject(body, at);
+    const returned = body.getStatements().find(Node.isReturnStatement)?.getExpression();
+    return providedObject(returned, at);
+  }
+  return undefined;
+}
+
+/** `() => {}` itself, or the function in `useCallback(() => {}, [deps])`. */
+function callbackOf(
+  node: Node | undefined,
+): ArrowFunction | FunctionExpression | FunctionDeclaration | undefined {
+  if (!node) return undefined;
+  if (isFunctionish(node)) return node;
+  if (!Node.isCallExpression(node) || !/^(React\.)?useCallback$/.test(calleeName(node)))
+    return undefined;
+  const [first] = node.getArguments();
+  return first && isFunctionish(first) ? first : undefined;
 }
 
 function isFunctionish(
