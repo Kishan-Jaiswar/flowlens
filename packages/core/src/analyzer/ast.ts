@@ -187,16 +187,30 @@ export function enclosingFunction(node: Node): Functionish | undefined {
  * A readable name for a function-like node.
  *
  * Arrow functions assigned to a variable (`const handleSubmit = () => {}`) are
- * the common case in React code, so fall back to the variable name.
+ * the common case in React code, so fall back to the variable name — also
+ * through a wrapper call (`const save = useCallback(() => {}, [])`). Only the
+ * variable the function is *assigned* to names it: an inline callback inside
+ * `const searchBar = (<Button onClick={() => refetch()} />)` is anonymous.
  */
 export function functionName(fn: Functionish): string | undefined {
   if (Node.isFunctionDeclaration(fn) || Node.isMethodDeclaration(fn)) {
     return fn.getName();
   }
-  const variable = fn.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
-  if (variable) return variable.getName();
-  const property = fn.getFirstAncestorByKind(SyntaxKind.PropertyAssignment);
-  if (property) return stripQuotes(property.getName());
+  let node: Node = fn;
+  let parent = node.getParent();
+  while (
+    parent &&
+    (Node.isParenthesizedExpression(parent) ||
+      Node.isAsExpression(parent) ||
+      Node.isSatisfiesExpression(parent) ||
+      Node.isNonNullExpression(parent) ||
+      (Node.isCallExpression(parent) && parent.getArguments().includes(node as never)))
+  ) {
+    node = parent;
+    parent = node.getParent();
+  }
+  if (parent && Node.isVariableDeclaration(parent)) return parent.getName();
+  if (parent && Node.isPropertyAssignment(parent)) return stripQuotes(parent.getName());
   return undefined;
 }
 

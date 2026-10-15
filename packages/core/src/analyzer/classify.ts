@@ -44,13 +44,15 @@ const SERVER_MODULES = [
   /^ioredis$/,
   /^bullmq$/,
   /^node:/,
+  // Next.js's server-only entry points: a request helper importing `NextRequest`.
+  /^next\/(?:server|headers|cache)$/,
 ];
 
 /** Modules that only make sense in a browser bundle. */
 const CLIENT_MODULES = [
   /^react$/,
   /^react-dom/,
-  /^next\//,
+  /^next\/(?!(?:server|headers|cache)$)/,
   /^vue$/,
   /^svelte/,
   /^@angular\//,

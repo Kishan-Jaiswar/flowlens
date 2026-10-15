@@ -131,7 +131,8 @@ export function renderTimings(flow: FeatureFlow, options: RenderOptions = {}): s
   const lines = rows.map((row) => `${row.name.padEnd(width)}  ${String(row.ms).padStart(8)}ms`);
 
   lines.push(g.rule.repeat(width + 12));
-  lines.push(`${'Total'.padEnd(width)}  ${String(flow.totalMs ?? 0).padStart(8)}ms`);
+  // The outermost span: steps that ran side by side are each listed in full above.
+  lines.push(`${'End to end'.padEnd(width)}  ${String(flow.totalMs ?? 0).padStart(8)}ms`);
   return lines.join('\n');
 }
 

@@ -7,6 +7,407 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A card that only shows data has its six tabs too.** "97% Stock health" is
+  followed back through what the code says: `pct` is worked out from `inStock`
+  and `total`, those from `data.lowStockCount` and two other fields, `data` is
+  a prop handed down twice from the page's `useDashboard()`, that hook is
+  `GET /dashboard`, and the server builds `lowStockCount` in an aggregation's
+  `$sum`. Selecting the card shows, in Docs, how the data gets here, where the
+  server makes each field, what the browser works out and what each value is
+  drawn as; in Decisions, what decides whether and how it is drawn (the page
+  waiting for its data, a Good / Fair / Low status, an empty list); in Issues &
+  impact, the fields it depends on and the other cards that read them. The
+  load that brings the data is stacked under it in every tab. A link inside a
+  card — the "3,391 Low" tile — is read for the number it shows first, the
+  one tile it stands for, and then for what clicking it does (`/api/card`).
+- **The sidebar is a copy of the app's own.** When the app writes its menu
+  down as data — `[{ name: "Billing", link: BILLING }, …]` mapped over by a side
+  menu — `serve` reads it (following `link` through imported constants) and the
+  dashboard's sidebar becomes that menu, in its order, with every action in the
+  app placed in it:
+  - each screen is laid out top to bottom, read from its JSX: what runs as it
+    opens, then every control, and each card, panel or dialog — named by the
+    title it shows (`title="Needs attention"`, `<CardTitle>Expiring soon`) —
+    as a child entry holding its own loads, controls and links;
+  - links are rows too ("View all → Stock History", the Low / Stockout /
+    Expiring tiles spelled out from the array they are mapped from, "each row
+    → Medicines › Details"), and clicking one opens the screen it leads to;
+  - actions that never reach the backend (a filter, a field, opening a dialog)
+    are listed by default — "include local-only actions" starts checked;
+  - a sub-entry that picks a tab (`{ name: "Timing", tab: 1 }`) holds the
+    actions of the component that tab shows;
+  - screens the menu does not open are nested under the screen that leads to
+    them — by route (`/medicines/[id]` under _Medicines_) or by a navigation on
+    it (`router.push(\`/patient_detail/${id}\`)`, `<Link href>`, through route
+    constants); one opened from several screens is listed under each;
+  - the menu's own buttons ("+ Add Walk-In") are rows at the top, parts on most
+    screens (a header, a right-hand panel) are one "Header & layout" entry, and
+    login, sign-up and password pages come first;
+  - only screens nothing links to end up in "Other screens" at the bottom.
+  - clicking a page in the sidebar explains it in plain words instead of tabs:
+    what it is, what it fetches by itself when it opens, then every thing the
+    user can do on it from top to bottom, card by card — "You fill in Phone
+    number and One-time password. You click "Send OTP". The app first checks
+    what was entered… You see an error if you tried too many times in a row.
+    When it works, a pop-up message confirms it." — read off each action's
+    document, with data named in words (`clinicsettings` is "clinic
+    settings"), where its links go, and the pages it leads to;
+  - what is on a page — an action, a card, a dialog, a settings tab — has the
+    six tabs: a card's show each of its actions' own tab in full, one after
+    another in screen order. `#entry=<key>` links to any of them
+    (`/api/scope` in `serve`, new `scopeSummary()` in `@flowslens/core`, for
+    the header and tab badges);
+  - a link row's six tabs are the flow it sets off, in full — what the screen
+    it opens runs as it opens (_Low_ is _Medicines view loads_, reached with
+    `stockFilter=low-stock`) — with what the click does said above the steps;
+  - a link's Decisions tab draws only that link's feature: the click, the
+    address it opens, where the page reads the value (`stockFilter`), the one
+    request that carries it, the sign-in check, the server's check on the value
+    and the branch it picks — "low-stock — this link", with the other cases
+    marked "Not for this link" — then the queries and what the page shows. The
+    page's other requests and the API client around every call are left to the
+    page's tabs (`linkDecisions()` in `@flowslens/core`; `/api/decisions` takes
+    `link`, `label`, `from`);
+  - typing in a field, ticking a box or moving focus is filling a form in, not
+    an action: such events that stay in the browser are left out (a login page
+    of two buttons no longer lists its phone and OTP inputs); a field that calls
+    the backend as it changes stays;
+  - clicking a row no longer scrolls the list.
+
+  The sidebar has two parts: "In the app's menu" — the pages the app's own
+  menu shows, in its order, with what they lead to — and "Other pages" —
+  sign-in pages, what is on every page, the menu's own buttons, and screens
+  nothing links to. An app without such a menu keeps the by-page list. New `appNavigation()` and
+  `appSidebar()` in `@flowslens/core`, and `/api/navigation` in `serve`.
+
+### Changed
+
+- **The sidebar opens folded.** Every page, menu entry and shared group starts
+  closed, so the list reads as an outline of the app; "Expand all" opens them.
+  Reloading keeps the selection in the address (`#flow=…`, `#entry=…`) but
+  unfolds nothing; selecting an action from another tab still opens the group
+  it is in.
+- **A component on three or more pages is listed once.** The sidebar gave a
+  walk-in form that 27 pages can open 27 copies, and burying each page's own
+  buttons under the same shared rows. It now has its own group ("Walk in form ·
+  shared · on 27 pages"), and every page that renders it links to it under
+  "Also on this page".
+- **What the user can do comes first.** Within a page, buttons and forms are
+  listed first and "When the page opens" is folded underneath, opening by
+  itself when you search or select one of its actions.
+- **Pages are named the way the browser tab names them.** `<title>Bills ||
+MyClinic</title>` (or App Router `metadata.title`) makes `/billing` "Bills",
+  with the route underneath; the sidebar search matches the title too.
+- **Clearer titles.** A page component called `Index` no longer gives "Medication
+  · Index loads" ("Medication loads"), and two components with one name are
+  told apart by their file name ("Time slot popup new") rather than the full
+  path.
+
+### Fixed
+
+- **A second audit against MediStock, fixed.** Every item below was checked
+  against the app's code.
+  - **Popups.**
+    - A dialog's form runs through the form's own validation (the per-page copy
+      of its submit is the action shown, under the name the page gives it:
+      "Save medicine", "Update medicine").
+    - Its fields are named by their labels, not their placeholders, and a long
+      form is counted ("and 14 more").
+    - A popup's own controls are not mixed with a dropdown widget's internals.
+    - A file input is "Choose a file", and picking a file is a step before
+      "Continue".
+    - A dialog's own load is not taken as the thing the user presses.
+    - "Save update" in a dialog is its own action, not a relay of the dialog's
+      close, and the Close row is described through Cancel, not Save's
+      `onSuccess`.
+    - Docs names the page and the opener of the copy it describes.
+  - **What happens after an answer.**
+    - The `useEffect` that reacts to a query's answer is drawn ("Import
+      complete" / "Import failed"), and so is code that runs as the component
+      draws with it (auto-select the only clinic, "Medicine not found", the
+      loading placeholder).
+    - A job's background worker is drawn after the response, with its
+      `on("failed")` handler.
+    - `.catch(() => {})` reads "the error is ignored", and Docs says the steps
+      after it run either way.
+    - `invalidateQueries()` with no key says the data on screen loads again.
+  - **What the server answers.**
+    - A route's own `catch` answer (503 "Could not queue the import") is in
+      Docs.
+    - A message passed through a result (`apiError(result.error)`) is read from
+      the function that returns it ("Medicine not found").
+    - A success body leaves out the shape the route already answered with an
+      error.
+    - A query run only under a condition in its caller says so ("when
+      `updated.currentStock !== previousStock`"), not "always".
+    - An update with `{ upsert: true }` reads "upsert".
+    - A server-side `fetch(config.url)` is an outside call, shown in Docs.
+  - **Decisions.**
+    - The search debounce ("once the typing has stopped for 350 ms") is drawn.
+    - So are a `??` default on an input or a query's answer, an input compared
+      with a fixed value, an aggregation's `{ ownerId }` match, and
+      `ensureIndexes`.
+  - **The sidebar.**
+    - The mobile and desktop copies of a row's button are one feature.
+    - A page's tabs are parts of their own, named by the tab button, each with
+      its own pager. Their features are counted.
+    - Breadcrumb links handed to a component as data are listed.
+    - A link whose words are row data is named by its fields (`‹name›`).
+    - A section title chosen by a prop uses the prop this page passes ("Batch /
+      purchase lot (active batch)").
+    - Two buttons with one name in one component are told apart by the screen
+      each is on ("Sign out — on "No clinic access"").
+    - A widget's own controls used on most pages are not listed under the
+      layout.
+    - A menu link shows the pages it goes to.
+  - **Docs.**
+    - A field filled on an earlier step is marked "entered earlier", not
+      counted again.
+    - A preprocess that fills in a blank makes the field optional.
+    - An enum's values are read from the constant list it names, with its
+      message.
+    - Every field the schema takes is listed, `remarks` included.
+    - "Disabled while `!canSave`" no longer claims to stop a double send; the
+      button's `loading` does.
+    - A component drawn in two places lists both, and a page load names its
+      page.
+    - Titles that share a name are told apart by the fewest words that do it.
+  - **Timing.**
+    - "Observed duration" is the outermost span, not a sum of steps that ran
+      at the same time.
+    - A click counts as traced only if its own click was recorded, not because
+      a request it shares was timed from another button. "Confirmed by runtime
+      tracing" follows the same rule.
+    - Two of the same query under one request are matched to their own lines,
+      in the order they started.
+    - A function whose query was seen running is not "never observed".
+  - **Findings.** Independent reads with plain work between them are flagged.
+  - **Cards.**
+    - A card says what it asks for
+      (`{ expiring: true, sortBy: "expiryDate", pageSize: 5 }`).
+    - A value handed to a component is shown through it (`<ExpiryBadge>`).
+    - A pipeline total is followed back through the field it sums
+      (`$cost` → `batchSumExpr`).
+
+- **Popups written as their own component are features too.** Some buttons
+  open a dialog that lives in another file: `<AddMedicineDialog
+  open={addOpen} />`, `<ImportDialog>`, `<AdjustStockDialog>`. Each is now one
+  row whose flow runs from the click through the dialog's save request.
+  Before, these rows read "stays in the browser". A wizard's earlier step
+  ("Continue" to a preview) is drawn before its main one ("Import rows"). The
+  dialog's own load is no longer taken as the thing the user presses.
+- **A button that calls `router.push` says where it goes.** Examples: View →
+  Medicines › Details, Edit → Medicines › Edit, Back → Medicines. The route
+  keeps every segment of a template string:
+  `/medicines/${id}/edit` is `/medicines/[param]/edit`, not `/medicines/…`.
+- **An empty state with a title is a part of the screen.** The second "Add
+  medicine" and the "Clear filters" that only show when nothing is found are
+  listed under "No medicines found".
+- **Smaller fixes:**
+  - Each query in a `Promise.all` is named after its own result in Docs.
+  - A `new Map()` called `cache` is no longer listed as leaving the app.
+
+- **The Decisions tab now matches a hand-traced chart of a NestJS + axios
+  download, end to end.** Checked against a hand trace of Billing → Download
+  Report:
+  - Passport's own check comes before the strategy's `validate`: a Bearer token
+    signed with the secret (and whether its expiry is checked), and a 401 when
+    it is missing or forged, or when `validate` gives back nothing.
+  - An aggregation is drawn per record: each `$lookup` names the collection it
+    reads, `$unwind` without `preserveNullAndEmptyArrays` leaves out a record
+    with no match, and each `$match` (including `$size: 0`) is a decision.
+  - The API client's request interceptor, and its success and error answers,
+    are drawn as a branch. An error interceptor that sends a 401 to the login
+    page and returns nothing resolves the request with `undefined`, so the next
+    `response.data` throws and the screen's `catch` runs. Before, the success
+    steps were drawn as if they still ran.
+  - The request wrapper's send step says which Authorization header this caller
+    gets, its timeout and its `responseType`. A `catch` that reads
+    `error.response.data.message` after asking for a Blob is flagged: that
+    message is never read.
+  - The browser's file save (`createObjectURL`, `click`, `revokeObjectURL`),
+    `app.useGlobalPipes(…)` and the DTO a `ValidationPipe` checks are drawn.
+  - A helper called inside an `if` condition, or inside the value being set,
+    is no longer drawn a second time.
+- **Docs lists every collection a request reads.** That includes collections
+  joined by `$lookup`, and the reads the middleware does to find the user
+  (through `new Guard().canActivate()` and Passport's `validate`). Two
+  `findById`s in one Nest method are now two queries.
+- **Decision trees build much faster on large apps.** A condition's variable
+  is looked up in the syntax tree rather than through the type checker. A
+  file's functions, calls and local variables are each indexed once instead of
+  scanned on every lookup. On a 1,800-action app, Download Report's tree went
+  from 6.8 s to 0.6 s, and every tree together builds in about 6 minutes in
+  steady memory (2.9 GB). Before, the server ran out of memory.
+
+- **Every tab says what the code really does, in the order it does it.** An
+  audit of a real Next.js + Mongo app against its source found, and this fixes:
+  - steps were sorted by depth, then alphabetically: the service came before
+    the access check the handler runs first, and a toast in `onSuccess` before
+    the request it reports on. Steps now follow the code, depth first, each
+    function's calls in the order written; what `onSuccess`/`.then` runs comes
+    after the response, and a check halfway down a handler is no longer said to
+    run "before any work";
+  - every page load read "Success: nothing visible · Error: not handled". What
+    the screen shows is read from the component — the skeleton while loading,
+    the empty state, the error state, a redirect — through context too (a
+    provider's `loading`/`error`/`status` followed to the gate or layout that
+    acts on it);
+  - runtime tracing turned a click on a menu link into an action
+    "GET /settings — no auth check"; pages the browser opens are not requests;
+  - wrapper buttons (`<button onClick={onClick}>` in `IconBtn`), a dialog's
+    backdrop and a form's own Save that only hands its values up were listed
+    beside the real actions; a control shared by several pages (Prev/Next,
+    Sort) was placed on pages that never give it what it needs, and a
+    component name two files define privately carried one page's controls onto
+    another. A shared control is now one action per page, each with its own
+    request;
+  - missing work: writes in a module's private helper (`recordMovement`), the
+    second of two identical queries in one function, the background worker a
+    queued job runs (BullMQ/Bull, after the response), the refetch a filter,
+    sort, page or tab change sets off, and `useMutation`/`useQuery` written in
+    the component;
+  - a query switched off by `enabled` was counted as loading with the page; a
+    list shown only on a tab is "when shown", not "on load";
+  - invalidations were matched to endpoints by a word in the URL; they now
+    match by query key, as React Query does;
+  - names nobody can read — "as", "button onClick", "View close (line 373)",
+    "Import row s (${n} ignored)" — are now the words on screen, the field a
+    control is bound to, the heading above a list, "Close …", "Open …";
+  - an action is only timed when its own request was traced, not by a step it
+    shares with another action;
+  - the sidebar count, the page header and the page summary count the same
+    things; `#tab=…&flow=…` links work without a reload, and Back/Forward too.
+
+- **A feature behind a popup is one row, with its whole flow in every tab.**
+  "Download Report" opens a popup where the user picks two dates and presses
+  "Download". The button that opens a popup is joined to the popup's main
+  action (the one that sends a request: a submit, or a "Download"/"Save"-like
+  button), so its tabs run from the first click, through "in the popup, the
+  user fills Start date, End date and presses Download", to the request, the
+  middleware, controller, service and collections. In the sidebar it is a
+  single row, not a fold of the popup's buttons. An `@Res()` handler's
+  `res.status(400).json(…)` is now in the Docs tab's responses too, and a
+  controller's decorators are no longer listed as calls.
+
+- **A page's children are its features, as a user would list them.** Billing
+  read as 26 rows; it is now Download Report, Add New Bill, Paid / Outstanding,
+  the search, the date filter, each bill's actions and the pager:
+  - a popup is the feature of the button that opens it — found from what the
+    button sets (`setOpenDownloadReportPopup(true)`, `open={addOpen}`), named
+    after it when it has no title, with its dates, Download and Close inside;
+  - the buttons repeated on every row of a list are one part, "Each bill" (the
+    desktop table and the phone cards once); a pager is one part;
+  - a shared widget's own mechanics (a dropdown opening its list), a
+    component's inner control the page already names (the tab button inside
+    `<Tabs onChange>`), and empty popups are not listed;
+  - a search box, a date filter, tabs and page buttons that reload a list
+    through `useEffect(…, [search, date, page])` show the request they cause,
+    instead of being hidden as "stays in the browser";
+  - setters are paired with their state by position in `useState`, so
+    `[openBillingPopup, setOpenBIllingPopup]` is recognised;
+  - the sidebar count, the page header and the summary count a page's features
+    the same way: its controls, links and each part once — not what is inside a
+    part, not the pages it leads to, not what loads by itself.
+
+- **The Decisions chart follows a request the whole way, as a hand-traced one
+  does.** Checked against a hand-drawn chart of a Next.js + NestJS "Download
+  report":
+  - an endpoint called from several screens drew another screen's code; each
+    action now draws its own call;
+  - the app's request wrapper (`getRequest()` picking the token) and its
+    client's interceptor (a 401 sent to the login page) are opened;
+  - NestJS middleware applied in `configure(consumer)` — `apply`, `exclude`,
+    `forRoutes` with paths, methods and controllers — runs in front of the
+    routes it covers, opened, with the Passport strategy behind
+    `AuthGuard('jwt')`;
+  - an `@Res()` handler's `res.status(400).json(…)` and `res.send(…)` are its
+    answers (the catch no longer reads "the error is ignored"), headers it sets
+    are steps, and a default filled in from an input (`from ? … : a week ago`)
+    is a decision;
+  - a prop the page passes (`onSubmit={updateMedicine}`) is followed into the
+    page's function; a load runs every function it calls as it opens; a
+    `setTimeout` callback is drawn as "after 250 ms";
+  - a capitalised handler (`const Discard = () => …`) and a callback handed to a
+    child (`onSave={() => save()}`) are no longer counted as running when the
+    page opens; closing a part (`setOpen(false)`) no longer loads it;
+  - a request set off by a state change is labelled as such, and a `catch` that
+    only logs says so. A crash on `obj.hasOwnProperty(…)` in a condition is
+    fixed.
+
+- **Nothing in Flowslens knows any one app's words.** What it used to match by
+  name is now read from the scanned project:
+  - the tenant field is the id field its queries filter by across the most
+    collections (`ownerId`, `orgId`, `garageId` alike), not one of a list of
+    names;
+  - an auth or membership check is any of the project's helpers that answers
+    401 or 403 (`requireTeam`, `requireGarage`, …), as well as the generic
+    names (`requireAuth`, `verifyToken`); a decision tree's "checks first"
+    reads the same way;
+  - a glued collection name (`teamsettings`) is split with the words the
+    project writes in its own identifiers (`getTeam`, `getSettings`), and
+    acronyms are the ones it writes in capitals (`sendOTP`) — the built-in word
+    list of business nouns is gone.
+- **Each query in a decision tree says what it does.** A dashboard handler's
+  six reads of two collections drew as "Read medicines" three times and "Read
+  movements" three times. Each now says where its result goes and what it asks
+  for, read off the call:
+  - `→ recentlyAdded · where ownerId · newest createdAt first · up to 5`
+  - `→ todaysUpdates · counts where ownerId, createdAt (range)`
+  - `→ rollup · pipeline $match → $project → $facet (totals, categories)`
+  - a count is `Count movements` and a pipeline `Aggregate medicines`; "Copy as
+    text" carries the same line.
+- **A recorded query is placed where the request really runs it.** A span
+  names only `movements.countDocuments`, and an app runs that in several
+  functions; the merge took the first one in the graph, so the dashboard's own
+  count was shown on the stock-history list's line, and a page seemed to run
+  queries it never ran. The request a query ran under now decides: the query
+  site its handler reaches in the code. With several sites and none reached,
+  it stays a query seen at runtime rather than a guess at another function's.
+- **A request helper importing `next/server` is server code.** `NextRequest`
+  made `lib/api/server.ts` read as browser code, so an access check every route
+  runs (`requireClinic` → `hasClinicAccess` → its queries) was invisible to the
+  static read, and showed up only on the routes a trace happened to record.
+  `next/server`, `next/headers` and `next/cache` now mark a module as server.
+- **Decision trees left out parts of the feature.** An audit of every tree of a
+  real app against its source found, and these now draw:
+  - a helper whose decisions only set values — a query filter built field by
+    field (`if (query.category) filter.category = …`), a match pushed in a loop
+    (`if (contact) matched.push(…)`) — and a `switch` that only picks which
+    value to return; before, such helpers showed as one line, hiding the
+    branches that define the feature;
+  - a throw nothing catches on the way out of a route, which now ends in the
+    500 the framework answers instead of a bare "throws";
+  - a helper called with different arguments, each call on its own:
+    `requireEnv("MONGODB_URI")` and `requireEnv("CLINICS_DB")` are two checks,
+    and "opened above" no longer points at a call that was never drawn;
+  - a button's `disabled={…}`, as the first decision of its click;
+  - `refetchInterval` polling, as a loop around the request; and the requests a
+    page starts as it opens, as starting together;
+  - helpers ten calls deep instead of seven, so checks deep in a sign-in path
+    are followed.
+- **A page the browser opened was reported as a broken API call.** A Next.js
+  `<Link>` fetches the page from its own address, so runtime tracing recorded
+  `GET /stock`; it is now drawn as the page opening, with the loads that page
+  runs, and is left out of the broken calls.
+
+- **`onSubmit={handleSubmit(save)}` reached nothing.** React Hook Form's
+  wrapper (and `form.handleSubmit`) is now followed to the function it calls,
+  so those forms — often the main button on a screen — appear as actions with
+  their requests.
+- **A form was named after the wrong button.** The label now comes from the
+  `type="submit"` element, whatever component it is (`<PrimaryButton
+type="submit">`), including one outside the form linked by `form="id"`; a
+  `type="button"` is never used. Text from a `? :` branch or a template string
+  counts, and busy text ("Adding...", "Cancelling...") is skipped in favour of
+  the real label or the handler's name.
+- **Actions missing from their page.** A component rendered only by another
+  component in its own file (a table cell), and a default import renamed at the
+  import (`import LibraryPreview from "./MaterialLibraryPreview"`), are now
+  followed up to the page.
+
 ## [1.3.1] - 2026-10-05
 
 ### Fixed

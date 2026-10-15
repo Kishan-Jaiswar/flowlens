@@ -38,7 +38,7 @@ export function analyzeServerModules(
   prisma?: PrismaSchema,
 ): number {
   /** Exported function name -> the nodes declaring it. */
-  const declared = new Map<string, Array<{ id: string; file: string }>>();
+  const declared = new Map<string, Array<{ id: string; file: string; exported: boolean }>>();
   const bodies: Array<{ id: string; file: SourceFile; rel: string; scope: Node }> = [];
   const candidates = new Set<string>();
 
@@ -60,9 +60,10 @@ export function analyzeServerModules(
         source: { file: rel, line: lineOf(fn.scope) },
         meta: { layer: 'module', module: rel },
       });
+      const entry = { id, file: rel, exported: fn.exported };
       const list = declared.get(name);
-      if (list) list.push({ id, file: rel });
-      else declared.set(name, [{ id, file: rel }]);
+      if (list) list.push(entry);
+      else declared.set(name, [entry]);
       bodies.push({ id, file, rel, scope: fn.scope });
       candidates.add(id);
     }
@@ -129,13 +130,16 @@ function linkCalls(
   scope: Node,
   rel: string,
   fromId: string,
-  declared: Map<string, Array<{ id: string; file: string }>>,
+  declared: Map<string, Array<{ id: string; file: string; exported: boolean }>>,
 ): number {
   let linked = 0;
   for (const call of callsIn(scope)) {
     const callee = calleeName(call);
     if (!callee || callee.includes('.')) continue;
-    const targets = declared.get(callee);
+    // A module's private helper is only callable from inside that module.
+    const targets = declared
+      .get(callee)
+      ?.filter((candidate) => candidate.exported || candidate.file === rel);
     if (!targets || targets.length === 0) continue;
     // Prefer a declaration in this file, then an unambiguous one elsewhere.
     const target =
@@ -160,8 +164,10 @@ function pruneQuerylessModules(graph: FlowGraph, candidates: Set<string>): void 
   for (const id of candidates) {
     if (!graph.hasNode(id)) continue;
     let reachesQuery = false;
-    for (const reachedId of graph.reachable(id, { kinds: ['calls', 'queries'] }).keys()) {
-      if (graph.node(reachedId)?.kind === 'db-op') {
+    // A query, or a call that leaves the app (the SMS gateway behind `sendOtpSms`).
+    for (const reachedId of graph.reachable(id, { kinds: ['calls', 'queries', 'emits'] }).keys()) {
+      const kind = graph.node(reachedId)?.kind;
+      if (kind === 'db-op' || kind === 'external-effect') {
         reachesQuery = true;
         break;
       }
@@ -187,10 +193,16 @@ function verbScope(file: SourceFile, verb: string): Node | undefined {
 interface ExportedFunction {
   name: string;
   scope: Node;
+  /**
+   * Private helpers are declared too: `recordMovement`, not exported, is where
+   * every stock change writes its audit row, and skipping it lost that write
+   * from every action that makes one.
+   */
+  exported: boolean;
 }
 
 /**
- * Exported functions, in both shapes real code uses.
+ * Top-level functions, exported or not, in both shapes real code uses.
  *
  *   export async function adjustStock() {}
  *   export const adjustStock = async () => {}
@@ -199,13 +211,12 @@ function exportedFunctions(file: SourceFile): ExportedFunction[] {
   const out: ExportedFunction[] = [];
 
   for (const fn of file.getFunctions()) {
-    if (!fn.isExported()) continue;
     const name = functionName(fn);
-    if (name) out.push({ name, scope: fn });
+    if (name) out.push({ name, scope: fn, exported: fn.isExported() });
   }
 
   for (const statement of file.getVariableStatements()) {
-    if (!statement.isExported()) continue;
+    const exported = statement.isExported();
     for (const declaration of statement.getDeclarations()) {
       const initializer = declaration.getInitializer();
       if (!initializer) continue;
@@ -216,7 +227,7 @@ function exportedFunctions(file: SourceFile): ExportedFunction[] {
       ) {
         continue;
       }
-      out.push({ name: declaration.getName(), scope: initializer });
+      out.push({ name: declaration.getName(), scope: initializer, exported });
     }
   }
 

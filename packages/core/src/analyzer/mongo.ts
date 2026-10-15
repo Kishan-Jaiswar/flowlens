@@ -1,3 +1,4 @@
+import { Node } from 'ts-morph';
 /**
  * Mongo/Mongoose knowledge: which calls touch the database, what each one does
  * to it, and which physical collection a model name maps to.
@@ -145,8 +146,6 @@ const IRREGULAR: Record<string, string> = {
   mouse: 'mice',
   goose: 'geese',
   datum: 'data',
-  analysis: 'analyses',
-  diagnosis: 'diagnoses',
   index: 'indexes',
   history: 'histories',
 };
@@ -166,6 +165,8 @@ export function pluralize(word: string): string {
   const lower = word.toLowerCase();
   const irregular = IRREGULAR[lower];
   if (irregular) return irregular;
+  // Mongoose's `sis` rule: `analysis` -> `analyses`, `thesis` -> `theses`.
+  if (lower.endsWith('sis')) return `${word.slice(0, -2)}es`;
   if (/(ss|x|z|ch|sh)$/.test(lower)) return `${word}es`;
   // Already plural (or a mass noun like "settings", "data", "news").
   if (lower.endsWith('s')) return word;
@@ -195,3 +196,11 @@ export const SCHEMA_TYPES = new Set([
   'Map',
   'Array',
 ]);
+
+/** `{ upsert: true }` among a write's options: it inserts the document when none matches. */
+export function upsertsIn(call: Node): boolean {
+  return (
+    Node.isCallExpression(call) &&
+    call.getArguments().some((arg) => /\bupsert\s*:\s*true\b/.test(arg.getText()))
+  );
+}

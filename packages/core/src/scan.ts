@@ -9,6 +9,8 @@ import {
 import { collectConstants, type ConstantTable } from './analyzer/constants.js';
 import { analyzeFileRoutes } from './analyzer/fileroutes.js';
 import { analyzeServerModules } from './analyzer/servermodules.js';
+import { linkQueueWorkers } from './analyzer/queues.js';
+import { linkGuardCalls, linkNestConsumerMiddleware } from './analyzer/middleware.js';
 import { collectionAliasesOf } from './analyzer/dbaccess.js';
 import { isEmptyPrismaSchema, loadPrismaSchema } from './analyzer/prisma.js';
 import { detectProjects, loadProject, type ScanOptions } from './analyzer/project.js';
@@ -194,6 +196,9 @@ export function scan(options: ScanOptions & FlowslensConfig): ScanResult {
 
   analyzeFrontend(loaded, graph, frontendConfig);
   analyzeBackend(loaded, graph, { ...backendConfig, collectionAliases, prisma });
+  // After the routes exist: `configure(consumer)` puts middleware in front of them.
+  linkNestConsumerMiddleware(loaded.sourceFiles, (file) => loaded.rel(file), graph, apiPrefixes);
+  linkGuardCalls(loaded.sourceFiles, graph);
   // File-system routes (Next.js `pages/api`, App Router, Nuxt) are a backend
   // with no controllers to find, so they need their own pass.
   const fileRoutes = analyzeFileRoutes(loaded, graph, { apiPrefixes, collectionAliases, prisma });
@@ -203,6 +208,8 @@ export function scan(options: ScanOptions & FlowslensConfig): ScanResult {
    * because it joins the route handlers those declared to the module functions.
    */
   analyzeServerModules(loaded, graph, collectionAliases, prisma);
+  // After the module pass: the worker's processor is one of its functions.
+  linkQueueWorkers(loaded, graph);
   /**
    * How the collections link to each other — last of the data passes, because
    * an inferred link is only reported when the collection on the other end is

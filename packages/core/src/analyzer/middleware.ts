@@ -13,7 +13,7 @@
  * could stop it.
  */
 
-import { Node, type ClassDeclaration, type MethodDeclaration } from 'ts-morph';
+import { Node, SyntaxKind, type ClassDeclaration, type MethodDeclaration } from 'ts-morph';
 import type { FlowGraph } from '../graph/graph.js';
 import { ids } from '../graph/ids.js';
 import { lineOf } from './ast.js';
@@ -168,7 +168,8 @@ function addMiddleware(graph: FlowGraph, input: MiddlewareInput): number {
     from: input.routeId,
     to: id,
     kind: 'guarded-by',
-    meta: { role: input.role, scope: input.scope },
+    // Where it is applied to this route: one middleware is applied in many places.
+    meta: { role: input.role, scope: input.scope, file: input.file, line: input.line },
   });
   return 1;
 }
@@ -196,4 +197,223 @@ function referencedName(node: Node): string | undefined {
   }
   if (Node.isPropertyAccessExpression(node)) return node.getName();
   return undefined;
+}
+
+/**
+ * Middleware a Nest module applies in `configure(consumer)`:
+ *
+ *   consumer.apply(StaffMiddleware).exclude({ path: 'api/x', method: GET }).forRoutes(AppointmentsController);
+ *
+ * is how a real Nest app puts its auth in front of most routes, and reading
+ * only `@UseGuards` decorators left every such route looking unprotected.
+ * `forRoutes` takes `'*'`, paths, `{ path, method }` and controller classes;
+ * `exclude` the same, minus the classes. Paths are matched with the API prefix
+ * stripped, as the routes are stored, and `:id` matches any segment.
+ */
+export function linkNestConsumerMiddleware(
+  files: readonly import('ts-morph').SourceFile[],
+  rel: (file: import('ts-morph').SourceFile) => string,
+  graph: FlowGraph,
+  apiPrefixes: readonly string[],
+): number {
+  const routes = graph
+    .nodesOfKind('route')
+    .filter((route) => route.meta?.['framework'] === 'nestjs');
+  if (routes.length === 0) return 0;
+  let linked = 0;
+  // `app.useGlobalPipes(new ValidationPipe(…))` in main.ts runs for every route.
+  const GLOBAL: Record<string, MiddlewareRole> = {
+    useGlobalPipes: 'pipe',
+    useGlobalGuards: 'guard',
+    useGlobalInterceptors: 'interceptor',
+    useGlobalFilters: 'filter',
+  };
+  for (const file of files) {
+    if (!file.getFullText().includes('useGlobal')) continue;
+    for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      const callee = call.getExpression();
+      const role = Node.isPropertyAccessExpression(callee) ? GLOBAL[callee.getName()] : undefined;
+      if (!role) continue;
+      for (const name of call.getArguments().map((argument) => referencedName(argument))) {
+        if (!name) continue;
+        for (const route of routes) {
+          // Applied on the controller as well: one step, where the route names it.
+          if (
+            graph
+              .edgesFrom(route.id, ['guarded-by'])
+              .some((edge) => edge.to === ids.middleware(name))
+          )
+            continue;
+          linked += addMiddleware(graph, {
+            name,
+            role,
+            routeId: route.id,
+            file: rel(file),
+            line: lineOf(call),
+            framework: 'nestjs',
+            scope: 'global',
+          });
+        }
+      }
+    }
+  }
+  for (const file of files) {
+    if (!file.getFullText().includes('forRoutes')) continue;
+    for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      const callee = call.getExpression();
+      if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'forRoutes') continue;
+      // Walk back down the chain: forRoutes(...) <- exclude(...) <- apply(...).
+      const targets = call.getArguments();
+      let excludes: Node[] = [];
+      let applied: Node[] = [];
+      for (
+        let link: Node | undefined = callee.getExpression();
+        link && Node.isCallExpression(link);
+        link = Node.isPropertyAccessExpression(link.getExpression())
+          ? (link.getExpression() as import('ts-morph').PropertyAccessExpression).getExpression()
+          : undefined
+      ) {
+        const inner = link.getExpression();
+        if (!Node.isPropertyAccessExpression(inner)) break;
+        if (inner.getName() === 'exclude') excludes = link.getArguments();
+        if (inner.getName() === 'apply') applied = link.getArguments();
+      }
+      const names = applied
+        .map((argument) => referencedName(argument))
+        .filter((name): name is string => name !== undefined && !PLUMBING.has(name));
+      if (names.length === 0) continue;
+      for (const route of routes) {
+        if (!targets.some((target) => routeMatches(target, route, apiPrefixes, true))) continue;
+        if (excludes.some((target) => routeMatches(target, route, apiPrefixes, false))) continue;
+        for (const name of names) {
+          linked += addMiddleware(graph, {
+            name,
+            role: 'middleware',
+            routeId: route.id,
+            file: rel(file),
+            line: lineOf(call),
+            framework: 'nestjs',
+            scope: 'module',
+          });
+        }
+      }
+    }
+  }
+  return linked;
+}
+
+/** Does a `forRoutes`/`exclude` argument cover this route? */
+function routeMatches(
+  target: Node,
+  route: { meta?: Record<string, unknown> },
+  apiPrefixes: readonly string[],
+  classes: boolean,
+): boolean {
+  const path = String(route.meta?.['path'] ?? '');
+  const method = String(route.meta?.['httpMethod'] ?? '').toUpperCase();
+  if (Node.isStringLiteral(target) || Node.isNoSubstitutionTemplateLiteral(target))
+    return pathMatches(target.getLiteralValue(), path, apiPrefixes);
+  if (Node.isIdentifier(target)) return classes && route.meta?.['controller'] === target.getText();
+  if (Node.isObjectLiteralExpression(target)) {
+    const pathProperty = target.getProperty('path');
+    const pathValue =
+      pathProperty && Node.isPropertyAssignment(pathProperty)
+        ? pathProperty.getInitializer()
+        : undefined;
+    if (
+      !pathValue ||
+      (!Node.isStringLiteral(pathValue) && !Node.isNoSubstitutionTemplateLiteral(pathValue))
+    )
+      return false;
+    if (!pathMatches(pathValue.getLiteralValue(), path, apiPrefixes)) return false;
+    const methodProperty = target.getProperty('method');
+    const methodValue =
+      methodProperty && Node.isPropertyAssignment(methodProperty)
+        ? (methodProperty.getInitializer()?.getText().split('.').pop() ?? 'ALL')
+        : 'ALL';
+    return methodValue === 'ALL' || methodValue === method;
+  }
+  return false;
+}
+
+/** `'/api/appointments/:id'` against the stored `/appointments/:param`; `*` matches the rest. */
+function pathMatches(pattern: string, path: string, apiPrefixes: readonly string[]): boolean {
+  const strip = (value: string): string[] => {
+    let text = `/${value.replace(/^\/+/, '')}`;
+    for (const prefix of apiPrefixes) {
+      if (text === prefix || text.startsWith(`${prefix}/`)) text = text.slice(prefix.length) || '/';
+    }
+    return text.split('/').filter(Boolean);
+  };
+  const want = strip(pattern);
+  const have = strip(path);
+  for (let index = 0; index < want.length; index += 1) {
+    const segment = want[index]!;
+    if (segment === '*' || segment.endsWith('*')) return true;
+    const actual = have[index];
+    if (actual === undefined) return false;
+    if (segment.startsWith(':') || actual.startsWith(':')) continue;
+    if (segment !== actual) return false;
+  }
+  return want.length === have.length || (want.length === 0 && pattern.trim() === '*');
+}
+
+/**
+ * Join a middleware or guard to the code it runs that no call names.
+ *
+ * `new JwtAuthGuard().canActivate(ctx)` inside a middleware, and
+ * `super.canActivate(ctx)` in `class JwtAuthGuard extends AuthGuard('jwt')` —
+ * which runs the Passport strategy registered as 'jwt', and its `validate`.
+ * Without these edges the staff and doctor reads that decide who the user is
+ * were missing from every request's database list.
+ */
+export function linkGuardCalls(
+  files: readonly import('ts-morph').SourceFile[],
+  graph: FlowGraph,
+): number {
+  const methods = new Map(graph.nodesOfKind('method').map((node) => [node.label, node.id]));
+  /** Passport strategy name -> its `validate` method's node. */
+  const strategies = new Map<string, string>();
+  for (const file of files) {
+    if (!file.getFullText().includes('PassportStrategy')) continue;
+    const library = file
+      .getImportDeclarations()
+      .map((declaration) => declaration.getModuleSpecifierValue())
+      .find((specifier) => /^passport-/.test(specifier))
+      ?.replace(/^passport-/, '');
+    for (const strategy of file.getClasses()) {
+      const extended = strategy.getExtends()?.getText() ?? '';
+      if (!/PassportStrategy\(/.test(extended)) continue;
+      const named = /,\s*['"`]([\w-]+)['"`]\s*\)/.exec(extended)?.[1] ?? library;
+      const id = methods.get(`${strategy.getName()}.validate`);
+      if (named && id) strategies.set(named, id);
+    }
+  }
+  let linked = 0;
+  for (const file of files) {
+    for (const owner of file.getClasses()) {
+      for (const method of owner.getMethods()) {
+        const from = methods.get(`${owner.getName()}.${method.getName()}`);
+        if (!from) continue;
+        for (const call of method.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+          const callee = call.getExpression();
+          if (!Node.isPropertyAccessExpression(callee)) continue;
+          const receiver = callee.getExpression();
+          let to: string | undefined;
+          if (Node.isNewExpression(receiver))
+            to = methods.get(`${receiver.getExpression().getText()}.${callee.getName()}`);
+          else if (receiver.getText() === 'super' && callee.getName() === 'canActivate') {
+            const wanted = /AuthGuard\(\s*['"`]([\w-]+)['"`]/.exec(
+              owner.getExtends()?.getText() ?? '',
+            )?.[1];
+            to = wanted ? strategies.get(wanted) : undefined;
+          }
+          if (!to || to === from) continue;
+          graph.addEdge({ from, to, kind: 'calls', meta: { line: lineOf(call) } });
+          linked += 1;
+        }
+      }
+    }
+  }
+  return linked;
 }

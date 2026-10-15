@@ -3,6 +3,7 @@ import { ids, slug } from '../graph/ids.js';
 import type { EdgeKind, FlowNode, TimingStats } from '../graph/types.js';
 import { bestRouteMatch, normalizePath } from '../analyzer/http.js';
 import { collectionNameOf, dbAccessOf, dbEffectOf } from '../analyzer/mongo.js';
+import { pageAtPath } from '../flow/pages.js';
 import { groupTraces, type SpanKind, type TraceEvent } from './trace.js';
 
 export interface MergeResult {
@@ -67,14 +68,65 @@ export function mergeRuntimeTrace(
       path: String(node.meta?.['path'] ?? ''),
     }));
 
-  for (const spans of traces.values()) {
+  /** What each node reaches in the source, read once per merge. */
+  const reach = new Map<string, Set<string>>();
+
+  /**
+   * The browser fetching one of the app's own pages — a Next.js `<Link>`
+   * loading `/settings` — is the user moving between pages, not a request. Kept,
+   * it became an action "Settings: GET /settings" that no route answers, with
+   * "no auth check — anyone can call it" on it.
+   */
+  const pageVisit = (span: TraceEvent): boolean => {
+    if (span.kind !== 'http-client') return false;
+    const attrs = span.attrs ?? {};
+    if ((attrs.httpMethod ?? 'GET').toUpperCase() !== 'GET') return false;
+    const raw = attrs.path ?? span.name;
+    if (apiPrefixes.some((prefix) => raw === prefix || raw.startsWith(`${prefix}/`))) return false;
+    const path = normalizePath(raw, apiPrefixes);
+    if (bestRouteMatch({ method: 'GET', path }, apiCalls)) return false;
+    if (bestRouteMatch({ method: 'GET', path }, routes)) return false;
+    return pageAtPath(graph, raw) !== undefined;
+  };
+
+  for (const all of traces.values()) {
+    const spans = all.filter((span) => !pageVisit(span));
     /** spanId -> resolved graph node id, so children can link to parents. */
     const resolved = new Map<string, string>();
     const selfTimes = selfTimeOf(spans);
 
-    for (const span of spans) {
-      const match = resolveSpan(graph, span, routes, apiCalls, apiPrefixes);
+    /**
+     * Queries last: a span says only `movements.countDocuments`, and an app
+     * runs that in several functions. The request it ran under — resolved
+     * first — says which one: the query site its handler reaches in the code.
+     */
+    const ordered = [
+      ...spans.filter((span) => span.kind !== 'db'),
+      ...spans.filter((span) => span.kind === 'db').sort((a, b) => a.startedAt - b.startedAt),
+    ];
+    /**
+     * The same query twice under one request — `medicines.find` for "recently
+     * added" and again for "recently updated" — starts in the order the code
+     * calls them: the first span is the first site, the second the second.
+     */
+    const seen = new Map<string, number>();
+    for (const span of ordered) {
+      const under = span.kind === 'db' ? nearestResolvedAncestor(span, spans, resolved) : undefined;
+      const sites = under ? staticReach(graph, under, reach) : undefined;
+      const key = `${under}|${span.attrs?.collection}|${span.attrs?.operation}`;
+      const nth = span.kind === 'db' ? (seen.get(key) ?? 0) : 0;
+      if (span.kind === 'db') seen.set(key, nth + 1);
+      const match = resolveSpan(graph, span, routes, apiCalls, apiPrefixes, sites, nth);
       if (!match) continue;
+      // A click the source does not know, that only opened a page: nothing to add.
+      if (
+        match.discovered &&
+        span.kind === 'ui-action' &&
+        !spans.some((child) => child.parentSpanId === span.spanId)
+      ) {
+        graph.removeNode(match.nodeId);
+        continue;
+      }
       if (match.discovered) result.discovered += 1;
       else result.matched += 1;
 
@@ -113,6 +165,10 @@ function resolveSpan(
   routes: Array<{ id: string; method: string; path: string }>,
   apiCalls: Array<{ id: string; method: string; path: string }>,
   apiPrefixes: string[],
+  /** For a query: what the request it ran under reaches in the source. */
+  sites?: Set<string>,
+  /** How many spans of this same query came before it under that request. */
+  nth = 0,
 ): SpanMatch | undefined {
   const attrs = span.attrs ?? {};
 
@@ -170,12 +226,26 @@ function resolveSpan(
       const operation = attrs.operation ?? 'find';
       const collection =
         attrs.collection ?? (attrs.class ? collectionNameOf(attrs.class) : 'unknown');
-      const existing = graph
+      const candidates = graph
         .nodesOfKind('db-op')
-        .find(
+        .filter(
           (node) =>
             node.meta?.['collection'] === collection && node.meta?.['operation'] === operation,
         );
+      /**
+       * The site the request's code reaches; failing that, the only site
+       * there is. With several and none reached, any pick could be another
+       * function's query — the one this request did not run.
+       */
+      const reached = (sites ? candidates.filter((node) => sites.has(node.id)) : []).sort(
+        (a, b) =>
+          (a.source?.file ?? '').localeCompare(b.source?.file ?? '') ||
+          (a.source?.line ?? 0) - (b.source?.line ?? 0),
+      );
+      const existing =
+        reached[nth % Math.max(reached.length, 1)] ??
+        (candidates.length === 1 || !sites ? candidates[0] : undefined) ??
+        candidates.find((node) => node.meta?.['discoveredAtRuntime']);
       if (existing) return { nodeId: existing.id, discovered: false };
       const id = ids.dbOp(collection, operation, 'runtime');
       /**
@@ -350,6 +420,31 @@ function nearestResolvedAncestor(
     parentId = byId.get(parentId)?.parentSpanId;
   }
   return undefined;
+}
+
+/**
+ * Every node `start` reaches through edges read from the source. Runtime
+ * edges are left out: one wrong guess must not become the reason for the next.
+ */
+function staticReach(
+  graph: FlowGraph,
+  start: string,
+  cache: Map<string, Set<string>>,
+): Set<string> {
+  const known = cache.get(start);
+  if (known) return known;
+  const seen = new Set<string>([start]);
+  const queue = [start];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    for (const edge of graph.edgesFrom(id)) {
+      if (edge.evidence === 'runtime' || seen.has(edge.to)) continue;
+      seen.add(edge.to);
+      queue.push(edge.to);
+    }
+  }
+  cache.set(start, seen);
+  return seen;
 }
 
 /** Pick the edge kind that matches the layers being connected. */

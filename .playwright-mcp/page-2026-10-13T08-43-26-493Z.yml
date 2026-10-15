@@ -1,0 +1,25 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]: ◎
+      - generic [ref=e5]:
+        - heading "Flowslens" [level=1] [ref=e6]
+        - paragraph [ref=e7]: loading…
+    - generic [ref=e8]:
+      - generic [ref=e9] [cursor=pointer]:
+        - checkbox "include local-only actions" [checked] [ref=e10]
+        - generic [ref=e11]: include local-only actions
+      - button "Rescan" [ref=e12] [cursor=pointer]
+      - link "Feature doc" [ref=e13] [cursor=pointer]:
+        - /url: "#"
+  - main [ref=e14]:
+    - complementary [ref=e15]:
+      - generic [ref=e16]:
+        - generic [ref=e18]:
+          - heading "Actions" [level=2] [ref=e19]
+          - paragraph
+        - generic [ref=e20]:
+          - searchbox "Search actions, pages or APIs" [ref=e21]
+          - generic "Press / to search": /
+      - heading "Findings" [level=2] [ref=e24]
+    - tablist "Feature views" [ref=e26]

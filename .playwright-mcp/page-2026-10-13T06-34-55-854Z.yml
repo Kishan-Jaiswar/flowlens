@@ -1,0 +1,126 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]: ◎
+      - generic [ref=e5]:
+        - heading "Flowslens" [level=1] [ref=e6]
+        - paragraph [ref=e7]: 639 nodes · 1141 edges · 106 files
+    - generic [ref=e8]:
+      - generic [ref=e9] [cursor=pointer]:
+        - checkbox "include local-only actions" [checked] [ref=e10]
+        - generic [ref=e11]: include local-only actions
+      - button "Rescan" [ref=e12] [cursor=pointer]
+      - link "Feature doc" [ref=e13] [cursor=pointer]:
+        - /url: /api/document?flow=dashboardpage-dashboardpage-loads
+  - main [ref=e14]:
+    - complementary [ref=e15]:
+      - generic [ref=e16]:
+        - generic [ref=e17]:
+          - generic [ref=e18]:
+            - heading "Actions" [level=2] [ref=e19]
+            - paragraph [ref=e20]: 145 actions on 7 pages
+          - button "Expand all" [ref=e21] [cursor=pointer]
+        - generic [ref=e22]:
+          - searchbox "Search actions, pages or APIs" [ref=e23]
+          - generic "Press / to search": /
+      - generic [ref=e24]:
+        - group [ref=e25]:
+          - generic "Dashboard /dashboard 2" [ref=e26] [cursor=pointer]:
+            - generic [ref=e31]:
+              - generic [ref=e32]: Dashboard
+              - generic [ref=e33]: /dashboard
+            - 'generic "2 things you can do here: actions and links" [ref=e34]': "2"
+        - group [ref=e35]:
+          - generic "Login /login 4" [ref=e36] [cursor=pointer]:
+            - generic [ref=e41]:
+              - generic [ref=e42]: Login
+              - generic [ref=e43]: /login
+            - 'generic "4 things you can do here: actions and links" [ref=e44]': "4"
+        - group [ref=e45]:
+          - generic "Medicines /medicines 72" [ref=e46] [cursor=pointer]:
+            - generic [ref=e51]:
+              - generic [ref=e52]: Medicines
+              - generic [ref=e53]: /medicines
+            - 'generic "72 things you can do here: actions and links" [ref=e54]': "72"
+        - group [ref=e55]:
+          - generic "Medicines › Details /medicines/[id] 11" [ref=e56] [cursor=pointer]:
+            - generic [ref=e61]:
+              - generic [ref=e62]: Medicines › Details
+              - generic [ref=e63]: /medicines/[id]
+            - 'generic "11 things you can do here: actions and links" [ref=e64]': "11"
+        - group [ref=e65]:
+          - generic "Medicines › Edit /medicines/[id]/edit 26" [ref=e66] [cursor=pointer]:
+            - generic [ref=e71]:
+              - generic [ref=e72]: Medicines › Edit
+              - generic [ref=e73]: /medicines/[id]/edit
+            - 'generic "26 things you can do here: actions and links" [ref=e74]': "26"
+        - group [ref=e75]:
+          - generic "Settings /settings 5" [ref=e76] [cursor=pointer]:
+            - generic [ref=e81]:
+              - generic [ref=e82]: Settings
+              - generic [ref=e83]: /settings
+            - 'generic "5 things you can do here: actions and links" [ref=e84]': "5"
+        - group [ref=e85]:
+          - generic "Stock /stock 26" [ref=e86] [cursor=pointer]:
+            - generic [ref=e91]:
+              - generic [ref=e92]: Stock
+              - generic [ref=e93]: /stock
+            - 'generic "26 things you can do here: actions and links" [ref=e94]': "26"
+        - group [ref=e95]:
+          - generic "Select shared · on 4 pages 8" [ref=e96] [cursor=pointer]:
+            - generic [ref=e101]:
+              - generic [ref=e102]: Select
+              - generic [ref=e103]: shared · on 4 pages
+            - 'generic "8 things you can do here: actions and links" [ref=e104]': "8"
+        - group [ref=e105]:
+          - generic "All pages shared layout 16" [ref=e106] [cursor=pointer]:
+            - generic [ref=e111]:
+              - generic [ref=e112]: All pages
+              - generic [ref=e113]: shared layout
+            - 'generic "16 things you can do here: actions and links" [ref=e114]': "16"
+      - generic [ref=e115]:
+        - heading "Findings" [level=2] [ref=e116]
+        - generic [ref=e117]: 1 endpoint(s) with no known caller
+    - generic [ref=e119]:
+      - generic [ref=e120]:
+        - heading "Dashboard page loads" [level=2] [ref=e121]
+        - generic [ref=e122]:
+          - generic [ref=e123]: risk medium · 20
+          - generic [ref=e124]: confirmed
+          - generic [ref=e125]: Dashboard
+          - generic [ref=e126]: on load
+          - generic [ref=e127]: DashboardPage
+          - generic "The own time of every measured step, added up. Steps that run at the same time overlap, so the user waits less — see Performance." [ref=e128]: 2.4s of work measured
+          - generic [ref=e129]: 4 reads
+        - paragraph [ref=e130]:
+          - link "app/(app)/dashboard/page.tsx:68 ↗" [ref=e131] [cursor=pointer]:
+            - /url: vscode://file//home/kishanjaiswar/Desktop/pharma-stock-management/app/(app)/dashboard/page.tsx:68
+      - tablist "Feature views" [ref=e132]:
+        - tab "Docs …" [selected] [ref=e133] [cursor=pointer]:
+          - generic [ref=e134]: Docs
+          - generic [ref=e135]: …
+        - tab "Decisions" [ref=e136] [cursor=pointer]
+        - tab "Performance …" [ref=e138] [cursor=pointer]:
+          - generic [ref=e139]: Performance
+          - generic [ref=e140]: …
+        - tab "Tests …" [ref=e141] [cursor=pointer]:
+          - generic [ref=e142]: Tests
+          - generic [ref=e143]: …
+        - tab "Issues & impact …" [ref=e144] [cursor=pointer]:
+          - generic [ref=e145]: Issues & impact
+          - generic [ref=e146]: …
+        - tab "Unused" [ref=e147] [cursor=pointer]
+      - text: ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗
+      - tabpanel "Docs …" [ref=e149]:
+        - generic [ref=e150]:
+          - generic [ref=e151]:
+            - group "Show the action as" [ref=e152]:
+              - button "List" [pressed] [ref=e153] [cursor=pointer]
+              - button "Diagram" [ref=e154] [cursor=pointer]
+            - generic [ref=e155]: How this action works, end to end
+          - generic [ref=e156]:
+            - button "Expand all" [ref=e157] [cursor=pointer]
+            - button "Copy as Markdown" [ref=e158] [cursor=pointer]
+            - link "Open Markdown" [ref=e159] [cursor=pointer]:
+              - /url: /api/action?flow=dashboardpage-dashboardpage-loads&format=markdown
+        - paragraph [ref=e160]: Reading the code behind this action…

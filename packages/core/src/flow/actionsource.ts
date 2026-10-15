@@ -184,7 +184,14 @@ export class SourceReader {
         if (expression && Node.isIdentifier(expression)) {
           return this.declaration(expression.getText(), target, depth + 1);
         }
-        return target.getFunctions().find((fn) => fn.isDefaultExport()) ?? expression;
+        // By the `default` keyword: `isDefaultExport()` starts the type checker.
+        return (
+          target
+            .getFunctions()
+            .find((fn) =>
+              fn.getModifiers().some((m) => m.getKind() === SyntaxKind.DefaultKeyword),
+            ) ?? expression
+        );
       }
       return this.declaration(named!.getName(), target, depth + 1);
     }
@@ -390,21 +397,34 @@ export function endsFunction(node: Node | undefined): boolean {
 
 /** The function-like node that starts on `line` in `file`. */
 export function functionAtLine(file: SourceFile, line: number): Functionish | undefined {
-  const candidates = [
-    ...file.getDescendantsOfKind(SyntaxKind.FunctionDeclaration),
-    ...file.getDescendantsOfKind(SyntaxKind.MethodDeclaration),
-    ...file.getDescendantsOfKind(SyntaxKind.ArrowFunction),
-    ...file.getDescendantsOfKind(SyntaxKind.FunctionExpression),
-  ];
-  const starts = (fn: Node): number => {
-    const variable = fn.getFirstAncestorByKind(SyntaxKind.VariableStatement);
-    return variable && functionOf(variable.getDeclarations()[0]) === fn
-      ? variable.getStartLineNumber()
-      : fn.getStartLineNumber();
-  };
-  return candidates.find((fn) => starts(fn) === line || fn.getStartLineNumber() === line) as
-    Functionish | undefined;
+  let index = FUNCTIONS_BY_LINE.get(file);
+  // A file whose text was replaced in place has new nodes: index it again.
+  if (index && index.values().next().value?.wasForgotten()) index = undefined;
+  if (!index) {
+    // Built once per file: a large service file was walked again on every lookup.
+    index = new Map();
+    const candidates = [
+      ...file.getDescendantsOfKind(SyntaxKind.FunctionDeclaration),
+      ...file.getDescendantsOfKind(SyntaxKind.MethodDeclaration),
+      ...file.getDescendantsOfKind(SyntaxKind.ArrowFunction),
+      ...file.getDescendantsOfKind(SyntaxKind.FunctionExpression),
+    ];
+    const starts = (fn: Node): number => {
+      const variable = fn.getFirstAncestorByKind(SyntaxKind.VariableStatement);
+      return variable && functionOf(variable.getDeclarations()[0]) === fn
+        ? variable.getStartLineNumber()
+        : fn.getStartLineNumber();
+    };
+    for (const fn of candidates) {
+      for (const at of [starts(fn), fn.getStartLineNumber()])
+        if (!index.has(at)) index.set(at, fn as Functionish);
+    }
+    FUNCTIONS_BY_LINE.set(file, index);
+  }
+  return index.get(line);
 }
+
+const FUNCTIONS_BY_LINE = new WeakMap<SourceFile, Map<number, Functionish>>();
 
 /** The call on `line` whose callee mentions `hint`, or the first call on it. */
 export function callAtLine(
@@ -412,18 +432,32 @@ export function callAtLine(
   line: number,
   hint?: string,
 ): CallExpression | undefined {
-  const calls = file
-    .getDescendantsOfKind(SyntaxKind.CallExpression)
-    .filter(
-      (call) =>
-        call.getStartLineNumber() === line || call.getExpression().getEndLineNumber() === line,
-    );
+  let index = CALLS_BY_LINE.get(file);
+  if (index && index.values().next().value?.[0]?.wasForgotten()) index = undefined;
+  if (!index) {
+    // Built once per file, in document order: the lookup ran for every query of every tree.
+    index = new Map();
+    for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      for (const at of new Set([
+        call.getStartLineNumber(),
+        call.getExpression().getEndLineNumber(),
+      ])) {
+        const list = index.get(at);
+        if (list) list.push(call);
+        else index.set(at, [call]);
+      }
+    }
+    CALLS_BY_LINE.set(file, index);
+  }
+  const calls = index.get(line) ?? [];
   if (hint) {
     const matched = calls.find((call) => call.getExpression().getText().includes(hint));
     if (matched) return matched;
   }
   return calls[0];
 }
+
+const CALLS_BY_LINE = new WeakMap<SourceFile, Map<number, CallExpression[]>>();
 
 /** Every JSX element in a subtree, self-closing or not, as its opening tag. */
 export function jsxOpenings(node: Node): Node[] {
@@ -528,18 +562,33 @@ export function unwrap(node: Node): Node {
 export function localVariable(fn: Node, name: string): Node | undefined {
   let scope: Node | undefined = fn;
   for (let hops = 0; scope && hops < 4; hops += 1) {
-    const found = scope.getDescendantsOfKind(SyntaxKind.VariableDeclaration).find((declaration) => {
-      const binding = declaration.getNameNode();
-      if (Node.isIdentifier(binding)) return binding.getText() === name;
-      return binding
-        .getDescendantsOfKind(SyntaxKind.BindingElement)
-        .some((element) => element.getNameNode().getText() === name);
-    });
+    const found = variablesIn(scope).get(name);
     if (found) return found;
     scope = nearestFunction(scope);
   }
   return undefined;
 }
+
+/** Every variable declared inside a node, by name — the first one, as a search would find it. */
+function variablesIn(scope: Node): Map<string, Node> {
+  let found = VARIABLES_IN.get(scope);
+  if (found && found.values().next().value?.wasForgotten()) found = undefined;
+  if (found) return found;
+  found = new Map();
+  for (const declaration of scope.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    const binding = declaration.getNameNode();
+    const names = Node.isIdentifier(binding)
+      ? [binding.getText()]
+      : binding
+          .getDescendantsOfKind(SyntaxKind.BindingElement)
+          .map((element) => element.getNameNode().getText());
+    for (const name of names) if (!found.has(name)) found.set(name, declaration);
+  }
+  VARIABLES_IN.set(scope, found);
+  return found;
+}
+
+const VARIABLES_IN = new WeakMap<Node, Map<string, Node>>();
 
 // ---------------------------------------------------------------------------
 // Statuses
@@ -657,7 +706,7 @@ export function statusOf(
     for (const statement of returnsOf(fn)) {
       const found = statusOf(reader, statement, inner, depth + 1);
       if (found && found.statuses.length > 0) {
-        const message = found.message ?? literalText(args[0]);
+        const message = found.message ?? messageIn(args[0], reader);
         return { statuses: found.statuses, ...(message ? { message } : {}) };
       }
     }
@@ -726,11 +775,17 @@ function numbersIn(node: Node | undefined, env: Env): number[] {
 }
 
 /** `{ error: "Not found" }` / `"Not found"` -> the message. */
-function messageIn(node: Node | undefined): string | undefined {
+function messageIn(node: Node | undefined, reader?: SourceReader): string | undefined {
   if (!node) return undefined;
   const value = unwrap(node);
   const text = literalText(value);
   if (text) return text;
+  // `apiError(result.error, 404)` with `result = await adjustStock(…)`: the
+  // messages `adjustStock` puts under `error` — "Medicine not found".
+  if (Node.isPropertyAccessExpression(value) && Node.isIdentifier(value.getExpression())) {
+    const messages = reader ? producedValues(reader, value.getExpression(), value.getName()) : [];
+    if (messages.length) return messages.join(' / ');
+  }
   if (Node.isObjectLiteralExpression(value)) {
     for (const key of ['error', 'message', 'msg']) {
       const property = value.getProperty(key);
@@ -918,11 +973,26 @@ function describeChain(
         break;
       case 'enum':
       case 'nativeEnum': {
+        // `z.enum(STOCK_REASONS as unknown as [string, ...string[]])`: the list's own values.
+        let list: Node | undefined = first;
+        while (list && Node.isAsExpression(list)) list = list.getExpression();
+        if (list && Node.isIdentifier(list)) {
+          let declared = reader.declaration(list.getText(), list.getSourceFile());
+          if (declared && Node.isVariableDeclaration(declared))
+            declared = declared.getInitializer();
+          while (declared && Node.isAsExpression(declared)) declared = declared.getExpression();
+          if (declared && Node.isArrayLiteralExpression(declared)) list = declared;
+        }
         const options =
-          first && Node.isArrayLiteralExpression(first)
-            ? first.getElements().map((element) => literalText(element) ?? element.getText())
+          list && Node.isArrayLiteralExpression(list)
+            ? list.getElements().map((element) => literalText(element) ?? element.getText())
             : [condense(first?.getText() ?? '', 30)];
         field.type ??= `one of ${options.join(' | ')}`;
+        // `z.enum([…], { message: "Select a reason" })`.
+        if (second && Node.isObjectLiteralExpression(second)) {
+          const enumMessage = messageOf(second, params);
+          if (enumMessage) field.messages.push(enumMessage);
+        }
         break;
       }
       case 'literal':
@@ -1001,10 +1071,24 @@ function describeChain(
       case 'transform':
         field.transforms.push('transformed by a function');
         break;
-      case 'preprocess':
+      case 'preprocess': {
         field.transforms.push(`cleaned first by \`${condense(first?.getText() ?? '', 38)}\``);
         if (second) describeChain(reader, second, field, params, depth + 1);
+        // `(v) => (v.trim() ? v.trim() : DEFAULT_CATEGORY)`: a blank one is filled in, not refused.
+        const body =
+          first && (Node.isArrowFunction(first) || Node.isFunctionExpression(first))
+            ? unwrap(first.getBody() as Node)
+            : undefined;
+        const fallback =
+          body && Node.isConditionalExpression(body)
+            ? unwrap(body.getWhenFalse()).getText()
+            : undefined;
+        if (fallback && !/^(undefined|null|v|value|val)$/.test(fallback)) {
+          field.required = false;
+          field.transforms.push(`left blank, it becomes ${fallback}`);
+        }
         break;
+      }
       case 'refine':
       case 'superRefine':
       case 'test':
@@ -1096,3 +1180,112 @@ export function argumentKeys(call: CallExpression, index: number): string[] {
 }
 
 export type { Expression };
+
+/** What the user fills in a popup, said in a line: a long form is named in part, and counted. */
+export function filledFields(fields: string[]): string {
+  if (fields.length === 0) return '';
+  const shown = fields.length > 8 ? fields.slice(0, 6) : fields;
+  const more = fields.length - shown.length;
+  return `fills ${shown.join(', ')}${more ? ` and ${more} more` : ''} and `;
+}
+
+/**
+ * The `useEffect`s that react to a hook's answer: `const statusQ =
+ * useImportJobStatus(jobId)` and an effect on `[statusQ.data]` — or on
+ * `jobState`, read from it one line on. Nothing calls them; they run when the
+ * answer changes, and decide what the screen does with it.
+ */
+export function effectsWatching(
+  file: SourceFile,
+  hook: string,
+): Array<{ effect: CallExpression; fn: Functionish; deps: string[] }> {
+  return hookReactions(file, hook).effects;
+}
+
+/**
+ * `if (clinics) { … setSelectedId(…) }` written in the component's body: it
+ * runs as the component draws with the answer — React's "adjust state during
+ * render" — so it is what the load leads to, like an effect on it.
+ */
+export function rendersWatching(file: SourceFile, hook: string): import('ts-morph').IfStatement[] {
+  return hookReactions(file, hook).renders;
+}
+
+function hookReactions(
+  file: SourceFile,
+  hook: string,
+): {
+  effects: Array<{ effect: CallExpression; fn: Functionish; deps: string[] }>;
+  renders: import('ts-morph').IfStatement[];
+} {
+  const found: Array<{ effect: CallExpression; fn: Functionish; deps: string[] }> = [];
+  const renders: import('ts-morph').IfStatement[] = [];
+  const callee = (call: CallExpression): string => call.getExpression().getText();
+  for (const use of file
+    .getDescendantsOfKind(SyntaxKind.CallExpression)
+    .filter((candidate) => callee(candidate) === hook)) {
+    const holder = use.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
+    const scope = nearestFunction(use);
+    if (!holder || !scope) continue;
+    const own = (node: Node): boolean => nearestFunction(node) === scope;
+    const binding = holder.getNameNode();
+    const names = new Set(
+      Node.isIdentifier(binding)
+        ? [binding.getText()]
+        : binding
+            .getDescendantsOfKind(SyntaxKind.BindingElement)
+            .map((element) => element.getNameNode().getText()),
+    );
+    for (const declaration of scope.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+      if (!own(declaration) || !Node.isIdentifier(declaration.getNameNode())) continue;
+      const init = declaration.getInitializer()?.getText() ?? '';
+      if ([...names].some((name) => new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\b`).test(init)))
+        names.add(declaration.getName());
+    }
+    for (const effect of scope.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      if (!own(effect) || !/^(React\.)?use(Layout)?Effect$/.test(callee(effect))) continue;
+      const [callback, deps] = effect.getArguments();
+      if (!deps || !Node.isArrayLiteralExpression(deps)) continue;
+      const list = deps.getElements().map((element) => element.getText());
+      if (!list.some((dep) => names.has(dep.split(/[.?[]/)[0] ?? ''))) continue;
+      const fn = functionOf(callback);
+      if (fn) found.push({ effect, fn, deps: list });
+    }
+    const body = (scope as Functionish).getBody?.();
+    if (body && Node.isBlock(body))
+      for (const statement of body.getStatements()) {
+        if (!Node.isIfStatement(statement)) continue;
+        const test = statement.getExpression().getText();
+        if ([...names].some((name) => new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\b`).test(test)))
+          renders.push(statement);
+      }
+  }
+  return { effects: found, renders };
+}
+
+/** The string literals a function's returns put under `key`, for the variable holding its result. */
+function producedValues(reader: SourceReader, holder: Node, key: string): string[] {
+  const scope = nearestFunction(holder);
+  const declaration = scope
+    ?.getDescendantsOfKind(SyntaxKind.VariableDeclaration)
+    .find((candidate) => candidate.getName() === holder.getText());
+  const init = declaration?.getInitializer();
+  let call = init ? unwrap(init) : undefined;
+  if (call && Node.isAwaitExpression(call)) call = unwrap(call.getExpression());
+  if (!call || !Node.isCallExpression(call) || !Node.isIdentifier(call.getExpression())) return [];
+  const fn = reader.functionNamed(call.getExpression().getText(), call.getSourceFile());
+  if (!fn) return [];
+  const found = new Set<string>();
+  for (const returned of fn.getDescendantsOfKind(SyntaxKind.ReturnStatement)) {
+    if (nearestFunction(returned) !== fn) continue;
+    const object = returned.getExpression() ? unwrap(returned.getExpression()!) : undefined;
+    if (!object || !Node.isObjectLiteralExpression(object)) continue;
+    const property = object.getProperty(key);
+    const literal =
+      property && Node.isPropertyAssignment(property)
+        ? literalText(property.getInitializer())
+        : undefined;
+    if (literal) found.add(literal);
+  }
+  return [...found];
+}

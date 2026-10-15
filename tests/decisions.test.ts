@@ -697,3 +697,82 @@ describe('a condition is read through what its variable holds', () => {
     expect(labels).toContain('Are there no clinics?');
   });
 });
+
+describe('the decision tree follows a click into context and out of stored JSX', () => {
+  const root = mkdtempSync(join(tmpdir(), 'flowlens-decisions-context-'));
+  const put = (rel: string, text: string): void => {
+    mkdirSync(join(root, rel, '..'), { recursive: true });
+    writeFileSync(join(root, rel), text, 'utf8');
+  };
+  put('tsconfig.json', JSON.stringify({ compilerOptions: { paths: { '@/*': ['./*'] } } }));
+  put(
+    'app/api/auth/logout/route.ts',
+    `export async function POST() { return Response.json({ ok: true }); }`,
+  );
+  put('app/api/items/route.ts', `export async function GET() { return Response.json([]); }`);
+  put(
+    'features/api.ts',
+    `import axios from "axios";
+     import { useMutation, useQuery } from "@tanstack/react-query";
+     export const api = axios.create({ baseURL: "/api" });
+     export function useLogout() {
+       return useMutation({ mutationFn: async () => { await api.post("/auth/logout"); } });
+     }
+     export function useItems() {
+       return useQuery({ queryKey: ["items"], queryFn: async () => (await api.get("/items")).data });
+     }`,
+  );
+  put(
+    'features/auth.tsx',
+    `"use client";
+     import { createContext, useCallback, useContext, useMemo } from "react";
+     import { useLogout } from "@/features/api";
+     const AuthContext = createContext(null);
+     export function AuthProvider({ children }) {
+       const logoutMutation = useLogout();
+       const logout = useCallback(async () => {
+         await logoutMutation.mutateAsync();
+       }, [logoutMutation]);
+       const value = useMemo(() => ({ logout }), [logout]);
+       return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+     }
+     export function useAuth() {
+       const ctx = useContext(AuthContext);
+       if (!ctx) throw new Error("no provider");
+       return ctx;
+     }`,
+  );
+  put(
+    'components/menu.tsx',
+    `"use client";
+     import { useAuth } from "@/features/auth";
+     import { useItems } from "@/features/api";
+     export function Menu() {
+       const { logout } = useAuth();
+       const { refetch } = useItems();
+       const toolbar = (
+         <div>
+           <button onClick={() => refetch()}>Reload items</button>
+         </div>
+       );
+       return <div>{toolbar}<button onClick={logout}>Sign out</button></div>;
+     }`,
+  );
+  const { graph } = scan({ root });
+  const flows = resolveFlows(graph, { includeLocalOnly: true });
+  const tree = (label: string): string =>
+    renderDecisionTree(
+      actionDecisions(
+        graph,
+        flows.find((flow) => flow.label === label)!,
+      ),
+    );
+
+  it('follows a function from a context hook to the provider that defines it', () => {
+    expect(tree('Sign out')).toContain('⇄ POST /auth/logout');
+  });
+
+  it('credits a click inside JSX kept in a variable to its own handler', () => {
+    expect(tree('Reload items')).toContain('⇄ GET /items');
+  });
+});

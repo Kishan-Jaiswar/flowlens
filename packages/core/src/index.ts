@@ -105,7 +105,16 @@ export {
   type DecisionSide,
   type DecisionStep,
   type DecisionTry,
+  type SharedUse,
 } from './flow/decisions.js';
+export {
+  factorSharedDecisions,
+  indexSharedDecisions,
+  sharedPartTree,
+  type FactoredDecisions,
+  type SharedDecisions,
+  type SharedPart,
+} from './flow/shareddecisions.js';
 export {
   planTests,
   testFileFor,
@@ -137,7 +146,40 @@ export {
   type SchemaField,
   type SourcePoint,
 } from './flow/actionsource.js';
-export { flowPages, type FlowPage, type FlowPagesOptions } from './flow/pages.js';
+export {
+  buildPageIndex,
+  flowPages,
+  pageAtPath,
+  pageTitle,
+  type FlowPage,
+  type FlowPagesOptions,
+  type PageIndex,
+} from './flow/pages.js';
+export {
+  appNavigation,
+  normalizeRoute,
+  routeKey,
+  type AppNavigation,
+  type AppNavigationOptions,
+  type NavItem,
+} from './flow/navigation.js';
+export {
+  appSidebar,
+  isFieldEdit,
+  type AppSidebar,
+  type AppSidebarOptions,
+  type SidebarEntry,
+  type SidebarEntryKind,
+  type SidebarItem,
+} from './flow/sidebar.js';
+export { screenOutline, type OutlineNode } from './flow/outline.js';
+export { linkDecisions, type LinkDecisionsOptions, type LinkInfo } from './flow/linkdecisions.js';
+export {
+  scopeSummary,
+  type ScopeAction,
+  type ScopeSummary,
+  type ScopeSummaryOptions,
+} from './flow/scope.js';
 export {
   explainScreen,
   listScreens,
@@ -345,3 +387,14 @@ export {
   type MergeOptions,
   type MergeResult,
 } from './runtime/merge.js';
+export {
+  cardData,
+  type CardCalculation,
+  type CardCondition,
+  type CardData,
+  type CardDataOptions,
+  type CardField,
+  type CardSource,
+  type CardValue,
+} from './flow/carddata.js';
+export { queryDetail } from './flow/querydetail.js';

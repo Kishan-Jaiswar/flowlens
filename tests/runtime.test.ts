@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  FlowGraph,
   groupTraces,
   mergeRuntimeTrace,
   parseTraceFile,
@@ -308,5 +309,101 @@ describe('mergeRuntimeTrace', () => {
     mergeRuntimeTrace(result.graph, submitOrderTrace());
     expect(result.graph.nodeCount).toBe(nodes);
     expect(result.graph.edgeCount).toBe(edges);
+  });
+});
+
+describe('mergeRuntimeTrace places a query where the request runs it', () => {
+  /**
+   * Two handlers each count the same collection. A span says only
+   * `movements.countDocuments`; the request it ran under says which.
+   */
+  function twoCounts(): FlowGraph {
+    const graph = new FlowGraph({ root: '/app' });
+    for (const [name, line] of [
+      ['history', 950],
+      ['dashboard', 1265],
+    ] as const) {
+      graph.addNode({
+        id: `route:GET /${name}`,
+        kind: 'route',
+        label: `GET /${name}`,
+        evidence: 'static',
+        meta: { httpMethod: 'GET', path: `/${name}` },
+      });
+      graph.addNode({ id: `method:${name}`, kind: 'method', label: name, evidence: 'static' });
+      graph.addNode({
+        id: `db-op:${name}`,
+        kind: 'db-op',
+        label: 'movements.countDocuments',
+        evidence: 'static',
+        source: { file: 'lib/store.ts', line },
+        meta: { collection: 'movements', operation: 'countDocuments' },
+      });
+      graph.addEdge({
+        from: `route:GET /${name}`,
+        to: `method:${name}`,
+        kind: 'calls',
+        evidence: 'static',
+      });
+      graph.addEdge({
+        from: `method:${name}`,
+        to: `db-op:${name}`,
+        kind: 'queries',
+        evidence: 'static',
+      });
+    }
+    return graph;
+  }
+
+  const request = (traceId: string, path: string): TraceEvent[] => [
+    {
+      v: 1,
+      traceId,
+      spanId: `${traceId}-db`,
+      parentSpanId: `${traceId}-server`,
+      kind: 'db',
+      name: 'movements.countDocuments',
+      startedAt: 2,
+      durationMs: 3,
+      attrs: { collection: 'movements', operation: 'countDocuments' },
+    },
+    {
+      v: 1,
+      traceId,
+      spanId: `${traceId}-server`,
+      kind: 'http-server',
+      name: `GET ${path}`,
+      startedAt: 1,
+      durationMs: 10,
+      attrs: { httpMethod: 'GET', path },
+    },
+  ];
+
+  it('links the span to the query site the request’s own code reaches', () => {
+    const graph = twoCounts();
+    mergeRuntimeTrace(graph, request('t1', '/dashboard'));
+    const runtime = graph
+      .allEdges()
+      .filter((edge) => edge.evidence === 'runtime')
+      .map((edge) => `${edge.from} -> ${edge.to}`);
+    expect(runtime).toEqual(['route:GET /dashboard -> db-op:dashboard']);
+    expect(graph.node('db-op:history')?.observations).toBeUndefined();
+  });
+
+  it('does not pin a query on another function when the request reaches none of them', () => {
+    const graph = twoCounts();
+    graph.addNode({
+      id: 'route:GET /other',
+      kind: 'route',
+      label: 'GET /other',
+      evidence: 'static',
+      meta: { httpMethod: 'GET', path: '/other' },
+    });
+    mergeRuntimeTrace(graph, request('t2', '/other'));
+    const edge = graph
+      .allEdges()
+      .find((entry) => entry.evidence === 'runtime' && entry.from === 'route:GET /other');
+    expect(edge?.to).not.toMatch(/^db-op:(?:history|dashboard)$/);
+    expect(graph.node(edge!.to)?.meta?.['discoveredAtRuntime']).toBe(true);
   });
 });

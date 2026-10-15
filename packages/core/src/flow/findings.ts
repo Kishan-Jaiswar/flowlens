@@ -26,6 +26,7 @@ import type { FlowGraph } from '../graph/graph.js';
 import type { FlowNode } from '../graph/types.js';
 import {
   condense,
+  functionOf,
   localVariable,
   nameOf,
   nearestFunction,
@@ -427,23 +428,32 @@ function push(ctx: Ctx, finding: Omit<Finding, 'id' | 'flowIds'>): void {
 // Tenant key
 // ---------------------------------------------------------------------------
 
-const TENANT_KEY =
-  /^(owner|clinic|tenant|org|organization|organisation|account|company|workspace|hospital|business|shop|store|team|practice|pharmacy)_?id$/i;
+/** A reference to another record: `ownerId`, `org_id`, `workspaceID` — not the record's own `_id`. */
+const ID_KEY = /^(?!_?id$)[a-z][a-z0-9]*_?id$/i;
 
 /**
- * The field this project scopes its data by: the tenant-looking key that the
- * most query filters use. Needs a clear majority of evidence, because every
- * tenant finding depends on it.
+ * The field this project scopes its data by, read from its own queries: the
+ * id field that filters the most collections. A tenant key is in nearly every
+ * filter, across collections; a key like `productId` narrows one collection
+ * to one record's rows. Whatever the project calls it — `ownerId`, `orgId`,
+ * `workspace_id` — is found the same way. Needs a clear majority of evidence,
+ * because every tenant finding depends on it.
  */
 function chooseTenantKey(ctx: Ctx): string | undefined {
-  const counts = new Map<string, number>();
+  const counts = new Map<string, { queries: number; collections: Set<string> }>();
   for (const query of ctx.queries) {
     for (const key of query.filter?.keys ?? []) {
-      if (TENANT_KEY.test(key)) counts.set(key, (counts.get(key) ?? 0) + 1);
+      if (!ID_KEY.test(key)) continue;
+      const entry = counts.get(key) ?? { queries: 0, collections: new Set<string>() };
+      entry.queries += 1;
+      entry.collections.add(query.collection);
+      counts.set(key, entry);
     }
   }
-  const [best] = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-  if (!best || best[1] < 3) {
+  const [best] = [...counts.entries()].sort(
+    (a, b) => b[1].collections.size - a[1].collections.size || b[1].queries - a[1].queries,
+  );
+  if (!best || best[1].queries < 3 || best[1].collections.size < 2) {
     ctx.notes.push(
       'No tenant field is used consistently in query filters, so tenant scoping was not checked.',
     );
@@ -466,7 +476,7 @@ const PUBLIC_PATH =
  * loose match here would hide exactly the unguarded routes this looks for.
  */
 const AUTH_CALL =
-  /^(require|ensure|assert|check|verify|validate)_?(auth|user|session|login|signed_?in|clinic|shop|tenant|access|permission|role|owner|member|admin|token|jwt)|^get_?(auth|current|session|signed_?in|logged_?in)_?(user|session|token)?$|^(getServerSession|getSession|currentUser|authenticate|authorize|isAuthenticated|withAuth|auth)$|^verify(Token|Jwt|IdToken)$/i;
+  /^(require|ensure|assert|check|verify|validate)_?(auth|user|session|login|signed_?in|tenant|access|permission|role|owner|member|admin|token|jwt)|^get_?(auth|current|session|signed_?in|logged_?in)_?(user|session|token)?$|^(getServerSession|getSession|currentUser|authenticate|authorize|isAuthenticated|withAuth|auth)$|^verify(Token|Jwt|IdToken)$/i;
 
 /** What an auth check answers when it fails. */
 const DENIES =
@@ -481,7 +491,7 @@ function checkRoutes(ctx: Ctx, tenantKey: string | undefined): void {
     const path = String(route.meta?.['path'] ?? route.label.split(' ').slice(1).join(' '));
     const handler = handlerOf(ctx, route);
     const guards = ctx.graph.successors(route.id, ['guarded-by']);
-    const inHandler = handler ? authCallsIn(handler) : [];
+    const inHandler = handler ? authCallsIn(handler, ctx.reader) : [];
     const guarded = guards.length > 0 || inHandler.length > 0 || globalAuth;
     const at = handler ? point(ctx, handler) : (route.source ?? { file: '', line: 1 });
 
@@ -541,7 +551,7 @@ function functionContaining(file: SourceFile, line: number): Functionish | undef
  * (`if (!user) return unauthorized()`), whatever the helper is called, or a
  * call whose name says it checks the caller (`requireShop(request)`).
  */
-function authCallsIn(handler: Node): Node[] {
+function authCallsIn(handler: Node, reader: SourceReader): Node[] {
   const denials = handler.getDescendantsOfKind(SyntaxKind.IfStatement).filter((statement) => {
     if (nearestFunction(statement) !== handler) return false;
     const then = statement.getThenStatement();
@@ -551,9 +561,32 @@ function authCallsIn(handler: Node): Node[] {
   return handler.getDescendantsOfKind(SyntaxKind.CallExpression).filter((call) => {
     const callee = call.getExpression();
     const name = Node.isPropertyAccessExpression(callee) ? callee.getName() : callee.getText();
-    // `jwt.verify(token, …)` and `auth()` count; so does `requireShop(request)`.
-    return AUTH_CALL.test(name) || /\bjwt\.verify$/.test(callee.getText());
+    // `jwt.verify(token, …)` and `auth()` count; so does a project helper,
+    // whatever it is named, that turns the caller away with a 401 or 403.
+    return (
+      AUTH_CALL.test(name) || /\bjwt\.verify$/.test(callee.getText()) || deniesInBody(call, reader)
+    );
   });
+}
+
+/** Helpers already read: whether each can answer 401/403 itself. */
+const denyingHelpers = new WeakMap<Node, boolean>();
+
+/**
+ * A call to one of the project's own functions that can answer 401 or 403 —
+ * `requireTeam(request)`, `ensureSignedIn()`, `loadAccount()`: the helper's
+ * body says it is a check, whatever it is named.
+ */
+function deniesInBody(call: CallExpression, reader: SourceReader): boolean {
+  const callee = call.getExpression();
+  if (!Node.isIdentifier(callee)) return false;
+  const fn = functionOf(reader.declaration(callee.getText(), call.getSourceFile()));
+  if (!fn || fn.getSourceFile().getFilePath().includes('/node_modules/')) return false;
+  const known = denyingHelpers.get(fn);
+  if (known !== undefined) return known;
+  const denies = DENIES.test(fn.getText());
+  denyingHelpers.set(fn, denies);
+  return denies;
 }
 
 /** Next.js `middleware.ts`/`proxy.ts` that checks auth and runs for API routes. */
@@ -570,14 +603,33 @@ function globalMiddlewareAuth(ctx: Ctx): boolean {
   return false;
 }
 
-/** `userHasShopAccess(…)`, `assertShopMember(…)`, `canAccessTenant(…)`. */
+/** `userHasTeamAccess(…)`, `assertMember(…)`, `canAccessTenant(…)`. */
 const MEMBERSHIP =
-  /member|belongs|allowed|(has|can)\w*access|authori[sz]e|(assert|verify|check|ensure)\w*(clinic|shop|tenant|access|owner)/i;
+  /member|belongs|allowed|(has|can)\w*access|authori[sz]e|(assert|verify|check|ensure)\w*(tenant|access|owner)/i;
+
+/** What a forbidden answer looks like: the caller is known, but not allowed this. */
+const FORBIDS = /forbidden|ForbiddenException|status:\s*403\b|\b403\b/i;
+
+/**
+ * A membership check by name, or one of the project's helpers that answers
+ * 403 — "you don't have access to this team", whatever the helper is called.
+ */
+function isMembershipCall(call: CallExpression, reader: SourceReader): boolean {
+  if (MEMBERSHIP.test(call.getExpression().getText())) return true;
+  const callee = call.getExpression();
+  if (!Node.isIdentifier(callee)) return false;
+  const fn = functionOf(reader.declaration(callee.getText(), call.getSourceFile()));
+  return (
+    !!fn &&
+    !fn.getSourceFile().getFilePath().includes('/node_modules/') &&
+    FORBIDS.test(fn.getText())
+  );
+}
 
 function membershipCheck(ctx: Ctx, route: FlowNode, handler: Node): CallExpression | undefined {
   const inHandler = handler
     .getDescendantsOfKind(SyntaxKind.CallExpression)
-    .find((call) => MEMBERSHIP.test(call.getExpression().getText()));
+    .find((call) => isMembershipCall(call, ctx.reader));
   if (inHandler) return inHandler;
   for (const method of ctx.graph.successors(route.id, ['calls'])) {
     for (const callee of ctx.graph.successors(method.id, ['calls'])) {
@@ -586,7 +638,7 @@ function membershipCheck(ctx: Ctx, route: FlowNode, handler: Node): CallExpressi
       const fn = file ? functionContaining(file, callee.source.line) : undefined;
       const found = fn
         ?.getDescendantsOfKind(SyntaxKind.CallExpression)
-        .find((call) => MEMBERSHIP.test(call.getExpression().getText()));
+        .find((call) => isMembershipCall(call, ctx.reader));
       if (found) return found;
     }
   }
@@ -1094,11 +1146,26 @@ function checkSequentialAwaits(ctx: Ctx): void {
     ) {
       const next = statements[index]!;
       const nextQuery = readsByStatement.get(next);
-      if (!nextQuery) break;
       // Uses an earlier result: it has to wait.
       const used = next
         .getDescendantsOfKind(SyntaxKind.Identifier)
         .some((id) => declared.has(id.getText()));
+      if (!nextQuery) {
+        // `const page = Math.max(1, query.page ?? 1)` between the two reads
+        // waits for nothing: step over it. Anything awaited ends the run.
+        if (next.getDescendantsOfKind(SyntaxKind.AwaitExpression).length > 0) break;
+        // `if (total === 0) return …`: the next read only runs when this lets it.
+        if (
+          Node.isReturnStatement(next) ||
+          Node.isThrowStatement(next) ||
+          next.getDescendantsOfKind(SyntaxKind.ReturnStatement).length > 0 ||
+          next.getDescendantsOfKind(SyntaxKind.ThrowStatement).length > 0
+        )
+          break;
+        // Worked out from an earlier result: what reads it depends on that result too.
+        if (used) for (const name of namesDeclaredBy(next)) declared.add(name);
+        continue;
+      }
       if (used) break;
       run.push({ statement: next, query: nextQuery });
       for (const name of namesDeclaredBy(next)) declared.add(name);

@@ -29,6 +29,9 @@ import { DB_EFFECT_LABEL, type DbEffect } from '../analyzer/mongo.js';
 import type { FlowGraph } from '../graph/graph.js';
 import type { Evidence } from '../graph/types.js';
 import {
+  rendersWatching,
+  effectsWatching,
+  filledFields,
   argumentKeys,
   attribute,
   bodyStatements,
@@ -58,7 +61,8 @@ import {
   type SourcePoint,
 } from './actionsource.js';
 import { flowApis, type ApiCallDetail, type FlowApis } from './api.js';
-import { resolveFlows, type FeatureFlow } from './resolve.js';
+import { EXECUTION_EDGES, resolveFlows, type FeatureFlow } from './resolve.js';
+import { baseQueryCall, resultName } from './querydetail.js';
 
 // ---------------------------------------------------------------------------
 // The document
@@ -241,6 +245,8 @@ interface FrontFn {
   role: 'child' | 'handler' | 'request';
   /** Why it runs: `<form onSubmit={handleSubmit}>`. */
   via?: string;
+  /** Called from `onSuccess`/`onError`: runs after the request, not before. */
+  afterResponse?: boolean;
 }
 
 interface CallContext {
@@ -250,13 +256,15 @@ interface CallContext {
   /** The hook whose `useMutation`/`useQuery` holds the request function. */
   hook?: { name: string; fn: Functionish; options?: Node };
   handler?: Functionish;
-  backendFns: Array<{ label: string; fn: Functionish; at: SourcePoint }>;
+  backendFns: Array<{ label: string; fn: Functionish; at: SourcePoint; background?: boolean }>;
 }
 
 interface Ctx {
   graph: FlowGraph;
   flow: FeatureFlow;
   reader: SourceReader;
+  /** The form inside the popup this action opens, and the element that submits it. */
+  popup?: { fn: Functionish; opening?: Node };
   apis: FlowApis;
   flows: FeatureFlow[];
   entryFile?: SourceFile;
@@ -290,7 +298,8 @@ export function explainAction(
 ): ActionDoc {
   const ctx = locatedContext(graph, flow, options.reader ?? new SourceReader(graph));
   safely(ctx, () => {
-    if (ctx.formFn) ctx.labels = fieldLabels(ctx.formFn);
+    const formFn = ctx.popup?.fn ?? ctx.formFn;
+    if (formFn) ctx.labels = fieldLabels(formFn);
   });
   safely(ctx, () => collectFrontSchemas(ctx));
 
@@ -347,7 +356,8 @@ export function explainAction(
     ...(flow.component ? { component: flow.component } : {}),
     ...(flow.event ? { event: flow.event } : {}),
     trigger: triggerPhrase(ctx),
-    evidence: flow.evidence,
+    // Its steps seen running under other actions is not this one seen running.
+    evidence: flow.traced === false && flow.evidence === 'confirmed' ? 'static' : flow.evidence,
     endpoints: flow.endpoints,
     ...(entry?.file ? { source: { file: entry.file, line: entry.line ?? 1 } } : {}),
     stages,
@@ -471,10 +481,21 @@ function locateEntry(ctx: Ctx): void {
 
   // The handler named on the element, then the handlers the graph found.
   const seen = new Set<Node>();
-  const push = (fn: Functionish | undefined, role: FrontFn['role'], via?: string): void => {
+  const push = (
+    fn: Functionish | undefined,
+    role: FrontFn['role'],
+    via?: string,
+    afterResponse?: boolean,
+  ): void => {
     if (!fn || seen.has(fn)) return;
     seen.add(fn);
-    ctx.front.push({ name: qualified(fn), fn, role, ...(via ? { via } : {}) });
+    ctx.front.push({
+      name: qualified(fn),
+      fn,
+      role,
+      ...(via ? { via } : {}),
+      ...(afterResponse ? { afterResponse } : {}),
+    });
   };
 
   // A child component that runs its own handler before calling the prop.
@@ -500,8 +521,38 @@ function locateEntry(ctx: Ctx): void {
   for (const step of flow.steps) {
     if (step.kind !== 'handler' || !step.file || !step.line) continue;
     const stepFile = reader.file(step.file);
-    if (stepFile) push(functionAtLine(stepFile, step.line), 'handler');
+    if (stepFile)
+      push(functionAtLine(stepFile, step.line), 'handler', undefined, step.afterResponse);
   }
+  locatePopupForm(ctx);
+}
+
+/**
+ * "Add medicine" opens a drawer whose `<form onSubmit={handleSubmit}>` is
+ * what the user fills: its fields are this action's, not the page's around
+ * the button that opens it.
+ */
+function locatePopupForm(ctx: Ctx): void {
+  const pressed = ctx.flow.steps
+    .filter((step) => step.kind === 'handler')
+    .flatMap((step) => ctx.graph.edgesFrom(step.nodeId, ['calls']))
+    .filter((edge) => typeof edge.meta?.['userStep'] === 'string')
+    .at(-1);
+  const target = pressed ? ctx.graph.node(pressed.to) : undefined;
+  const file = target?.source ? ctx.reader.file(target.source.file) : undefined;
+  const fn = file && target?.source ? functionAtLine(file, target.source.line) : undefined;
+  const component = fn ? componentOf(fn) : undefined;
+  if (!fn || !component) return;
+  const name = nameOf(fn);
+  const opening = component
+    .getDescendantsOfKind(SyntaxKind.JsxAttribute)
+    .find(
+      (attr) =>
+        /^on[A-Z]/.test(attr.getNameNode().getText()) && attr.getText().includes(`{${name}}`),
+    )
+    ?.getParent()
+    ?.getParent();
+  ctx.popup = { fn: component, ...(opening ? { opening } : {}) };
 }
 
 /** The function component declared around a line. */
@@ -604,9 +655,19 @@ function locateChild(ctx: Ctx, tag: string, event: string): void {
   }
   if (names.size === 0) return;
 
-  const invocation = component
-    .getDescendantsOfKind(SyntaxKind.CallExpression)
-    .find((call) => names.has(call.getExpression().getText()));
+  // `<Button onClick={onClose}>Cancel</Button>`: the prop handed straight to a
+  // control is what the user does; a call to it inside another handler (Save's
+  // `onSuccess` closing the dialog) is that other action's last step.
+  const passedStraight = component.getDescendantsOfKind(SyntaxKind.JsxAttribute).some((attr) => {
+    const init = attr.getInitializer();
+    const value = init && Node.isJsxExpression(init) ? init.getExpression() : undefined;
+    return value !== undefined && names.has(value.getText());
+  });
+  const invocation = passedStraight
+    ? undefined
+    : component
+        .getDescendantsOfKind(SyntaxKind.CallExpression)
+        .find((call) => names.has(call.getExpression().getText()));
   let handler: Functionish | undefined;
   if (invocation) {
     const around = nearestFunction(invocation) as Functionish | undefined;
@@ -684,6 +745,27 @@ function locateCalls(ctx: Ctx): void {
           const hookFn = hookCall
             ? (nearestFunction(hookCall) as Functionish | undefined)
             : undefined;
+          // `queryFn: () => fetchSession()` in the component: the request is in
+          // `fetchSession`, and the query that runs it is the one calling it.
+          if (!hookCall && context.fn && ctx.componentFn) {
+            const name = nameOf(context.fn);
+            const outer = ctx.componentFn
+              .getDescendantsOfKind(SyntaxKind.CallExpression)
+              .find(
+                (candidate) =>
+                  /^(useMutation|useQuery|useInfiniteQuery|useSuspenseQuery)$/.test(
+                    candidate.getExpression().getText(),
+                  ) &&
+                  candidate
+                    .getDescendantsOfKind(SyntaxKind.CallExpression)
+                    .some((inner) => inner.getExpression().getText() === name),
+              );
+            const options = outer
+              ?.getArguments()
+              .find((arg) => Node.isObjectLiteralExpression(arg));
+            if (outer && options)
+              context.hook = { name: nameOf(ctx.componentFn), fn: ctx.componentFn, options };
+          }
           if (hookCall && hookFn && Node.isCallExpression(hookCall)) {
             const options = hookCall
               .getArguments()
@@ -694,7 +776,13 @@ function locateCalls(ctx: Ctx): void {
       }
     }
     if (context.fn && !ctx.front.some((entry) => entry.fn === context.fn)) {
-      ctx.front.push({ name: qualified(context.fn), fn: context.fn, role: 'request' });
+      // Before whatever `onSuccess` runs: that waits for this request.
+      const after = ctx.front.findIndex((entry) => entry.afterResponse);
+      ctx.front.splice(after === -1 ? ctx.front.length : after, 0, {
+        name: qualified(context.fn),
+        fn: context.fn,
+        role: 'request',
+      });
     }
 
     // The server side, in the order the flow reaches it.
@@ -704,9 +792,20 @@ function locateCalls(ctx: Ctx): void {
         graph.edgesTo(step.nodeId, ['handled-by']).length > 0 &&
         step.label === detail.route?.method + ' ' + detail.route?.path,
     );
-    const handlerSteps = ctx.flow.steps.filter(
-      (step) => step.kind === 'method' && step.depth > (routeStep?.depth ?? 0),
+    // This request's own server code: what its route reaches, its handler
+    // first. Every method below the route's depth mixed in the other
+    // request's functions, and made a shared `requireClinic` this one's handler.
+    const reach = routeStep
+      ? graph.reachable(routeStep.nodeId, { kinds: EXECUTION_EDGES })
+      : undefined;
+    const direct = new Set(
+      routeStep
+        ? graph.successors(routeStep.nodeId, ['calls', 'handled-by']).map((node) => node.id)
+        : [],
     );
+    const handlerSteps = ctx.flow.steps
+      .filter((step) => step.kind === 'method' && (reach ? reach.has(step.nodeId) : step.depth > 0))
+      .sort((a, b) => Number(direct.has(b.nodeId)) - Number(direct.has(a.nodeId)));
     const labels = new Set(detail.handlers.map((handler) => handler.label));
     for (const step of handlerSteps) {
       if (!labels.has(step.label) && detail.handlers.length > 0) continue;
@@ -718,6 +817,7 @@ function locateCalls(ctx: Ctx): void {
           label: step.label,
           fn,
           at: { file: step.file!, line: step.line },
+          ...(step.background ? { background: true } : {}),
         });
     }
     ctx.calls.push(context);
@@ -817,8 +917,18 @@ function fieldLabels(fn: Functionish): Map<string, { label?: string; required: b
 function labelText(node: Node): string {
   const direct = literalText(node);
   if (direct !== undefined) return direct;
+  // `action === "adjust" ? "New stock level" : "Quantity"`: the words shown, not the value compared.
+  const compared = (literal: Node): boolean => {
+    const parent = literal.getParent();
+    return (
+      parent !== undefined &&
+      Node.isBinaryExpression(parent) &&
+      /^[=!]==?$/.test(parent.getOperatorToken().getText())
+    );
+  };
   const words = node
     .getDescendantsOfKind(SyntaxKind.StringLiteral)
+    .filter((literal) => !compared(literal))
     .map((literal) => literal.getLiteralValue())
     .filter((value) => value.trim());
   return words.length > 0 ? words.join(' / ') : condense(node.getText(), 40);
@@ -971,7 +1081,11 @@ function collectFrontSchemas(ctx: Ctx): void {
       if (
         scope === ctx.formFn &&
         !found.method.endsWith('Resolver') &&
-        !ctx.front.some((entry) => entry.fn.containsRange(found.call.getPos(), found.call.getEnd()))
+        !ctx.front.some(
+          (entry) =>
+            entry.fn.getSourceFile() === found.call.getSourceFile() &&
+            entry.fn.containsRange(found.call.getPos(), found.call.getEnd()),
+        )
       )
         continue;
       const facts = readSchema(ctx.reader, found.schema, found.call.getSourceFile());
@@ -1674,6 +1788,63 @@ function configQueryKeys(call: CallExpression | undefined): string[] {
   return [];
 }
 
+/**
+ * `params: buildParams(query)` with `query` the hook's parameter: what this
+ * screen passes it. `useMedicines({ expiring: true, pageSize: 5 })` sends
+ * `expiring=true, pageSize=5`, which says more than `…buildParams(query)`.
+ */
+function callerParams(ctx: Ctx, context: CallContext, keys: string[]): string[] {
+  const opaque = keys.find((key) => key.startsWith('…'));
+  const hook = context.hook;
+  const component = ctx.componentFn;
+  if (!opaque || !hook || !component || hook.fn === component) return keys;
+  const parameters = hook.fn.getParameters().map((param) => param.getName());
+  const index = parameters.findIndex((name) => new RegExp(`\\b${name}\\b`).test(opaque));
+  if (index < 0) return keys;
+  const call = component
+    .getDescendantsOfKind(SyntaxKind.CallExpression)
+    .find((candidate) => candidate.getExpression().getText() === hook.name);
+  const passed = call?.getArguments()[index];
+  if (!passed) return keys;
+  const value = unwrap(passed);
+  const object = Node.isObjectLiteralExpression(value)
+    ? value
+    : Node.isIdentifier(value)
+      ? (() => {
+          // `useMedicines(query)` with `const query = useMemo(() => ({ … }))`.
+          const declared = localVariable(component, value.getText());
+          const init =
+            declared && Node.isVariableDeclaration(declared)
+              ? declared.getInitializer()
+              : undefined;
+          const found = init?.getFirstDescendantByKind(SyntaxKind.ObjectLiteralExpression);
+          return (
+            found ??
+            (init && Node.isObjectLiteralExpression(unwrap(init)) ? unwrap(init) : undefined)
+          );
+        })()
+      : undefined;
+  if (!object || !Node.isObjectLiteralExpression(object)) return keys;
+  const pairs = object.getProperties().map((property) => {
+    if (Node.isPropertyAssignment(property)) {
+      const init = property.getInitializer();
+      const literal = init ? unwrap(init) : undefined;
+      const shown =
+        literal &&
+        (Node.isStringLiteral(literal) ||
+          Node.isNumericLiteral(literal) ||
+          literal.getKind() === SyntaxKind.TrueKeyword ||
+          literal.getKind() === SyntaxKind.FalseKeyword)
+          ? `${property.getName()}=${Node.isStringLiteral(literal) ? literal.getLiteralValue() : literal.getText()}`
+          : property.getName();
+      return shown;
+    }
+    return Node.isShorthandPropertyAssignment(property) ? property.getName() : '';
+  });
+  const named = pairs.filter(Boolean);
+  return named.length ? [...keys.filter((key) => key !== opaque), ...named] : keys;
+}
+
 /** `apiClient.post<{ product: Product }>(…)` -> the declared response type. */
 function declaredResponseType(call: CallExpression | undefined): string | undefined {
   const typeArg = call?.getTypeArguments()[0];
@@ -1698,6 +1869,8 @@ interface GuardFacts {
   exits: GuardExit[];
   at: SourcePoint;
   declaredAt?: SourcePoint;
+  /** Work the handler does before this check: empty when the check comes first. */
+  after: string[];
 }
 
 /**
@@ -1791,10 +1964,30 @@ function guardsIn(ctx: Ctx, handler: Functionish): GuardFacts[] {
         });
       }
     }
+    const start = call.getStart();
+    const after = [
+      ...new Set(
+        handler
+          .getDescendantsOfKind(SyntaxKind.CallExpression)
+          .filter((earlier) => earlier.getEnd() <= start)
+          // `return apiError(...)` answers a failed check; it is not work done first.
+          .filter(
+            (earlier) =>
+              !earlier.getFirstAncestor(
+                (node) => Node.isReturnStatement(node) || Node.isThrowStatement(node),
+              ),
+          )
+          .map((earlier) => earlier.getExpression())
+          .filter((callee) => Node.isIdentifier(callee))
+          .map((callee) => callee.getText())
+          .filter((callee) => !/^(safeParse|parse|validate|json)$/.test(callee)),
+      ),
+    ];
     guards.push({
       name,
       call: shortCall(call),
       exits,
+      after,
       at: ctx.reader.point(call),
       ...(fn ? { declaredAt: ctx.reader.point(fn) } : {}),
     });
@@ -1965,6 +2158,17 @@ interface Reaction {
 }
 
 /** Callbacks that run when the response comes back, wherever they are written. */
+/** A `.catch(() => {})` in the statement: the failure is dropped and the code carries on. */
+function swallows(statement: Node): boolean {
+  return statement.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) => {
+    const callee = call.getExpression();
+    if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'catch') return false;
+    const fn = functionOf(call.getArguments()[0]);
+    const body = fn?.getBody();
+    return body !== undefined && Node.isBlock(body) && body.getStatements().length === 0;
+  });
+}
+
 function reactionsFor(ctx: Ctx, context: CallContext): Reaction[] {
   const reactions: Reaction[] = [];
   const phaseOf = (key: string): ReactionPhase | undefined =>
@@ -2032,9 +2236,11 @@ function reactionsFor(ctx: Ctx, context: CallContext): Reaction[] {
         .slice(awaitAt + 1)
         .filter((statement) => !Node.isTryStatement(statement))
         .flatMap((statement) => ownCallsOf(statement, entry.fn));
+      // `await logout().catch(() => {})`: a failure is swallowed, so what follows runs either way.
+      const swallowed = swallows(statements[awaitAt]!);
       if (after.length > 0)
         reactions.push({
-          phase: 'on success',
+          phase: swallowed ? 'always' : 'on success',
           where: `after the await in \`${entry.name}\``,
           calls: after,
         });
@@ -2107,6 +2313,8 @@ type ReactionKind =
   | 'Navigation'
   | 'Toast/notification'
   | 'Modal close'
+  | 'Screen'
+  | 'Download'
   | 'Other';
 
 function classifyReaction(call: CallExpression): { kind: ReactionKind; text: string } | undefined {
@@ -2140,6 +2348,13 @@ function classifyReaction(call: CallExpression): { kind: ReactionKind; text: str
     (/toast|notif|snack|message|swal|alert/i.test(text) || text === member)
   ) {
     return { kind: 'Toast/notification', text: toastText(call) };
+  }
+  // `XLSX.writeFile(book, "template.xlsx")`, `saveAs(blob)`, `downloadSampleTemplate()`.
+  if (/^(writeFile|writeFileXLSX|saveAs|download\w*)$/i.test(member)) {
+    const file = args
+      .map((arg) => literalText(unwrap(arg)))
+      .find((value) => value && /\.\w{2,5}$/.test(value));
+    return { kind: 'Download', text: file ? `\`${file}\`` : `\`${shortCall(call)}\`` };
   }
   const first = args[0] ? unwrap(args[0]) : undefined;
   const falsy = first !== undefined && (first.getText() === 'false' || first.getText() === 'null');
@@ -2236,13 +2451,54 @@ interface Parent {
 }
 
 /** Where a component is rendered, walking up until a page. */
+/** The other components that draw `component`, and the page each is on. */
+function otherSites(
+  ctx: Ctx,
+  component: string,
+  file: string,
+  first: string | undefined,
+): Array<{ component: string; file: string; line: number; page?: string }> {
+  const needle = new RegExp(`<${component}[\\s/>]`);
+  const found: Array<{ component: string; file: string; line: number; page?: string }> = [];
+  const files = new Set<string>();
+  for (const node of ctx.graph.allNodes())
+    if (node.source?.file && /\.[jt]sx$|\.js$/.test(node.source.file)) files.add(node.source.file);
+  for (const candidate of files) {
+    if (candidate === file || candidate === first) continue;
+    const source = ctx.reader.file(candidate);
+    if (!source || !needle.test(source.getFullText())) continue;
+    const opening = jsxOpenings(source).find((node) => tagOf(node) === component);
+    const owner = opening ? componentOf(opening) : undefined;
+    if (!opening || !owner) continue;
+    const page =
+      pageRoute(candidate) ??
+      parentsOf(ctx, nameOf(owner), candidate, 1)
+        .map((parent) => pageRoute(parent.file))
+        .find(Boolean);
+    found.push({
+      component: nameOf(owner),
+      file: candidate,
+      line: opening.getStartLineNumber(),
+      ...(page ? { page } : {}),
+    });
+  }
+  return found;
+}
+
 function parentsOf(ctx: Ctx, component: string, file: string, depth = 0): Parent[] {
   if (depth > 2 || pageRoute(file)) return [];
-  const files = new Set<string>();
-  for (const node of ctx.graph.allNodes()) {
-    const source = node.source?.file;
-    if (source && /\.[jt]sx$|\.js$/.test(source)) files.add(source);
-  }
+  // This copy of a shared dialog's action is the one drawn on this page:
+  // its parent is that page, not whichever other page draws it first.
+  const site =
+    depth === 0
+      ? (ctx.graph.node(ctx.flow.entryNodeId)?.meta?.['siteFile'] as string | undefined)
+      : undefined;
+  const files = new Set<string>(site ? [site] : []);
+  if (!site)
+    for (const node of ctx.graph.allNodes()) {
+      const source = node.source?.file;
+      if (source && /\.[jt]sx$|\.js$/.test(source)) files.add(source);
+    }
   const needle = new RegExp(`<${component}[\\s/>]`);
   for (const candidate of files) {
     if (candidate === file) continue;
@@ -2296,7 +2552,17 @@ function parentsOf(ctx: Ctx, component: string, file: string, depth = 0): Parent
       if (trigger) {
         const attr = trigger.getFirstAncestorByKind(SyntaxKind.JsxAttribute)!;
         const element = attr.getParent()?.getParent();
-        const words = element ? elementText(element) || tagOf(element) : '';
+        // The opener's own name ("Update stock"), as the sidebar shows it, before its markup.
+        const named = element
+          ? ctx.graph
+              .nodesOfKind('ui-action')
+              .find(
+                (action) =>
+                  action.source?.file === candidate &&
+                  action.source.line === element.getStartLineNumber(),
+              )?.label
+          : undefined;
+        const words = element ? named || elementText(element) || tagOf(element) : '';
         parent.openedBy = {
           text: words,
           setter: condense(trigger.getText(), 50),
@@ -2407,10 +2673,41 @@ function stageOpen(ctx: Ctx): StageBody {
     }
   }
 
+  // `<MedicineForm>` in the Add medicine dialog and on the edit page: one action, two places.
+  const elsewhere = flow.component
+    ? otherSites(ctx, flow.component, entry?.file ?? '', parents[0]?.file)
+    : [];
+  for (const site of elsewhere)
+    lines.push({
+      text: `Also drawn by ${code(site.component)}${site.page ? ` on ${code(site.page)}` : ''}`,
+      at: { file: site.file, line: site.line },
+    });
+
   const opener = parents.find((parent) => parent.openedBy)?.openedBy;
+  // `{tab === "excels" && <ImportHistoryView />}`: it loads when shown, not with the page.
+  const shownWhen = flow.steps[0]?.meta?.['shownWhen'];
+  const shownIn = parents.find((parent) => parent.openWhen);
   const summary = isPageLoad(flow)
-    ? `${page ? `${code(page)} opens` : 'The page opens'} — this action runs by itself, no click`
-    : `On ${page ? code(page) : (flow.screen ?? 'the screen')}` +
+    ? typeof shownWhen === 'string'
+      ? `Runs by itself once it is shown on ${page ? code(page) : 'the page'} — when ${code(shownWhen)}, not as soon as the page opens`
+      : shownIn || elsewhere.length
+        ? // A form inside a dialog loads when the dialog opens, wherever it is drawn.
+          `Runs by itself whenever ${code(flow.component ?? '')} is shown — ${[
+            `${shownIn ? `in ${code(chain[parents.indexOf(shownIn)] ?? shownIn.component)} once it opens` : `on ${page ? code(page) : 'the page'}`}${page && shownIn ? ` on ${code(page)}` : ''}`,
+            ...elsewhere.map((site) =>
+              site.page ? `on ${code(site.page)}` : `in ${code(site.component)}`,
+            ),
+          ].join(', and ')}`
+        : `${page ? `${code(page)} opens` : 'The page opens'} — this action runs by itself, no click`
+    : (() => {
+        // Rendered by a layout (`app/(app)/layout.tsx` → AppShell → Header): every page has it.
+        const layout = parents.find((parent) =>
+          /(?:^|\/)(?:layout|_app)\.[cm]?[jt]sx?$/.test(parent.file),
+        );
+        if (!page && layout)
+          return `In ${code(parents[0]?.component ?? flow.component ?? '')}, part of the layout in ${code(layout.file)} — on every page under it`;
+        return `On ${page ? code(page) : (flow.screen ?? 'the screen')}`;
+      })() +
       (opener
         ? `, the user clicks **"${opener.text}"** to open ${code(flow.component ?? '')}`
         : '');
@@ -2425,8 +2722,8 @@ function stageOpen(ctx: Ctx): StageBody {
 }
 
 function stageForm(ctx: Ctx): StageBody {
-  if (!ctx.formFn) return { groups: [], empty: 'The component could not be read.' };
-  const formFn = ctx.formFn;
+  const formFn = ctx.popup?.fn ?? ctx.formFn;
+  if (!formFn) return { groups: [], empty: 'The component could not be read.' };
 
   const hooks = [
     ...hooksIn(ctx, formFn),
@@ -2465,13 +2762,23 @@ function stageForm(ctx: Ctx): StageBody {
   // A form's own state is what it submits. Anywhere else a component holds state
   // for every control on it — a delete button sits beside the filter drawer's
   // draft — so only the state the handlers read belongs to this action.
-  const inForm = isFormTrigger(ctx);
+  const formOpening = ctx.popup ? ctx.popup.opening : ctx.triggerOpening;
+  const inForm = ctx.popup
+    ? formOpening !== undefined && tagOf(formOpening) === 'form'
+    : isFormTrigger(ctx);
   const handlers = ctx.front.filter((entry) => entry.role !== 'request').map((entry) => entry.fn);
   const read = (state: StateEntry): boolean =>
     handlers.some((fn) =>
       fn.getDescendantsOfKind(SyntaxKind.Identifier).some((id) => id.getText() === state.name),
     );
-  const states = stateIn(ctx, formFn).filter((state) => inForm || read(state));
+  // Only this form's inputs: a login page's OTP box is on the next step's form.
+  const formElement =
+    formOpening && tagOf(formOpening) === 'form' ? formOpening.getParent() : undefined;
+  const inThisForm = (key: string): boolean =>
+    !formElement || new RegExp(`\\b${key.replace(/[$]/g, '\\$')}\\b`).test(formElement.getText());
+  const states = stateIn(ctx, formFn).filter(
+    (state) => (inForm && inThisForm(state.name)) || read(state),
+  );
   if (ctx.componentFn && ctx.componentFn !== formFn)
     states.push(...stateIn(ctx, ctx.componentFn).filter(read));
 
@@ -2479,16 +2786,20 @@ function stageForm(ctx: Ctx): StageBody {
   const rows: DocRow[] = [];
   const required: string[] = [];
   const seen = new Set<string>();
+  let filledHere = 0;
   const addField = (key: string, initial?: string): void => {
     if (seen.has(key)) return;
     seen.add(key);
     const label = ctx.labels.get(key);
-    if (label?.required) required.push(label.label ?? key);
+    // `phone` sent with the OTP was typed on the step before, in another form.
+    const earlier = inForm && formElement !== undefined && !inThisForm(key);
+    if (label?.required && !earlier) required.push(label.label ?? key);
+    if (!earlier) filledHere += 1;
     rows.push({
       cells: [
         code(key),
-        label?.label ?? '',
-        label?.required ? '**yes**' : '',
+        earlier ? `${label?.label ?? key} _(entered earlier, sent again)_` : (label?.label ?? ''),
+        label?.required && !earlier ? '**yes**' : '',
         initial ? code(initial) : '',
       ],
     });
@@ -2497,7 +2808,29 @@ function stageForm(ctx: Ctx): StageBody {
     for (const entry of state.keys ?? []) addField(entry.key, entry.initial);
   // Labelled inputs are the form's fields; beside a lone button they are some other control's.
   const readNames = new Set(states.map((state) => state.name));
-  for (const key of ctx.labels.keys()) if (inForm || readNames.has(key)) addField(key);
+  for (const key of ctx.labels.keys())
+    if ((inForm && inThisForm(key)) || readNames.has(key)) addField(key);
+
+  // A popup with no `<form>`: what the user fills is what its steps name —
+  // the file chosen, the column picked on each row.
+  if (rows.length === 0 && ctx.popup) {
+    for (const step of ctx.flow.steps) {
+      if (step.kind !== 'handler') continue;
+      for (const edge of ctx.graph.edgesFrom(step.nodeId, ['calls'])) {
+        const named = [
+          ...((edge.meta?.['fields'] as string[] | undefined) ?? []),
+          ...(edge.meta?.['input'] && typeof edge.meta['userStep'] === 'string'
+            ? [edge.meta['userStep']]
+            : []),
+        ];
+        for (const label of named) {
+          if (seen.has(label)) continue;
+          seen.add(label);
+          rows.push({ cells: ['', label, '', ''] });
+        }
+      }
+    }
+  }
 
   const stateRows: DocRow[] = states.map((state) => ({
     cells: [
@@ -2544,7 +2877,7 @@ function stageForm(ctx: Ctx): StageBody {
 
   const summary =
     rows.length > 0
-      ? `Fills ${plural(rows.length, 'field')} in ${code(nameOf(formFn))}` +
+      ? `Fills ${plural(filledHere || rows.length, 'field')} in ${code(nameOf(formFn))}${ctx.popup ? ', in the popup' : ''}` +
         (required.length ? ` — required: ${required.map((r) => `"${r}"`).join(', ')}` : '')
       : confirmationsOf(ctx).length > 0
         ? 'Nothing to fill in — a click and a confirmation'
@@ -2594,7 +2927,11 @@ function isFormTrigger(ctx: Ctx): boolean {
 
 function triggerPhrase(ctx: Ctx, withConfirm = true): string {
   const { flow } = ctx;
-  if (isPageLoad(flow)) return `opens ${flow.screen ?? flow.component ?? 'the screen'}`;
+  if (isPageLoad(flow)) {
+    // The page by its address: "Medicines" is the list and the detail page alike.
+    const page = flow.steps[0]?.meta?.['page'];
+    return `opens ${typeof page === 'string' ? `\`${page}\`` : (flow.screen ?? flow.component ?? 'the screen')}`;
+  }
   const opening = ctx.triggerOpening;
   let words = '';
   if (opening && tagOf(opening) === 'form') {
@@ -2602,10 +2939,13 @@ function triggerPhrase(ctx: Ctx, withConfirm = true): string {
       const type = attribute(candidate, 'type');
       return type !== null && type !== undefined && literalText(type) === 'submit';
     });
-    words = submit ? elementText(submit) : '';
+    // The action's own name first: it is read with the props this page passes
+    // ("Update medicine", not "Save medicine / Update medicine") and without
+    // the counts written into the button ("Import {toImport} row{s}").
+    words = flow.label || (submit ? elementText(submit) : '');
     return words ? `clicks "${words}" (submits the form)` : 'submits the form';
   }
-  if (opening) words = elementText(opening);
+  if (opening) words = flow.label || elementText(opening);
   const verb =
     flow.event === 'onChange' ? 'changes' : flow.event === 'onSubmit' ? 'submits' : 'clicks';
   const confirm = withConfirm ? confirmationsOf(ctx)[0] : undefined;
@@ -2635,7 +2975,13 @@ function stageTrigger(ctx: Ctx): StageBody {
     lines.push({ text: `Element ${code(element)}`, at: ctx.reader.point(opening) });
     const disabled = submitButton(opening);
     if (disabled)
-      lines.push({ text: `Disabled while ${code(disabled.condition)} — blocks a double submit` });
+      lines.push({
+        text: `Disabled while ${code(disabled.condition)} — ${
+          PENDING.test(disabled.condition)
+            ? 'blocks a double submit while the request is running'
+            : 'the user cannot press it until that is no longer true'
+        }`,
+      });
   }
   if (ctx.child) {
     lines.push({
@@ -2644,10 +2990,31 @@ function stageTrigger(ctx: Ctx): StageBody {
     });
   }
   const words = triggerPhrase(ctx, false);
+  // A popup the click opens: what the user then does in it is the rest of the feature.
+  const then = popupStep(ctx);
+  if (then) lines.push({ text: `Then, in the popup, the user ${then}` });
   return {
-    summary: `The user ${words.replace(/"([^"]+)"/g, '**"$1"**')}`,
+    summary:
+      `The user ${words.replace(/"([^"]+)"/g, '**"$1"**')}` +
+      (then ? `, then in the popup ${then.replace(/"([^"]+)"/g, '**"$1"**')}` : ''),
     groups: [{ label: 'Trigger', lines }],
   };
+}
+
+/** `fills Start date, End date and presses "Download"`, from the popup the click opens. */
+function popupStep(ctx: Ctx): string | undefined {
+  for (const step of ctx.flow.steps) {
+    if (step.kind !== 'handler') continue;
+    // A wizard's steps in order: `presses "Continue", then presses "Import rows"`.
+    const said = ctx.graph.edgesFrom(step.nodeId, ['calls']).flatMap((edge) => {
+      const pressed = edge.meta?.['userStep'];
+      if (typeof pressed !== 'string') return [];
+      const fields = (edge.meta?.['fields'] as string[] | undefined) ?? [];
+      return [`${filledFields(fields)}${edge.meta?.['input'] ? 'uses' : 'presses'} "${pressed}"`];
+    });
+    if (said.length) return said.join(', then ');
+  }
+  return undefined;
 }
 
 function eventOn(opening: Node, handler: Functionish): string | undefined {
@@ -2664,6 +3031,10 @@ function eventOn(opening: Node, handler: Functionish): string | undefined {
 }
 
 /** The submit button's `disabled={…}`, for forms. */
+/** `isPending`, `loading`, `saving`: a request in flight, not a rule about the input. */
+const PENDING =
+  /\b(is)?(pending|loading|submitting|saving|busy|fetching)\b|\.isPending|\.isLoading/i;
+
 function submitButton(opening: Node): { condition: string } | undefined {
   const scope = opening.getParent() ?? opening;
   const candidates =
@@ -2857,7 +3228,8 @@ function stageFrontendValidation(ctx: Ctx): StageBody {
           tone: 'muted',
         },
       ],
-      table: checkedRows(entry.facts, ctx.labels),
+      // Every field the schema takes, with no check or with one: `remarks` too.
+      table: schemaTable(entry.facts, ctx.labels),
     });
   }
 
@@ -2872,7 +3244,16 @@ function stageFrontendValidation(ctx: Ctx): StageBody {
   const disabled = ctx.triggerOpening ? submitButton(ctx.triggerOpening) : undefined;
   if (disabled)
     hints.push({
-      text: `The button is disabled while ${code(disabled.condition)}, so it cannot be sent twice`,
+      // `disabled={!canSave}` is a rule about the input; only a request-in-flight flag stops a double send.
+      text: PENDING.test(disabled.condition)
+        ? `The button is disabled while ${code(disabled.condition)}, so it cannot be sent twice`
+        : `The button is disabled while ${code(disabled.condition)}`,
+    });
+  // `<Button loading={save.isPending}>`: busy while the request is out, so it is not sent twice.
+  const loading = ctx.triggerOpening ? attribute(ctx.triggerOpening, 'loading') : undefined;
+  if (loading && !(disabled && PENDING.test(disabled.condition)))
+    hints.push({
+      text: `While ${code(condense(loading.getText(), 40))} the button shows it is busy and cannot be pressed again, so it is not sent twice`,
     });
   groups.push({ label: 'Form hints', lines: hints });
 
@@ -2887,14 +3268,30 @@ function stageFrontendValidation(ctx: Ctx): StageBody {
 
   const schema = ctx.frontSchemas[0];
   const checked = schema ? checkedRows(schema.facts, ctx.labels).rows.length : 0;
+  // `disabled={!canSave}`: the button itself is the check.
+  const disabledBy = ctx.triggerOpening ? submitButton(ctx.triggerOpening)?.condition : undefined;
+  const gate =
+    disabledBy && !PENDING.test(disabledBy)
+      ? disabledBy.replace(/^!\s*/, '').replace(/\s*\|\|\s*\w*(pending|loading|saving)\w*$/i, '')
+      : undefined;
   const summary =
     stops.length + ctx.frontSchemas.length === 0
       ? confirms.length > 0
         ? 'No input to check — only the confirmation, which stops if the user cancels'
-        : 'No check — whatever is typed is sent'
+        : gate
+          ? `Can only be pressed when ${code(gate)} — nothing else is checked`
+          : ctx.calls.length === 0
+            ? 'No check — nothing is sent'
+            : 'No check — whatever is typed is sent'
       : [
           schema ? `${code(schema.facts.name)} checks ${plural(checked, 'field')}` : '',
-          stops[0] ? `stops if ${stops[0].cells[0]}` : '',
+          // Every early stop, not only the first: `!medicine`, then the quantity check.
+          stops.length
+            ? `stops if ${stops
+                .slice(0, 3)
+                .map((row) => row.cells[0])
+                .join(', or if ')}${stops.length > 3 ? ` (and ${stops.length - 3} more)` : ''}`
+            : '',
         ]
           .filter(Boolean)
           .join('; ');
@@ -3035,10 +3432,13 @@ function stagePayload(ctx: Ctx): StageBody {
                 : 'the form',
             changed: field.transforms.join('; '),
             sent:
-              field.rules.some((rule) => rule === 'optional' || rule === 'or blank') &&
-              !field.transforms.some((t) => t.startsWith('defaults to'))
-                ? 'only if filled in'
-                : 'always',
+              // `.or(z.literal(""))` keeps an empty field as "": it is still sent.
+              field.rules.includes('or blank')
+                ? 'always — blank if left empty'
+                : field.rules.includes('optional') &&
+                    !field.transforms.some((t) => t.startsWith('defaults to'))
+                  ? 'always — may be left empty'
+                  : 'always',
           });
         }
         source = `${trace.state ? code(trace.state) : 'the form'}, cleaned by ${code(schema.name)}`;
@@ -3097,17 +3497,34 @@ function stagePayload(ctx: Ctx): StageBody {
 }
 
 function noRequest(ctx: Ctx): StageBody {
-  void ctx;
+  // `qc.invalidateQueries()`: no request of its own, but the data on screen loads again.
+  const reloads = ctx.front.some((entry) =>
+    entry.fn
+      .getDescendantsOfKind(SyntaxKind.CallExpression)
+      .some((call) =>
+        /\.(invalidateQueries|refetchQueries|resetQueries)$|^(router\.refresh|mutate)$/.test(
+          call.getExpression().getText(),
+        ),
+      ),
+  );
+  const said = reloads
+    ? 'No request of its own — but it makes the data on screen load again (see the response handler)'
+    : 'No request — only changes what is on screen';
   return {
-    summary: 'No request — only changes what is on screen',
+    summary: said,
     groups: [],
     absent: true,
-    empty: 'This action makes no request — it only changes what is on screen.',
+    empty: `${said}.`,
   };
 }
 
 function stageRequest(ctx: Ctx): StageBody {
   if (ctx.calls.length === 0) return noRequest(ctx);
+  // `useDebounce(search)` between the input and the query that reads it.
+  const wait = ctx.flow.steps
+    .flatMap((step) => ctx.graph.edgesFrom(step.nodeId, ['calls']))
+    .map((edge) => edge.meta?.['debounceMs'])
+    .find((ms): ms is number => typeof ms === 'number');
   const groups: DocGroup[] = [];
   const summaries: string[] = [];
   for (const context of ctx.calls) {
@@ -3117,7 +3534,12 @@ function stageRequest(ctx: Ctx): StageBody {
     const raw = detail.rawPath ?? detail.path;
     const url =
       client?.baseURL && !/^https?:/.test(raw) ? `${client.baseURL.replace(/\/$/, '')}${raw}` : raw;
-    const query = [...new Set([...detail.queryKeys, ...configQueryKeys(context.call)])];
+    const query = [
+      ...new Set([
+        ...detail.queryKeys,
+        ...callerParams(ctx, context, configQueryKeys(context.call)),
+      ]),
+    ];
     const body = context.call ? bodyArgument(context.call, detail.method) : undefined;
     const declared = declaredResponseType(context.call);
     const paths = pathParams(ctx, context);
@@ -3163,11 +3585,34 @@ function stageRequest(ctx: Ctx): StageBody {
         })),
       ),
     });
+    // `refetchInterval: (q) => processing ? 2000 : false`: sent again and again, not once.
+    const options = context.hook?.options;
+    const interval =
+      options && Node.isObjectLiteralExpression(options)
+        ? options.getProperty('refetchInterval')
+        : undefined;
+    const every =
+      interval && Node.isPropertyAssignment(interval) ? interval.getInitializer() : undefined;
+    const polls = every && every.getText() !== 'false' ? every : undefined;
+    if (polls)
+      groups.push({
+        label: `${prefix}Sent again`,
+        lines: [
+          {
+            text: Node.isNumericLiteral(polls)
+              ? `Every ${polls.getText()} ms, for as long as it is on screen`
+              : `Again and again, by ${code(condense(polls.getText(), 90))}`,
+            at: ctx.reader.point(polls),
+          },
+        ],
+      });
     summaries.push(
       `${code(`${detail.method} ${url}`)}` +
         (client?.headers.length
           ? ` with ${client.headers.map((h) => code(h.name)).join(', ')}`
-          : ''),
+          : '') +
+        (polls ? ', sent again on a timer' : '') +
+        (wait !== undefined ? `, sent once the typing has stopped for ${wait} ms` : ''),
     );
   }
   return { summary: summaries.join(' · '), groups };
@@ -3234,7 +3679,9 @@ function stageGuards(ctx: Ctx): StageBody {
     for (const guard of guardsIn(ctx, handler)) {
       names.add(guard.name);
       runs.push({
-        text: `${code(guard.call)} runs before the handler does any work, and returns early if it fails`,
+        text: guard.after.length
+          ? `${code(guard.call)} runs inside the handler, after ${guard.after.map(code).join(', ')}, and returns early if it fails`
+          : `${code(guard.call)} runs before the handler does any work, and returns early if it fails`,
         at: guard.declaredAt ?? guard.at,
       });
       for (const exit of guard.exits) {
@@ -3323,21 +3770,31 @@ function stageController(ctx: Ctx): StageBody {
         });
       continue;
     }
-    // Only the calls the handler makes as steps of its own, not the ones inside a return.
+    // The work it does, in order: inside `try` and `return json(await work())`
+    // too, but not an early exit's error response or a `catch`.
+    const inside = (node: Node | undefined): boolean =>
+      node !== undefined && handler.fn.containsRange(node.getPos(), node.getEnd());
     const calls = [
       ...new Set(
-        bodyStatements(handler.fn)
-          .flatMap((statement) => {
-            if (Node.isVariableStatement(statement))
-              return statement.getDeclarations().map((declaration) => declaration.getInitializer());
-            if (Node.isExpressionStatement(statement)) return [statement.getExpression()];
-            return [];
+        ownDescendants<CallExpression>(handler.fn, SyntaxKind.CallExpression)
+          .filter((call) => {
+            if (inside(call.getFirstAncestorByKind(SyntaxKind.CatchClause))) return false;
+            // `@Get('range')`, `@Res() res`: the decorators are not what it does.
+            if (call.getFirstAncestorByKind(SyntaxKind.Decorator)) return false;
+            // `clinics.find((c) => …)` searches an array; it is not a step.
+            if (
+              call
+                .getArguments()
+                .some((arg) => Node.isArrowFunction(arg) || Node.isFunctionExpression(arg))
+            )
+              return false;
+            const branch = call.getFirstAncestorByKind(SyntaxKind.IfStatement);
+            return !(
+              inside(branch) &&
+              branch!.getThenStatement().containsRange(call.getPos(), call.getEnd()) &&
+              endsFunction(branch!.getThenStatement())
+            );
           })
-          .map((expression) => (expression ? unwrap(expression) : undefined))
-          .filter(
-            (expression): expression is CallExpression =>
-              expression !== undefined && Node.isCallExpression(expression),
-          )
           .map((call) =>
             call
               .getExpression()
@@ -3346,10 +3803,13 @@ function stageController(ctx: Ctx): StageBody {
           )
           .filter(
             (name) =>
-              !/^(request|req|res|response|JSON|console)\b|\.catch$|\.json$|^json$/.test(name),
+              !name.includes('(') &&
+              !/^(request|req|res|response|JSON|console|Response|NextResponse|String|Number|Boolean|Array|Object|Math|Date)\b|\.catch$|\.json$|^(json|apiError|unauthorized|forbidden|notFound|badRequest)$|\.(trim|map|filter|toString|get|has|push)$/.test(
+                name,
+              ),
           ),
       ),
-    ].slice(0, 5);
+    ].slice(0, 6);
     summaries.push(
       `${code(handler.label)}${calls.length ? ` calls ${calls.map(code).join(', ')}` : ''}`,
     );
@@ -3410,7 +3870,7 @@ function stageBackendValidation(ctx: Ctx): StageBody {
           lines: [
             { text: `${code(shortCall(check.call))}${failure}`, at: ctx.reader.point(check.call) },
           ],
-          ...(check.facts ? { table: checkedRows(check.facts, ctx.labels) } : {}),
+          ...(check.facts ? { table: schemaTable(check.facts, ctx.labels) } : {}),
         });
       }
       summaries.push(
@@ -3557,14 +4017,45 @@ function stageService(ctx: Ctx): StageBody {
   const chains: string[] = [];
 
   for (const context of ctx.calls) {
-    const services = context.backendFns.slice(1);
+    const services = context.backendFns.slice(1).filter((service) => !service.background);
+    const later = context.backendFns.filter((service) => service.background);
     if (services.length > 0) {
       chains.push(services.map((service) => code(service.label)).join(' → '));
       order.push({ text: services.map((service) => code(service.label)).join(' → ') });
     }
+    // A queued job: the request has answered before any of this runs.
+    if (later.length > 0) {
+      const queue = ctx.flow.steps.find((step) => step.meta?.['queue'])?.meta?.['queue'];
+      const chain = later.map((service) => code(service.label)).join(' → ');
+      chains.push(`then, in a background worker: ${chain}`);
+      order.push({
+        text: `Later, in a background worker${typeof queue === 'string' ? ` (queue ${code(queue)})` : ''}, after the response is sent: ${chain}`,
+      });
+    }
+    /**
+     * `if (updated.currentStock !== previousStock) await recordMovement(…)`:
+     * the `if` around the call decides whether the helper's insert happens at
+     * all, so it belongs to every query inside it. Read from the caller in
+     * this request's chain; a helper called somewhere without a condition runs
+     * unconditionally.
+     */
+    const calledWhen = (entry: (typeof context.backendFns)[number]): string[] => {
+      const name = nameOf(entry.fn);
+      for (const caller of context.backendFns) {
+        if (caller === entry) continue;
+        const sites = ownDescendants<CallExpression>(caller.fn, SyntaxKind.CallExpression).filter(
+          (call) => call.getExpression().getText().split('.').pop() === name,
+        );
+        if (sites.length === 0) continue;
+        const each = sites.map((site) => conditionsFor(site, caller.fn));
+        return each.some((list) => list.length === 0) ? [] : each[0]!;
+      }
+      return [];
+    };
     for (const entry of context.backendFns) {
+      const outer = calledWhen(entry);
       for (const op of dbOpsIn(ctx, entry.fn)) {
-        const conditions = op.call ? conditionsFor(op.call, entry.fn) : [];
+        const conditions = [...outer, ...(op.call ? conditionsFor(op.call, entry.fn) : [])];
         let does: string;
         if (op.effect === 'read') {
           reads += 1;
@@ -3607,7 +4098,24 @@ function stageService(ctx: Ctx): StageBody {
       }
     }
   }
-  const counts = [reads ? plural(reads, 'read') : '', writes ? plural(writes, 'write') : '']
+  // Calls that leave the app: an SMS gateway, a job queue, a payment API.
+  const outside: DocLine[] = [];
+  const seenOutside = new Set<string>();
+  for (const context of ctx.calls)
+    for (const effect of context.detail.effects) {
+      const key = `${effect.label}@${effect.file}:${effect.line}`;
+      if (seenOutside.has(key)) continue;
+      seenOutside.add(key);
+      outside.push({
+        text: `${code(effect.label)} — ${effect.kind === 'queue' ? 'a job is queued for a background worker' : 'a call to a service outside the app'}`,
+        ...(effect.file ? { at: { file: effect.file, line: effect.line ?? 1 } } : {}),
+      });
+    }
+  const counts = [
+    reads ? plural(reads, 'read') : '',
+    writes ? plural(writes, 'write') : '',
+    outside.length ? plural(outside.length, 'outside call') : '',
+  ]
     .filter(Boolean)
     .join(', ');
   return {
@@ -3617,6 +4125,7 @@ function stageService(ctx: Ctx): StageBody {
     ...(chains.length === 0 && !counts ? { absent: true as const } : {}),
     groups: [
       { label: 'Functions, in order', lines: order },
+      { label: 'Leaves the app', lines: outside },
       {
         label: 'What it does, and when',
         lines: [],
@@ -3634,10 +4143,11 @@ function stageDatabase(ctx: Ctx): StageBody {
   const effects = new Map<string, Set<string>>();
   for (const context of ctx.calls) {
     for (const access of context.detail.data) {
-      const label =
-        (DB_EFFECT_LABEL as Record<string, string>)[access.effect as DbEffect] ?? access.effect;
+      const label = access.upsert
+        ? 'updated in, or inserted if none matches'
+        : ((DB_EFFECT_LABEL as Record<string, string>)[access.effect as DbEffect] ?? access.effect);
       const set = effects.get(access.collection) ?? new Set<string>();
-      set.add(access.effect === 'create' ? 'insert' : access.effect);
+      set.add(access.upsert ? 'upsert' : access.effect === 'create' ? 'insert' : access.effect);
       effects.set(access.collection, set);
       rows.push({
         cells: [
@@ -3651,6 +4161,12 @@ function stageDatabase(ctx: Ctx): StageBody {
       });
       if (access.joins?.length)
         rows.push({ cells: ['', '', `also brings back ${access.joins.map(code).join(', ')}`, ''] });
+      // A `$lookup` reads that collection too, so it is in the summary.
+      for (const joined of access.joins ?? []) {
+        const read = effects.get(joined) ?? new Set<string>();
+        read.add('joined in');
+        effects.set(joined, read);
+      }
     }
   }
   for (const collection of effects.keys()) {
@@ -3723,8 +4239,11 @@ function stageDbResult(ctx: Ctx): StageBody {
         if (op.call) {
           const declaration = op.call.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
           const returned = op.call.getFirstAncestorByKind(SyntaxKind.ReturnStatement);
+          // `const [rollup, recent] = await Promise.all([q1, q2])`: q2 is `recent`.
+          const own = resultName(baseQueryCall(op.call) ?? op.call);
           if (declaration && entry.fn.containsRange(declaration.getPos(), declaration.getEnd())) {
-            const name = condense(declaration.getNameNode().getText(), 30);
+            const name =
+              own && own !== 'returned' ? own : condense(declaration.getNameNode().getText(), 30);
             use = `kept as ${code(name)}`;
             kept.push(`${code(op.operation)} → ${code(name)}`);
           } else if (returned && entry.fn.containsRange(returned.getPos(), returned.getEnd())) {
@@ -3777,9 +4296,19 @@ function stageResponse(ctx: Ctx): StageBody {
     const { detail } = context;
     const handler = context.backendFns[0];
     if (handler) {
-      // The final return(s): the happy path.
-      const finals = bodyStatements(handler.fn).filter((statement) =>
-        Node.isReturnStatement(statement),
+      // The final return(s): the happy path — at the top, or inside a `try`
+      // (`try { …; return json(res, { status: 202 }) } catch { … }`), never an
+      // early exit or a catch.
+      const inside = (node: Node | undefined): boolean =>
+        node !== undefined && handler.fn.containsRange(node.getPos(), node.getEnd());
+      const finals = ownDescendants<import('ts-morph').ReturnStatement>(
+        handler.fn,
+        SyntaxKind.ReturnStatement,
+      ).filter(
+        (statement) =>
+          !inside(statement.getFirstAncestorByKind(SyntaxKind.IfStatement)) &&
+          !inside(statement.getFirstAncestorByKind(SyntaxKind.CatchClause)) &&
+          !inside(statement.getFirstAncestorByKind(SyntaxKind.SwitchStatement)),
       );
       for (const statement of finals) {
         let expression = Node.isReturnStatement(statement) ? statement.getExpression() : undefined;
@@ -3817,7 +4346,51 @@ function stageResponse(ctx: Ctx): StageBody {
           tone: 'ok',
         });
       }
-      if (finals.length === 0 && /nestjs/.test(detail.route?.framework ?? '')) {
+      // `@Res() res`: answered by `res.status(400).json(…)` / `res.send(buffer)`.
+      const respondsWith = ownDescendants<CallExpression>(
+        handler.fn,
+        SyntaxKind.CallExpression,
+      ).filter((call) =>
+        /^(res|response|reply)(\.status\([^)]*\))?\.(json|send|end|redirect|sendFile|download)$/.test(
+          call.getExpression().getText().replace(/\s+/g, ''),
+        ),
+      );
+      for (const call of respondsWith) {
+        const status = /\.status\(\s*([^)]+)\)/.exec(call.getExpression().getText())?.[1];
+        const known: Record<string, number> = {
+          OK: 200,
+          CREATED: 201,
+          BAD_REQUEST: 400,
+          UNAUTHORIZED: 401,
+          FORBIDDEN: 403,
+          NOT_FOUND: 404,
+          UNPROCESSABLE_ENTITY: 422,
+          INTERNAL_SERVER_ERROR: 500,
+        };
+        const code_ = status ? Number(status) || known[status.split('.').pop() ?? ''] || 200 : 200;
+        const failing = code_ >= 400;
+        (failing ? failed : ok).push(String(code_));
+        const body = call.getArguments()[0];
+        rows.push({
+          cells: [
+            `**${code_}**`,
+            failing
+              ? inside(call.getFirstAncestorByKind(SyntaxKind.CatchClause))
+                ? 'anything above fails'
+                : 'failure'
+              : 'success',
+            body ? code(condense(body.getText(), 50)) : '',
+            code(handler.label),
+          ],
+          at: ctx.reader.point(call),
+          tone: failing ? 'error' : 'ok',
+        });
+      }
+      if (
+        finals.length === 0 &&
+        respondsWith.length === 0 &&
+        /nestjs/.test(detail.route?.framework ?? '')
+      ) {
         ok.push(defaultStatus(detail));
         rows.push({
           cells: [
@@ -3828,6 +4401,27 @@ function stageResponse(ctx: Ctx): StageBody {
           ],
           tone: 'ok',
         });
+      }
+      // `catch (err) { return apiError("Could not queue the import…", 503) }`:
+      // the route's own answer when anything in its `try` fails.
+      for (const statement of ownDescendants<import('ts-morph').ReturnStatement>(
+        handler.fn,
+        SyntaxKind.ReturnStatement,
+      )) {
+        const expression = statement.getExpression();
+        if (!expression || !inside(statement.getFirstAncestorByKind(SyntaxKind.CatchClause)))
+          continue;
+        const status = statusOf(ctx.reader, expression);
+        if (!status?.statuses.length) continue;
+        errorRow(
+          {
+            statuses: status.statuses,
+            condition: '(anything in the try fails)',
+            ...(status.message ? { message: status.message } : {}),
+            at: ctx.reader.point(statement),
+          },
+          code(handler.label),
+        );
       }
       for (const guard of guardsIn(ctx, handler.fn))
         for (const exit of guard.exits) errorRow(exit, code(guard.name));
@@ -3910,11 +4504,21 @@ function responseShape(ctx: Ctx, body: Node, fn: Functionish): string | undefine
   const name = call.getExpression().getText();
   const producer = ctx.reader.functionNamed(name, call.getSourceFile());
   if (!producer) return `the result of ${code(`${name}()`)}`;
+  // `if ("error" in result) return apiError(…, 404)` before it: the shapes
+  // with an `error` never reach this answer.
+  const excluded = new Set<string>();
+  for (const check of fn.getDescendantsOfKind(SyntaxKind.IfStatement)) {
+    const test = /^["'](\w+)["']\s+in\s+([\w$]+)$/.exec(check.getExpression().getText().trim());
+    if (test && test[2] === value.getText() && endsFunction(check.getThenStatement()))
+      excluded.add(test[1]!);
+  }
   const keys = new Set<string>();
   for (const returned of returnsOf(producer)) {
     const object = unwrap(returned);
-    if (Node.isObjectLiteralExpression(object))
-      for (const key of objectKeysOf(object)) keys.add(key);
+    if (!Node.isObjectLiteralExpression(object)) continue;
+    const own = objectKeysOf(object);
+    if (own.some((key) => excluded.has(key))) continue;
+    for (const key of own) keys.add(key);
   }
   const declared = producer.getReturnTypeNode()?.getText();
   if (keys.size > 0) return `${code(`{ ${[...keys].join(', ')} }`)} from ${code(`${name}()`)}`;
@@ -4003,6 +4607,8 @@ const KIND_WORD: Record<ReactionKind, string> = {
   Navigation: 'navigation',
   'Toast/notification': 'toast',
   'Modal close': 'closes dialog',
+  Screen: 'screen',
+  Download: 'download',
   Other: 'call',
 };
 
@@ -4043,6 +4649,59 @@ function reactionRows(ctx: Ctx): ReactionRow[] {
         });
       }
     }
+    // `useEffect(() => { if (jobState === "completed") toast(…) … }, [statusQ.data])`:
+    // what the screen does once the answer it watches arrives.
+    const hook = context.hook?.name;
+    const files = hook
+      ? new Set(ctx.flow.steps.flatMap((step) => (step.file ? [step.file] : [])))
+      : new Set<string>();
+    for (const rel of files) {
+      const file = ctx.reader.file(rel);
+      if (!file || !hook) continue;
+      // `if (clinics) { … setSelectedId(…) }` in the component body, as it draws with the answer.
+      for (const statement of rendersWatching(file, hook))
+        for (const call of statement.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+          const classified = classifyReaction(call);
+          if (!classified || classified.kind === 'Other') continue;
+          add({
+            phase: 'on success',
+            kind: classified.kind,
+            text: classified.text,
+            where: `as it draws, when ${code(
+              condense(
+                (call.getFirstAncestorByKind(SyntaxKind.IfStatement) ?? statement)
+                  .getExpression()
+                  .getText(),
+                50,
+              ),
+            )}`,
+            at: ctx.reader.point(call),
+          });
+        }
+      for (const { fn, deps } of effectsWatching(file, hook)) {
+        for (const call of ownCallsOf(fn, fn)) {
+          const classified = classifyReaction(call);
+          if (!classified || classified.kind === 'Other') continue;
+          const branch = call
+            .getAncestors()
+            .find(
+              (node) => Node.isIfStatement(node) && fn.containsRange(node.getPos(), node.getEnd()),
+            );
+          const failing =
+            branch !== undefined &&
+            Node.isIfStatement(branch) &&
+            /fail|error/i.test(branch.getExpression().getText());
+          add({
+            phase: failing ? 'on error' : 'on success',
+            kind: classified.kind,
+            text: classified.text,
+            where: `useEffect on ${code(deps.join(', '))}`,
+            at: ctx.reader.point(call),
+          });
+        }
+      }
+    }
+    for (const row of screenRows(ctx, context)) add(row);
     for (const name of realState(context))
       add({
         phase: 'on success',
@@ -4052,6 +4711,404 @@ function reactionRows(ctx: Ctx): ReactionRow[] {
       });
   }
   return rows;
+}
+
+const QUERY_HOOKS = /^(useQuery|useInfiniteQuery|useSuspenseQuery|useSWR)$/;
+
+/**
+ * What the screen shows from a load, read from the component that asked for
+ * it: `if (isLoading) return <Skeleton />`, `isError || !medicine ? <Empty
+ * title="Not found" /> : …`, the data in the JSX.
+ *
+ * A load has no `onSuccess` of its own: the component *is* its response
+ * handler. Without this every page load read "Success: nothing visible ·
+ * Error: not handled" while its table, skeleton and empty state were right
+ * there in the source.
+ */
+type LoadRole = 'data' | 'loading' | 'error';
+
+function screenRows(ctx: Ctx, context: CallContext): ReactionRow[] {
+  const hook = context.hook;
+  const component = ctx.componentFn;
+  if (!hook || !component) return [];
+  const queryCall = hook.options?.getParent();
+  if (!queryCall || !Node.isCallExpression(queryCall)) return [];
+  if (!QUERY_HOOKS.test(queryCall.getExpression().getText())) return [];
+  // The call in the component: the custom hook, or `useQuery` written inline.
+  const used =
+    hook.fn === component ||
+    (queryCall.getSourceFile() === component.getSourceFile() &&
+      component.containsRange(queryCall.getPos(), queryCall.getEnd()))
+      ? queryCall
+      : component
+          .getDescendantsOfKind(SyntaxKind.CallExpression)
+          .find((call) => call.getExpression().getText() === hook.name);
+  const declaration = used?.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
+  if (!declaration) return [];
+
+  // `{ data: medicine, isLoading }` → data: medicine, loading: isLoading;
+  // `history` → data: history.data, loading: history.isLoading.
+  const roles = new Map<string, LoadRole>();
+  const binding = declaration.getNameNode();
+  if (Node.isIdentifier(binding)) {
+    const name = binding.getText();
+    for (const field of ['data', 'isLoading', 'isPending', 'isFetching', 'isError', 'error'])
+      roles.set(`${name}.${field}`, roleOfField(field)!);
+    roles.set(`${name}?.data`, 'data');
+  } else if (Node.isObjectBindingPattern(binding)) {
+    for (const element of binding.getElements()) {
+      const field = element.getPropertyNameNode()?.getText() ?? element.getName();
+      const kind = roleOfField(field);
+      if (kind) roles.set(element.getName(), kind);
+    }
+  }
+  if (roles.size === 0) return [];
+  const derived = derivedStates(component, roles);
+  const rows = branchRows(ctx, component, roles, derived, declaration, true);
+  rows.push(...contextRows(ctx, component, roles, derived));
+  return rows;
+}
+
+function roleOfField(field: string): LoadRole | undefined {
+  return /^(data|items|rows)$/.test(field)
+    ? 'data'
+    : /^(isLoading|isPending|isFetching|loading)$/.test(field)
+      ? 'loading'
+      : /^(isError|error)$/.test(field)
+        ? 'error'
+        : undefined;
+}
+
+/** Which load states a piece of code mentions, by name. */
+function mentionsOf(
+  text: string,
+  roles: Map<string, LoadRole>,
+  derived: Map<string, Map<string, LoadRole>>,
+): Set<LoadRole> {
+  const found = new Set<LoadRole>();
+  for (const [name, kind] of roles) {
+    const escaped = name.replace(/[.?$]/g, (c) => `\\${c}`);
+    if (new RegExp(`(^|[^\\w.$])${escaped}(?![\\w$])`).test(text)) found.add(kind);
+  }
+  // `status === "unauthenticated"`, `status !== "authenticated"`
+  for (const match of text.matchAll(/([\w$]+)\s*(===|!==)\s*["'`]([\w-]+)["'`]/g)) {
+    const outcomes = derived.get(match[1]!);
+    const role = outcomes?.get(match[3]!);
+    if (!outcomes || !role) continue;
+    if (match[2] === '===') found.add(role);
+    else for (const other of new Set(outcomes.values())) if (other !== role) found.add(other);
+  }
+  return found;
+}
+
+/**
+ * `const status = isPending ? "loading" : isError || !user ? "unauthenticated"
+ * : "authenticated"`: each value a load state, so a consumer comparing
+ * `status === "unauthenticated"` is reading the failure.
+ */
+function derivedStates(
+  scope: Node,
+  roles: Map<string, LoadRole>,
+): Map<string, Map<string, LoadRole>> {
+  const derived = new Map<string, Map<string, LoadRole>>();
+  for (const declaration of scope.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    let init = declaration.getInitializer();
+    if (!init || !Node.isConditionalExpression(init)) continue;
+    const outcomes = new Map<string, LoadRole>();
+    while (init && Node.isConditionalExpression(init)) {
+      const said = mentionsOf(init.getCondition().getText(), roles, new Map());
+      const value = init.getWhenTrue();
+      const role: LoadRole | undefined = said.has('loading')
+        ? 'loading'
+        : said.has('error') || said.has('data')
+          ? 'error'
+          : undefined;
+      if (role && Node.isStringLiteral(value)) outcomes.set(value.getLiteralValue(), role);
+      init = init.getWhenFalse();
+    }
+    if (init && Node.isStringLiteral(init)) outcomes.set(init.getLiteralValue(), 'data');
+    if (outcomes.size >= 2) derived.set(declaration.getName(), outcomes);
+  }
+  return derived;
+}
+
+/** What one component shows for each state of a load, read from its branches. */
+function branchRows(
+  ctx: Ctx,
+  component: Node,
+  roles: Map<string, LoadRole>,
+  derived: Map<string, Map<string, LoadRole>>,
+  anchor: Node,
+  own: boolean,
+): ReactionRow[] {
+  const mentions = (text: string) => mentionsOf(text, roles, derived);
+  const rows: ReactionRow[] = [];
+  const where = code(nameOf(component));
+  const add = (phase: ReactionPhase, text: string, at: Node): void => {
+    if (rows.some((row) => row.phase === phase && row.text === text)) return;
+    rows.push({ phase, kind: 'Screen', text, where, at: ctx.reader.point(at) });
+  };
+  let errorShown = false;
+  let emptyOnMissing: string | undefined;
+  const branches: Array<{ condition: Node; shows: Node }> = [];
+  for (const node of component.getDescendants()) {
+    if (
+      Node.isIfStatement(node) &&
+      (endsFunction(node.getThenStatement()) || navigationIn(node.getThenStatement()))
+    )
+      branches.push({ condition: node.getExpression(), shows: node.getThenStatement() });
+    else if (Node.isConditionalExpression(node))
+      branches.push({ condition: node.getCondition(), shows: node.getWhenTrue() });
+    else if (
+      Node.isBinaryExpression(node) &&
+      node.getOperatorToken().getKind() === SyntaxKind.AmpersandAmpersandToken &&
+      jsxOpenings(node.getRight()).length > 0
+    )
+      branches.push({ condition: node.getLeft(), shows: node.getRight() });
+  }
+  for (const { condition, shows } of branches) {
+    const text = condition.getText();
+    const kinds = mentions(text);
+    if (kinds.size === 0) continue;
+    // `if (status === "unauthenticated") router.replace("/login")`
+    const sentTo = navigationIn(shows);
+    const view = sentTo ? `the user is sent to ${code(sentTo)}` : describeView(shows);
+    if (!view) continue;
+    // `!data`, `data.length === 0`: nothing to show.
+    const empty =
+      kinds.has('data') &&
+      [...roles].some(
+        ([name, kind]) =>
+          kind === 'data' &&
+          (text.includes(`!${name}`) ||
+            new RegExp(`${name.replace(/[.?$]/g, (c) => `\\${c}`)}\\??\\.(length|total)\\b`).test(
+              text,
+            )),
+      );
+    const shown = sentTo ? view : `${view} shows`;
+    // `isLoading || !data ? <Skeleton />`: the placeholder also covers "nothing came back".
+    if (kinds.has('loading') && empty) {
+      add('always', `while it loads, ${shown}`, condition);
+      emptyOnMissing ??= view;
+      continue;
+    }
+    if (kinds.has('loading')) add('always', `while it loads, ${shown}`, condition);
+    if (kinds.has('error')) {
+      errorShown = true;
+      add('on error', shown, condition);
+    }
+    if (empty) {
+      add('on success', `when there is nothing to show, ${shown}`, condition);
+      if (text.includes('!')) emptyOnMissing ??= view;
+    }
+  }
+  // A failed load leaves `data` undefined: `!data` is what the user sees then.
+  if (!errorShown && emptyOnMissing)
+    add(
+      'on error',
+      emptyOnMissing === 'a loading placeholder'
+        ? 'the loading placeholder stays on screen — the failure is never shown'
+        : `${emptyOnMissing} shows — the same as when there is nothing to show`,
+      anchor,
+    );
+  // Used anywhere after it is loaded — in the JSX, or a variable the JSX reads.
+  if (own) {
+    const after = component.getText().slice(anchor.getEnd() - component.getStart());
+    if (mentions(after).has('data'))
+      add('on success', 'the data it loaded appears on screen', anchor);
+  }
+  return rows;
+}
+
+/** `router.replace("/login")` in a branch: where it sends the user. */
+function navigationIn(node: Node): string | undefined {
+  // Run by the branch itself — not inside a button's `onClick` the user presses.
+  const scope = nearestFunction(node);
+  const call = [node, ...node.getDescendantsOfKind(SyntaxKind.CallExpression)].find(
+    (candidate) =>
+      Node.isCallExpression(candidate) &&
+      nearestFunction(candidate) === scope &&
+      /\b(router|navigate|history)\b.*\b(push|replace)$|^navigate$|^redirect$/.test(
+        candidate.getExpression().getText(),
+      ),
+  );
+  if (!call || !Node.isCallExpression(call)) return undefined;
+  return literalText(call.getArguments()[0]) ?? undefined;
+}
+
+/**
+ * A provider's load is shown by whoever reads its context:
+ * `<ClinicContext.Provider value={{ loading: isPending, error: isError }}>`
+ * and `const { error } = useClinic()` in the gate that shows "No clinic
+ * access". Followed to those components, their branches read the same way.
+ */
+function contextRows(
+  ctx: Ctx,
+  component: Functionish,
+  roles: Map<string, LoadRole>,
+  derived: Map<string, Map<string, LoadRole>>,
+): ReactionRow[] {
+  const provider = jsxOpenings(component).find((opening) => /\.Provider$/.test(tagOf(opening)));
+  if (!provider) return [];
+  const contextName = tagOf(provider).replace(/\.Provider$/, '');
+  let value = attribute(provider, 'value') ?? undefined;
+  if (value && Node.isIdentifier(value)) {
+    const local = localVariable(component, value.getText());
+    value =
+      local && Node.isVariableDeclaration(local)
+        ? (local.getInitializer() ?? undefined)
+        : undefined;
+  }
+  const object = value
+    ? Node.isObjectLiteralExpression(value)
+      ? value
+      : value
+          .getDescendantsOfKind(SyntaxKind.ObjectLiteralExpression)
+          .find((candidate) => candidate.getProperties().length > 1)
+    : undefined;
+  if (!object || !Node.isObjectLiteralExpression(object)) return [];
+  // What each member of the context is, in load terms.
+  const memberRoles = new Map<string, LoadRole>();
+  const memberDerived = new Map<string, Map<string, LoadRole>>();
+  for (const property of object.getProperties()) {
+    if (Node.isShorthandPropertyAssignment(property)) {
+      const name = property.getName();
+      const role = roles.get(name);
+      if (role) memberRoles.set(name, role);
+      const outcomes = derived.get(name);
+      if (outcomes) memberDerived.set(name, outcomes);
+    } else if (Node.isPropertyAssignment(property)) {
+      const init = property.getInitializer();
+      if (!init) continue;
+      let said = mentionsOf(init.getText(), roles, derived);
+      // `clinics: list` with `const list = clinics ?? []`
+      if (said.size === 0 && Node.isIdentifier(init)) {
+        const local = object
+          .getFirstAncestorByKind(SyntaxKind.ArrowFunction)
+          ?.getDescendantsOfKind(SyntaxKind.VariableDeclaration)
+          .find((declaration) => declaration.getName() === init.getText());
+        said = mentionsOf(local?.getInitializer()?.getText() ?? '', roles, derived);
+      }
+      if (said.size === 1) memberRoles.set(property.getName(), [...said][0]!);
+    }
+  }
+  if (memberRoles.size === 0 && memberDerived.size === 0) return [];
+  // The hooks that hand the context out: `useClinic()` returning `useContext(ClinicContext)`.
+  const file = component.getSourceFile();
+  const readers = file
+    .getDescendantsOfKind(SyntaxKind.CallExpression)
+    .filter(
+      (call) =>
+        call.getExpression().getText() === 'useContext' &&
+        call.getArguments()[0]?.getText() === contextName,
+    )
+    .map((call) => nearestFunction(call))
+    .filter((fn): fn is Node => fn !== undefined && fn !== component)
+    .map((fn) => nameOf(fn))
+    .filter((name) => /^use[A-Z]/.test(name));
+  if (readers.length === 0) return [];
+  const rows: ReactionRow[] = [];
+  // The reader parses files as asked: the components the graph knows are the candidates.
+  const files = [
+    ...new Set(
+      ctx.graph
+        .nodesOfKind('component')
+        .map((node) => node.source?.file)
+        .filter((rel): rel is string => rel !== undefined),
+    ),
+  ];
+  for (const rel of files) {
+    const source = ctx.reader.file(rel);
+    if (!source) continue;
+    if (!readers.some((reader) => source.getFullText().includes(`${reader}(`))) continue;
+    for (const declaration of source.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+      const init = declaration.getInitializer();
+      if (!init || !Node.isCallExpression(init)) continue;
+      if (!readers.includes(init.getExpression().getText())) continue;
+      const binding = declaration.getNameNode();
+      if (!Node.isObjectBindingPattern(binding)) continue;
+      const consumerRoles = new Map<string, LoadRole>();
+      const consumerDerived = new Map<string, Map<string, LoadRole>>();
+      for (const element of binding.getElements()) {
+        const member = element.getPropertyNameNode()?.getText() ?? element.getName();
+        const role = memberRoles.get(member);
+        if (role) consumerRoles.set(element.getName(), role);
+        const outcomes = memberDerived.get(member);
+        if (outcomes) consumerDerived.set(element.getName(), outcomes);
+      }
+      if (consumerRoles.size === 0 && consumerDerived.size === 0) continue;
+      const consumer = nearestFunction(declaration);
+      if (!consumer || consumer === component) continue;
+      rows.push(...branchRows(ctx, consumer, consumerRoles, consumerDerived, declaration, false));
+    }
+  }
+  return rows;
+}
+
+/** A branch of JSX in words: `a loading placeholder`, `"Medicine not found"`. */
+function describeView(node: Node): string | undefined {
+  const own = Node.isJsxElement(node)
+    ? [node.getOpeningElement()]
+    : Node.isJsxSelfClosingElement(node)
+      ? [node]
+      : [];
+  const openings = [...own, ...jsxOpenings(node)];
+  if (openings.length === 0) return undefined;
+  if (openings.some((opening) => /Skeleton|Spinner|Loader|Loading/.test(tagOf(opening))))
+    return 'a loading placeholder';
+  // Its heading names it: "No clinic access", not the paragraph under it too.
+  for (const opening of openings) {
+    if (!/^(h[1-6]|CardTitle|DialogTitle|AlertTitle)$/.test(tagOf(opening))) continue;
+    const words = elementText(opening);
+    if (words) return `"${condense(decodeEntities(words), 60)}"`;
+  }
+  // A title it is given: `<EmptyState title="No medicines found" action={…}>`,
+  // or `title={searching ? "No files match" : "No files uploaded yet"}`.
+  for (const opening of openings) {
+    for (const name of ['title', 'message', 'label']) {
+      const value = attribute(opening, name) ?? undefined;
+      const text =
+        literalText(value) ??
+        (value && Node.isConditionalExpression(value)
+          ? [literalText(value.getWhenTrue()), literalText(value.getWhenFalse())]
+              .filter(Boolean)
+              .join('" or "') || undefined
+          : undefined);
+      if (text) return `"${condense(decodeEntities(text), 80)}"`;
+    }
+  }
+  // The first words written straight inside an element: a title before its description.
+  for (const opening of openings) {
+    const element = opening.getParent();
+    if (!element || !Node.isJsxElement(element)) continue;
+    const own = element
+      .getJsxChildren()
+      .filter((child) => Node.isJsxText(child))
+      .map((child) => child.getText().replace(/\s+/g, ' ').trim())
+      .join(' ')
+      .trim();
+    if (/[A-Za-z]{2}/.test(own)) return `"${condense(decodeEntities(own), 60)}"`;
+  }
+  for (const opening of openings) {
+    for (const name of ['title', 'message', 'label', 'description']) {
+      const text = literalText(attribute(opening, name) ?? undefined);
+      if (text) return `"${condense(text, 60)}"`;
+    }
+    const words = elementText(opening);
+    if (words) return `"${condense(decodeEntities(words), 60)}"`;
+  }
+  return `<${tagOf(openings[0]!)}>`;
+}
+
+/** `isn&apos;t` as written in JSX, as the user reads it. */
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&apos;|&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
 }
 
 function refetches(ctx: Ctx): string[] {
@@ -4080,18 +5137,30 @@ function stageResponseHandler(ctx: Ctx): StageBody {
       ...new Set(
         rows
           .filter((row) => row.phase === phase && row.kind !== 'Other')
-          .map((row) => KIND_WORD[row.kind]),
+          .map((row) =>
+            // What a load puts on screen says more than "screen".
+            row.kind !== 'Screen'
+              ? KIND_WORD[row.kind]
+              : /appears on screen/.test(row.text)
+                ? 'shows the data'
+                : row.text.replace(/^when there is nothing to show, /, 'if empty, '),
+          ),
       ),
     ].join(', ');
   const success = kinds('on success');
   const failure = kinds('on error');
   const handlesErrors = rows.some((row) => row.phase === 'on error');
+  const ignored = ctx.front.some((entry) =>
+    bodyStatements(entry.fn).some((statement) => swallows(statement)),
+  );
   return {
     summary:
       ctx.calls.length === 0
         ? kinds('always') || 'Nothing visible changes'
-        : `Success: ${success || 'nothing visible'}` +
-          ` · Error: ${handlesErrors ? failure || 'handled quietly' : '**not handled**'}`,
+        : ignored && !handlesErrors && kinds('always')
+          ? `Either way: ${kinds('always')} · Error: ignored, so the same steps run`
+          : `Success: ${success || 'nothing visible'}` +
+            ` · Error: ${handlesErrors ? failure || 'handled quietly' : ignored ? 'ignored — the steps after run either way' : '**not handled**'}`,
     groups: [
       groupFor('on success', 'On success', 'ok'),
       groupFor('on error', 'On error', 'error'),
@@ -4171,10 +5240,21 @@ function stageFinalUi(ctx: Ctx): StageBody {
       ? 'a toast confirms it'
       : '',
     refetched.length ? 'the data on screen refreshes' : '',
+    rows.some((row) => row.kind === 'Download') ? 'a file downloads' : '',
+    rows.some((row) => row.kind === 'Screen' && /appears on screen/.test(row.text))
+      ? 'the data it loaded appears on screen'
+      : '',
   ].filter(Boolean);
   return {
     summary: headline.length
-      ? `On success ${headline.join(', ')}`
+      ? `${
+          ctx.calls.length
+            ? // `await logout().catch(() => {})`: the same happens however the request ends.
+              rows.every((row) => row.phase === 'always')
+              ? 'Whether or not the request succeeds,'
+              : 'On success'
+            : 'Then'
+        } ${headline.join(', ')}`
       : ctx.calls.length
         ? 'Nothing visible changes on success'
         : 'Only what is on screen changes',
@@ -4208,6 +5288,10 @@ function describeOutcome(kind: ReactionKind, text: string): string | undefined {
       return `The cached data is updated in place: ${text}`;
     case 'State update':
       return `Screen state changes: ${text}`;
+    case 'Screen':
+      return text.charAt(0).toUpperCase() + text.slice(1);
+    case 'Download':
+      return `A file downloads to the user's computer: ${text}`;
     default:
       return undefined;
   }
@@ -4225,7 +5309,10 @@ function describeOutcome(kind: ReactionKind, text: string): string | undefined {
 export function renderActionDocument(doc: ActionDoc): string {
   const out: string[] = [];
   out.push(`# ${doc.title}`, '');
-  out.push(`**The user ${doc.trigger}${doc.screen ? ` on ${doc.screen}` : ''}.**`, '');
+  out.push(
+    `**The user ${doc.trigger}${doc.screen && !doc.trigger.startsWith('opens ') ? ` on ${doc.screen}` : ''}.**`,
+    '',
+  );
   const meta = [
     doc.endpoints.length ? `Requests: ${doc.endpoints.map(code).join(', ')}` : 'No requests',
     doc.evidence === 'static'
@@ -4239,7 +5326,8 @@ export function renderActionDocument(doc: ActionDoc): string {
 
   // Only the steps this action has, numbered as the reader will count them.
   const shown = doc.stages.filter((stage) => !stage.absent);
-  const absent = doc.stages.filter((stage) => stage.absent);
+  // A load runs by itself: no form or confirmation is missing from it.
+  const absent = doc.event === 'mount' ? [] : doc.stages.filter((stage) => stage.absent);
   const number = new Map(shown.map((stage, index) => [stage.key, index + 1]));
 
   out.push('## At a glance', '', '```text');

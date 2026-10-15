@@ -29,7 +29,7 @@ import { linkDbOperations, type CollectionAliases } from './dbaccess.js';
 import { linkExternalEffects } from './effects.js';
 import { HTTP_METHODS, joinRoutePath, normalizePath, type HttpMethod } from './http.js';
 import { linkExpressMiddleware, linkNestMiddleware } from './middleware.js';
-import { collectionNameOf, dbEffectOf, type DbEffect } from './mongo.js';
+import { collectionNameOf, dbEffectOf, upsertsIn, type DbEffect } from './mongo.js';
 import { prismaEffectOf, prismaTableOf, type PrismaSchema } from './prisma.js';
 import type { LoadedProject } from './project.js';
 
@@ -648,6 +648,7 @@ function resolveMethodBodies(
           file: info.file,
           line: lineOf(call),
           site: `${info.name}.${methodName}`,
+          upsert: upsertsIn(call),
           effect: prismaEffect,
           collection: table,
           database: 'prisma',
@@ -667,6 +668,7 @@ function resolveMethodBodies(
           file: info.file,
           line: lineOf(call),
           site: `${info.name}.${methodName}`,
+          upsert: upsertsIn(call),
           effect,
         });
         continue;
@@ -764,11 +766,17 @@ function recordDbOp(
      */
     collection?: string;
     database?: string;
+    /** `updateOne(filter, change, { upsert: true })`: inserts when nothing matches. */
+    upsert?: boolean;
   },
 ): void {
   const collection =
     input.collection ?? index.collections.get(input.modelName) ?? collectionNameOf(input.modelName);
-  const opId = ids.dbOp(collection, input.operation, input.site);
+  let opId = ids.dbOp(collection, input.operation, input.site);
+  // Two `findById`s in one method are two queries, each with its own line.
+  const first = graph.node(opId);
+  if (first && first.source?.line !== input.line)
+    opId = ids.dbOp(collection, input.operation, `${input.site}@${input.line}`);
   graph.addNode({
     id: opId,
     kind: 'db-op',
@@ -781,6 +789,7 @@ function recordDbOp(
       effect: input.effect,
       model: input.modelName,
       ...(input.database ? { database: input.database } : {}),
+      ...(input.upsert ? { upsert: true } : {}),
     },
   });
   graph.addEdge({ from: input.methodId, to: opId, kind: 'queries' });

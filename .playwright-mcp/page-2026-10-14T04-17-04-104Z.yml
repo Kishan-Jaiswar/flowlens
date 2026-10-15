@@ -1,0 +1,273 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]: ◎
+      - generic [ref=e5]:
+        - heading "Flowslens" [level=1] [ref=e6]
+        - paragraph [ref=e7]: 12150 nodes · 23488 edges · 1043 files · /home/kishanjaiswar/Desktop/clinic-web/whatsapp-clinic-frontend-web + /home/kishanjaiswar/Desktop/clinic-backend/whatsapp-clinic
+    - generic [ref=e8]:
+      - generic [ref=e9] [cursor=pointer]:
+        - checkbox "include local-only actions" [checked] [ref=e10]
+        - generic [ref=e11]: include local-only actions
+      - button "Rescan" [ref=e12] [cursor=pointer]
+      - link "Feature doc" [ref=e13] [cursor=pointer]:
+        - /url: /api/document?flow=index-download-report-2
+  - main [ref=e14]:
+    - complementary [ref=e15]:
+      - generic [ref=e16]:
+        - generic [ref=e17]:
+          - generic [ref=e18]:
+            - heading "Actions" [level=2] [ref=e19]
+            - paragraph [ref=e27]: 1809 actions on 61 pages
+          - button "Collapse all" [ref=e28] [cursor=pointer]
+        - generic [ref=e20]:
+          - searchbox "Search actions, pages or APIs" [ref=e21]
+          - generic "Press / to search": /
+      - generic [ref=e22]:
+        - generic [ref=e29]:
+          - generic [ref=e30]: In the app’s menu
+          - generic [ref=e31]: "11"
+        - group [ref=e32]:
+          - generic "Home /home 2" [ref=e33] [cursor=pointer]:
+            - generic [ref=e38]:
+              - generic [ref=e39]: Home
+              - generic [ref=e40]: /home
+            - 'generic "2 features here: controls, links and parts like a popup, each counted once" [ref=e41]': "2"
+        - group [ref=e42]:
+          - generic "Schedule /schedule 33" [ref=e43] [cursor=pointer]:
+            - generic [ref=e48]:
+              - generic [ref=e49]: Schedule
+              - generic [ref=e50]: /schedule
+            - 'generic "33 features here: controls, links and parts like a popup, each counted once" [ref=e51]': "33"
+        - group [ref=e52]:
+          - generic "Health Saarthi /health_saarthi 21" [ref=e53] [cursor=pointer]:
+            - generic [ref=e58]:
+              - generic [ref=e59]: Health Saarthi
+              - generic [ref=e60]: /health_saarthi
+            - 'generic "21 features here: controls, links and parts like a popup, each counted once" [ref=e61]': "21"
+        - group [ref=e62]:
+          - generic "OPD Analytics /analytics 2" [ref=e63] [cursor=pointer]:
+            - generic [ref=e68]:
+              - generic [ref=e69]: OPD Analytics
+              - generic [ref=e70]: /analytics
+            - 'generic "2 features here: controls, links and parts like a popup, each counted once" [ref=e71]': "2"
+        - group [ref=e72]:
+          - generic "Billing /billingList 7" [ref=e73] [cursor=pointer]:
+            - generic [ref=e78]:
+              - generic [ref=e79]: Billing
+              - generic [ref=e80]: /billingList
+            - 'generic "7 features here: controls, links and parts like a popup, each counted once" [ref=e81]': "7"
+          - button "Download Report GET /appointments/date-range-appointments" [ref=e82] [cursor=pointer]:
+            - generic [ref=e86]:
+              - generic [ref=e87]: Download Report
+              - generic [ref=e88]:
+                - generic [ref=e89]: GET
+                - generic [ref=e90]: /appointments/date-range-appointments
+          - button "Add New Bill PATCH /billing/update-bill-payment/:param +1 ⚠ 6" [ref=e91] [cursor=pointer]:
+            - generic [ref=e95]:
+              - generic [ref=e96]: Add New Bill
+              - generic [ref=e97]:
+                - generic [ref=e98]: PATCH
+                - generic [ref=e99]: /billing/update-bill-payment/:param
+                - generic "POST /billing" [ref=e100]: "+1"
+            - generic "6 issues — see Issues & impact" [ref=e101]: ⚠ 6
+          - button "Paid / Outstanding GET /billing/by-appointment" [ref=e102] [cursor=pointer]:
+            - generic [ref=e106]:
+              - generic [ref=e107]: Paid / Outstanding
+              - generic [ref=e108]:
+                - generic [ref=e109]: GET
+                - generic [ref=e110]: /billing/by-appointment
+          - button "Search by patient name... GET /billing/by-appointment" [ref=e111] [cursor=pointer]:
+            - generic [ref=e115]:
+              - generic [ref=e116]: Search by patient name...
+              - generic [ref=e117]:
+                - generic [ref=e118]: GET
+                - generic [ref=e119]: /billing/by-appointment
+          - button "Select a date GET /billing/by-appointment" [ref=e120] [cursor=pointer]:
+            - generic [ref=e124]:
+              - generic [ref=e125]: Select a date
+              - generic [ref=e126]:
+                - generic [ref=e127]: GET
+                - generic [ref=e128]: /billing/by-appointment
+          - group [ref=e129]:
+            - generic "Each bill on each row · 4 actions 4" [ref=e130] [cursor=pointer]:
+              - generic [ref=e135]:
+                - generic [ref=e136]: Each bill
+                - generic [ref=e137]: on each row · 4 actions
+              - 'generic "4 features here: controls, links and parts like a popup, each counted once" [ref=e138]': "4"
+          - group [ref=e139]:
+            - generic "Previous / Go to page / Next one feature · 3 actions 3" [ref=e140] [cursor=pointer]:
+              - generic [ref=e145]:
+                - generic [ref=e146]: Previous / Go to page / Next
+                - generic [ref=e147]: one feature · 3 actions
+              - 'generic "3 features here: controls, links and parts like a popup, each counted once" [ref=e148]': "3"
+        - group [ref=e149]:
+          - generic "Patients /patientDashboardfv 13" [ref=e150] [cursor=pointer]:
+            - generic [ref=e155]:
+              - generic [ref=e156]: Patients
+              - generic [ref=e157]: /patientDashboardfv
+            - 'generic "13 features here: controls, links and parts like a popup, each counted once" [ref=e158]': "13"
+        - group [ref=e159]:
+          - generic "Clinic Setting /setting/edit/[id] 14" [ref=e160] [cursor=pointer]:
+            - generic [ref=e165]:
+              - generic [ref=e166]: Clinic Setting
+              - generic [ref=e167]: /setting/edit/[id]
+            - 'generic "14 features here: controls, links and parts like a popup, each counted once" [ref=e168]': "14"
+        - group [ref=e169]:
+          - generic "Medicine Library /medication 17" [ref=e170] [cursor=pointer]:
+            - generic [ref=e175]:
+              - generic [ref=e176]: Medicine Library
+              - generic [ref=e177]: /medication
+            - 'generic "17 features here: controls, links and parts like a popup, each counted once" [ref=e178]': "17"
+        - group [ref=e179]:
+          - generic "RX Template /rx-templates 2" [ref=e180] [cursor=pointer]:
+            - generic [ref=e185]:
+              - generic [ref=e186]: RX Template
+              - generic [ref=e187]: /rx-templates
+            - 'generic "2 features here: controls, links and parts like a popup, each counted once" [ref=e188]': "2"
+        - group [ref=e189]:
+          - generic "Clinic Services /clinicService 7" [ref=e190] [cursor=pointer]:
+            - generic [ref=e195]:
+              - generic [ref=e196]: Clinic Services
+              - generic [ref=e197]: /clinicService
+            - 'generic "7 features here: controls, links and parts like a popup, each counted once" [ref=e198]': "7"
+        - group [ref=e199]:
+          - generic "Create Certificate /createCertificate 4" [ref=e200] [cursor=pointer]:
+            - generic [ref=e205]:
+              - generic [ref=e206]: Create Certificate
+              - generic [ref=e207]: /createCertificate
+            - 'generic "4 features here: controls, links and parts like a popup, each counted once" [ref=e208]': "4"
+        - generic [ref=e209]:
+          - generic [ref=e210]: Other pages
+          - generic [ref=e211]: "11"
+        - group [ref=e212]:
+          - generic "Doctor › Login /doctor/login 5" [ref=e213] [cursor=pointer]:
+            - generic [ref=e218]:
+              - generic [ref=e219]: Doctor › Login
+              - generic [ref=e220]: /doctor/login
+            - 'generic "5 features here: controls, links and parts like a popup, each counted once" [ref=e221]': "5"
+        - group [ref=e222]:
+          - generic "Login /login 1" [ref=e223] [cursor=pointer]:
+            - generic [ref=e228]:
+              - generic [ref=e229]: Login
+              - generic [ref=e230]: /login
+            - 'generic "1 feature here: controls, links and parts like a popup, each counted once" [ref=e231]': "1"
+        - group [ref=e232]:
+          - generic "Login › Details /login/[id] 0" [ref=e233] [cursor=pointer]:
+            - generic [ref=e238]:
+              - generic [ref=e239]: Login › Details
+              - generic [ref=e240]: /login/[id]
+            - 'generic "0 features here: controls, links and parts like a popup, each counted once" [ref=e241]': "0"
+        - group [ref=e242]:
+          - generic "Header & layout 40" [ref=e243] [cursor=pointer]:
+            - generic [ref=e248]: Header & layout
+            - 'generic "40 features here: controls, links and parts like a popup, each counted once" [ref=e250]': "40"
+        - generic [ref=e251]:
+          - button "+ Add Walk-In GET /patients/by-number +7 ⚠ 8" [ref=e252] [cursor=pointer]:
+            - generic [ref=e256]:
+              - generic [ref=e257]: + Add Walk-In
+              - generic [ref=e258]:
+                - generic [ref=e259]: GET
+                - generic [ref=e260]: /patients/by-number
+                - generic "GET /abha/patient/find-abha/searchAccount GET /diseases GET /v3/get-specialities GET /patients/:param GET /appointments/findByFilter POST /appointments/walkin-relative POST /appointments/walkin-appointment" [ref=e261]: "+7"
+            - generic "8 issues — see Issues & impact" [ref=e262]: ⚠ 8
+          - button "Close popup container stays in the browser" [ref=e263] [cursor=pointer]:
+            - generic [ref=e267]:
+              - generic [ref=e268]: Close popup container
+              - generic [ref=e269]: stays in the browser
+          - button "Close Add Walk In stays in the browser" [ref=e271] [cursor=pointer]:
+            - generic [ref=e275]:
+              - generic [ref=e276]: Close Add Walk In
+              - generic [ref=e277]: stays in the browser
+          - button "Click stays in the browser" [ref=e279] [cursor=pointer]:
+            - generic [ref=e283]:
+              - generic [ref=e284]: Click
+              - generic [ref=e285]: stays in the browser
+          - button "Option stays in the browser" [ref=e287] [cursor=pointer]:
+            - generic [ref=e291]:
+              - generic [ref=e292]: Option
+              - generic [ref=e293]: stays in the browser
+        - group [ref=e295]:
+          - generic "Walk in form 20" [ref=e296] [cursor=pointer]:
+            - generic [ref=e301]: Walk in form
+            - 'generic "20 features here: controls, links and parts like a popup, each counted once" [ref=e303]': "20"
+        - group [ref=e304]:
+          - generic "Patient search bar 2" [ref=e305] [cursor=pointer]:
+            - generic [ref=e310]: Patient search bar
+            - 'generic "2 features here: controls, links and parts like a popup, each counted once" [ref=e312]': "2"
+        - group [ref=e313]:
+          - generic "Primary button 1" [ref=e314] [cursor=pointer]:
+            - generic [ref=e319]: Primary button
+            - 'generic "1 feature here: controls, links and parts like a popup, each counted once" [ref=e321]': "1"
+        - group [ref=e322]:
+          - generic "Abha profile modal 3" [ref=e323] [cursor=pointer]:
+            - generic [ref=e328]: Abha profile modal
+            - 'generic "3 features here: controls, links and parts like a popup, each counted once" [ref=e330]': "3"
+        - group [ref=e331]:
+          - generic "Opened from the menu 0" [ref=e332] [cursor=pointer]:
+            - generic [ref=e337]: Opened from the menu
+            - 'generic "0 features here: controls, links and parts like a popup, each counted once" [ref=e339]': "0"
+        - group [ref=e340]:
+          - generic "Other screens 100" [ref=e341] [cursor=pointer]:
+            - generic [ref=e347]: Other screens
+            - 'generic "100 features here: controls, links and parts like a popup, each counted once" [ref=e349]': "100"
+      - generic [ref=e23]:
+        - heading "Findings" [level=2] [ref=e24]
+        - generic [ref=e350]:
+          - generic [ref=e351]: ⚠ GET /patient/diet-plan-statusno backend route
+          - generic [ref=e352]: ⚠ POST /logoutno backend route
+          - generic [ref=e353]: ⚠ GET /v3/get-specialitiesno backend route
+          - generic [ref=e354]: ⚠ POST /gmb/create-postno backend route
+          - generic [ref=e355]: ⚠ GET /patient/health-saarthi-dashboard-countno backend route
+          - generic [ref=e356]: ⚠ GET /gmb/performanceno backend route
+          - generic [ref=e357]:
+            - text: ⚠
+            - code [ref=e358]: doctorpatientsessions
+            - text: written by AppointmentsService, BotService, GupshupService, WhatsappService
+          - generic [ref=e359]:
+            - text: ⚠
+            - code [ref=e360]: doctorpatients
+            - text: written by AppointmentsService, GupshupService, PatientsService, PublicPatientFormService
+          - generic [ref=e361]:
+            - text: ⚠
+            - code [ref=e362]: appointments
+            - text: written by AbhaM2Service, AppointmentsService, EmrService, PublicAppointmentReportsService, PublicPatientFormService, ReportScanService, SchedulerService
+          - generic [ref=e363]:
+            - text: ⚠
+            - code [ref=e364]: billings
+            - text: written by AppointmentsService, BillingService
+          - generic [ref=e365]: 311 endpoint(s) with no known caller
+    - generic [ref=e25]:
+      - generic [ref=e366]:
+        - heading "Billing list · Download Report" [level=2] [ref=e367]
+        - generic [ref=e368]:
+          - generic [ref=e369]: risk low · 0
+          - generic [ref=e370]: static
+          - generic [ref=e371]: Billing list
+          - generic [ref=e372]: click
+          - generic [ref=e373]: Index
+          - generic [ref=e374]: 2 reads
+        - paragraph [ref=e375]:
+          - link "whatsapp-clinic-frontend-web/pages/billingList/index.js:378 ↗" [ref=e376] [cursor=pointer]:
+            - /url: vscode://file//home/kishanjaiswar/Desktop/clinic-web/whatsapp-clinic-frontend-web/pages/billingList/index.js:378
+      - tablist "Feature views" [ref=e26]:
+        - tab "Docs" [ref=e377] [cursor=pointer]
+        - tab "Decisions …" [selected] [ref=e379] [cursor=pointer]:
+          - generic [ref=e380]: Decisions
+          - generic [ref=e381]: …
+        - tab "Performance …" [ref=e382] [cursor=pointer]:
+          - generic [ref=e383]: Performance
+          - generic [ref=e384]: …
+        - tab "Tests …" [ref=e385] [cursor=pointer]:
+          - generic [ref=e386]: Tests
+          - generic [ref=e387]: …
+        - tab "Issues & impact …" [ref=e388] [cursor=pointer]:
+          - generic [ref=e389]: Issues & impact
+          - generic [ref=e390]: …
+        - tab "Unused 212" [ref=e391] [cursor=pointer]:
+          - generic [ref=e392]: Unused
+          - generic [ref=e393]: "212"
+      - text: ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗ ↗
+      - tabpanel "Decisions …" [ref=e394]:
+        - paragraph [ref=e395]: Working out every way this action can go…
+      - text: ↗ ▸ ↗ ▸ ↗ ▸ ↗ ▸ ↗ ▸

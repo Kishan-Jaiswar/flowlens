@@ -15,6 +15,9 @@ import {
   actionDecisions,
   actionQueries,
   explainAction,
+  factorSharedDecisions,
+  indexSharedDecisions,
+  sharedPartTree,
   projectFindings,
   explainScreen,
   listScreens,
@@ -29,13 +32,27 @@ import {
   renderScreenDocument,
   resolveFlows,
   flowPages,
+  appSidebar,
+  buildPageIndex,
+  cardData,
+  linkDecisions,
+  scopeSummary,
   scan,
   SourceReader,
   testsForFlow,
   planTests,
   projectUnused,
+  type ActionDecisions,
   type BreakageReport,
   type FlowGraph,
+  type SharedDecisions,
+  type AppSidebar,
+  type CardData,
+  type PageIndex,
+  type FeatureFlow,
+  type ScopeSummary,
+  type SidebarEntry,
+  type SidebarItem,
   type TestIndex,
 } from '@flowslens/core';
 import { changedFiles, withCommittedText } from '../changedfiles.js';
@@ -223,6 +240,84 @@ export function runServe(args: ServeArgs): number {
   let reader: SourceReader | undefined;
   /** Findings read the whole project; computed once per scan. */
   let findings: ReturnType<typeof projectFindings> | undefined;
+  /** The app's own menu, with its actions; computed once per scan. */
+  let navigation: AppSidebar | null | undefined;
+  /** Screen and card summaries, by sidebar key; dropped on rescan. */
+  let scopes = new Map<string, ScopeSummary>();
+  /** What each card shows and where it comes from, by sidebar key; dropped on rescan. */
+  let cards = new Map<string, CardData | null>();
+  let pageIndex: PageIndex | undefined;
+  /** Which pages each action is on; dropped on rescan. */
+  let placements: Map<string, Array<{ route: string }>> | undefined;
+  /** Each action's decision tree as the walk drew it, by flow id; dropped on rescan. */
+  let trees = new Map<string, ActionDecisions>();
+  /**
+   * The helpers that run the same way in several actions. Finding them needs
+   * every action's tree, which takes seconds on a real app: built once per
+   * scan, a tree at a time so the server keeps answering meanwhile.
+   */
+  let shared: Promise<SharedDecisions> | undefined;
+  const treeOf = (flow: FeatureFlow): ActionDecisions => {
+    let tree = trees.get(flow.id);
+    if (!tree) {
+      reader ??= new SourceReader(graph);
+      tree = actionDecisions(graph, flow, { reader });
+      trees.set(flow.id, tree);
+    }
+    return tree;
+  };
+  const sharedDecisions = (): Promise<SharedDecisions> => {
+    shared ??= (async () => {
+      const all: ActionDecisions[] = [];
+      const scanned = graph;
+      for (const flow of resolveFlows(scanned, { includeLocalOnly: true })) {
+        all.push(treeOf(flow));
+        await new Promise((done) => setImmediate(done));
+        // A rescan started over; this run's answer is no one's.
+        if (graph !== scanned) return sharedDecisions();
+      }
+      return indexSharedDecisions(all);
+    })();
+    return shared;
+  };
+  // Start now: the first Decisions tab opened should not wait for all of it.
+  void sharedDecisions();
+  /** A card's data, read once; `at` is a link inside it, read for what that link shows. */
+  const readCard = (
+    all: FeatureFlow[],
+    target: SidebarEntry,
+    cacheKey: string,
+    at?: SidebarItem,
+  ): CardData | null => {
+    const cached = cards.get(cacheKey);
+    if (cached !== undefined) return cached;
+    let data: CardData | null = null;
+    const place = at && 'link' in at ? at.link : undefined;
+    if (target.kind === 'section' && target.file && target.line) {
+      reader ??= new SourceReader(graph);
+      pageIndex ??= buildPageIndex(graph, reader);
+      try {
+        data =
+          cardData(
+            graph,
+            all,
+            { file: target.file, line: target.line },
+            {
+              reader,
+              index: pageIndex,
+              ...(place?.file && place.line
+                ? { element: { file: place.file, line: place.line } }
+                : {}),
+              ...(place?.label ? { pick: place.label } : {}),
+            },
+          ) ?? null;
+      } catch {
+        data = null;
+      }
+    }
+    cards.set(cacheKey, data);
+    return data;
+  };
 
   /**
    * `serve` writes twice — the graph on every re-scan, the trace on every batch
@@ -352,6 +447,133 @@ export function runServe(args: ServeArgs): number {
         response,
         flows.map((flow) => ({ ...flow, pages: pages.get(flow.id) ?? [] })),
       );
+      return;
+    }
+
+    /**
+     * The app's own sidebar, copied, with every action placed in it — each
+     * screen's actions in screen order, the screens it leads to beneath it —
+     * so the dashboard can be browsed the way the app is used.
+     */
+    if (path === '/api/navigation') {
+      reader ??= new SourceReader(graph);
+      navigation ??=
+        appSidebar(graph, resolveFlows(graph, { includeLocalOnly: true }), { reader }) ?? null;
+      sendJson(response, navigation);
+      return;
+    }
+
+    /**
+     * One page, card or dialog of the app's sidebar, summed up from the actions
+     * on it — what its tabs show when the screen itself is selected.
+     */
+    if (path === '/api/scope') {
+      const key = url.searchParams.get('entry') ?? '';
+      reader ??= new SourceReader(graph);
+      const all = resolveFlows(graph, { includeLocalOnly: true });
+      navigation ??= appSidebar(graph, all, { reader }) ?? null;
+      const entry = navigation ? findEntry(navigation.entries, key) : undefined;
+      if (!entry) {
+        sendJson(response, { error: 'unknown entry' }, 404);
+        return;
+      }
+      // `loads=1`: only what runs by itself when the screen opens — what a link
+      // to it sets off.
+      const loadsOnly = url.searchParams.get('loads') === '1';
+      const cacheKey = loadsOnly ? `${key}#loads` : key;
+      answerLater(response, async () => {
+        // Counted as the charts draw them: shared helpers once, not in every action.
+        const index = await sharedDecisions();
+        let summary = scopes.get(cacheKey);
+        if (!summary) {
+          const mounts = new Set(
+            all.filter((flow) => flow.event === 'mount').map((flow) => flow.id),
+          );
+          const ids = entryActions(entry).filter((id) => !loadsOnly || mounts.has(id));
+          // A card that only shows data: the loads that bring it are what it runs.
+          if (entry.kind === 'section' && !loadsOnly) {
+            /**
+             * Only this page's loads: the stock dialog on `/medicines` gets its
+             * medicine from the list, not from the detail page that also draws it.
+             */
+            const route = navigation
+              ? findEntry(navigation.entries, key.split('/§')[0] ?? key)?.route
+              : undefined;
+            placements ??= flowPages(graph, all, { reader });
+            const here = (id: string): boolean =>
+              !route ||
+              !placements!.get(id) ||
+              placements!.get(id)!.some((page) => page.route === route);
+            for (const source of readCard(all, entry, key)?.sources ?? []) {
+              for (const id of source.flows) if (!ids.includes(id) && here(id)) ids.unshift(id);
+            }
+          }
+          summary = scopeSummary(graph, all, ids, {
+            tests,
+            reader,
+            decisions: true,
+            // What the action does, shared helpers included: a query inside
+            // `listMedicines` is one this load makes, drawn once or not.
+            countDecisions: (flow) => treeOf(flow).counts,
+          });
+          scopes.set(cacheKey, summary);
+        }
+        sendJson(response, {
+          key,
+          label: entry.label,
+          kind: entry.kind,
+          route: entry.route,
+          file: entry.file,
+          ...summary,
+        });
+      });
+      return;
+    }
+
+    /**
+     * A card of the app's sidebar, read for its data: what it shows, worked out
+     * how, from which request, and where the server makes each field. With
+     * `link=<n>`, only what the link at that place among the card's items
+     * shows — the "3,391" of a "Low" tile.
+     */
+    if (path === '/api/card') {
+      const key = url.searchParams.get('entry') ?? '';
+      reader ??= new SourceReader(graph);
+      const all = resolveFlows(graph, { includeLocalOnly: true });
+      navigation ??= appSidebar(graph, all, { reader }) ?? null;
+      const entry = navigation ? findEntry(navigation.entries, key) : undefined;
+      if (!entry) {
+        sendJson(response, { error: 'unknown entry' }, 404);
+        return;
+      }
+      const linkAt = url.searchParams.get('link');
+      const link = linkAt !== null ? entry.items?.[Number(linkAt)] : undefined;
+      const data = readCard(all, entry, linkAt !== null ? `${key}#link${linkAt}` : key, link);
+      // The other cards on the same screen that read the same fields: what a
+      // change to one of them on the server also moves.
+      const parent = navigation ? parentOf(navigation.entries, key) : undefined;
+      const siblings = (parent?.children ?? []).filter(
+        (child) => child.kind === 'section' && child.key !== key,
+      );
+      const sharedWith: Array<{ key: string; label: string; fields: string[] }> = [];
+      // Data the server sends, not each card's own `useState`: "[]" was no field.
+      const loaded = (source: { flows: string[]; fields: string[] }): string[] =>
+        source.flows.length > 0 ? source.fields.filter((field) => !field.startsWith('[]')) : [];
+      const mine = new Set(data?.sources.flatMap(loaded) ?? []);
+      if (mine.size > 0) {
+        for (const sibling of siblings) {
+          const theirs = readCard(all, sibling, sibling.key);
+          const fields = (theirs?.sources ?? []).flatMap(loaded).filter((field) => mine.has(field));
+          if (fields.length > 0) {
+            sharedWith.push({
+              key: sibling.key,
+              label: sibling.label,
+              fields: [...new Set(fields)],
+            });
+          }
+        }
+      }
+      sendJson(response, { key, label: entry.label, data, sharedWith });
       return;
     }
 
@@ -538,19 +760,93 @@ export function runServe(args: ServeArgs): number {
      */
     if (path === '/api/decisions') {
       const flowId = url.searchParams.get('flow');
+      // `shared:<id>`: one shared part on its own, as text — the page's "Copy as text".
+      if (flowId?.startsWith('shared:')) {
+        answerLater(response, async () => {
+          const part = (await sharedDecisions()).parts.get(flowId.slice('shared:'.length));
+          if (!part) return sendJson(response, { error: 'unknown shared part' }, 404);
+          const tree = sharedPartTree(part);
+          if (url.searchParams.get('format') === 'text') {
+            response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+            response.end(renderDecisionTree(tree));
+            return;
+          }
+          sendJson(response, tree);
+        });
+        return;
+      }
       const flow = resolveFlows(graph, { includeLocalOnly: true }).find((f) => f.id === flowId);
       if (!flow) {
         sendJson(response, { error: 'unknown flow' }, 404);
         return;
       }
       reader ??= new SourceReader(graph);
-      const tree = actionDecisions(graph, flow, { reader });
-      if (url.searchParams.get('format') === 'text') {
-        response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
-        response.end(renderDecisionTree(tree));
-        return;
-      }
-      sendJson(response, tree);
+      // `link=<href>&label=<words>&from=<card>`: the flow as one link sets it
+      // off — only the path its value takes, not the whole page's tree.
+      const href = url.searchParams.get('link');
+      const whole = href
+        ? linkDecisions(
+            graph,
+            flow,
+            {
+              href,
+              label: url.searchParams.get('label') ?? href,
+              ...(url.searchParams.get('from') ? { from: url.searchParams.get('from')! } : {}),
+            },
+            { reader },
+          )
+        : treeOf(flow);
+      // The helpers other actions run the same way are named, not drawn: they
+      // are told once, on the page (`/api/decisions/shared`).
+      answerLater(response, async () => {
+        const index = await sharedDecisions();
+        const tree = factorSharedDecisions(whole, index);
+        if (url.searchParams.get('format') === 'text') {
+          // Text is pasted where the page is not: the shared parts follow in full.
+          const parts = tree.shared
+            .map((id) => index.parts.get(id))
+            .filter((part) => part !== undefined)
+            .map((part) =>
+              renderDecisionTree(sharedPartTree(part)).replace(/\nLimits:[\s\S]*$/, ''),
+            );
+          response.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+          response.end(
+            renderDecisionTree(tree) +
+              (parts.length
+                ? `\nShared — the same in other actions, drawn once\n\n${parts.join('\n')}`
+                : ''),
+          );
+          return;
+        }
+        sendJson(response, tree);
+      });
+      return;
+    }
+
+    /**
+     * The shared parts a page's actions run, each drawn once: `flows=a,b,c`
+     * are the page's actions. Most used first.
+     */
+    if (path === '/api/decisions/shared') {
+      const ids = new Set((url.searchParams.get('flows') ?? '').split(',').filter(Boolean));
+      answerLater(response, async () => {
+        const index = await sharedDecisions();
+        const used = new Map<string, number>();
+        for (const flow of resolveFlows(graph, { includeLocalOnly: true })) {
+          if (!ids.has(flow.id)) continue;
+          for (const id of factorSharedDecisions(treeOf(flow), index).shared)
+            used.set(id, (used.get(id) ?? 0) + 1);
+        }
+        sendJson(
+          response,
+          [...used]
+            .sort((a, b) => b[1] - a[1])
+            .map(([id, here]) => {
+              const part = index.parts.get(id)!;
+              return { ...sharedPartTree(part), id, here, actions: part.flows.length };
+            }),
+        );
+      });
       return;
     }
 
@@ -598,6 +894,14 @@ export function runServe(args: ServeArgs): number {
       graph = buildGraph(root, args);
       reader = undefined;
       findings = undefined;
+      navigation = undefined;
+      scopes = new Map();
+      cards = new Map();
+      pageIndex = undefined;
+      placements = undefined;
+      trees = new Map();
+      shared = undefined;
+      void sharedDecisions();
       tests = indexTests(testRoots(root, args));
       lastScan = new Date();
       sendJson(response, { ok: true, nodes: graph.nodeCount, edges: graph.edgeCount });
@@ -729,6 +1033,15 @@ export function openBrowser(
   } catch {
     /* same */
   }
+}
+
+/** An answer that waits on work in progress; a failure is a 500, not a dropped request. */
+function answerLater(response: ServerResponse, work: () => Promise<void>): void {
+  work().catch((error: unknown) => {
+    if (response.headersSent) return void response.end();
+    response.writeHead(500, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+  });
 }
 
 /** Scan, then fold in any trace file that already exists. */
@@ -877,4 +1190,36 @@ function mtimeOf(path: string): number {
   } catch {
     return 0;
   }
+}
+
+function findEntry(entries: SidebarEntry[], key: string): SidebarEntry | undefined {
+  for (const entry of entries) {
+    if (entry.key === key) return entry;
+    const found = findEntry(entry.children, key);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** The entry an entry is listed in. */
+function parentOf(entries: SidebarEntry[], key: string): SidebarEntry | undefined {
+  for (const entry of entries) {
+    if (entry.children.some((child) => child.key === key)) return entry;
+    const found = parentOf(entry.children, key);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
+ * The actions on an entry's screen: its own, its cards' and its tabs', in the
+ * order they are listed. A page nested under it is a screen of its own.
+ */
+function entryActions(entry: SidebarEntry): string[] {
+  return [
+    ...entry.actions,
+    ...entry.children
+      .filter((child) => child.kind === 'section' || child.kind === 'tab')
+      .flatMap(entryActions),
+  ];
 }

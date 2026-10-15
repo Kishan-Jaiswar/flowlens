@@ -283,6 +283,11 @@ function basenameOf(rel: string): string {
  * One sentence-cased phrase, because a tile is read as prose. Known acronyms
  * keep their capitals so `seo_dashboard` does not become "Seo dashboard".
  */
+/** `Index`, `Page`, `Main`: a component name that only says "this is the component". */
+export function isGenericComponentName(name: string): boolean {
+  return /^(?:Index|Page|Main|Default|Component|Screen|View|Container|Wrapper)$/.test(name);
+}
+
 export function humanizeName(text: string): string {
   const words = text
     .replace(/\.[cm]?[jt]sx?$/, '')

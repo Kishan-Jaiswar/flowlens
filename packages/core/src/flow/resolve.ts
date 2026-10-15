@@ -1,7 +1,7 @@
 import { DB_EFFECT_ORDER, type DbEffect } from '../analyzer/mongo.js';
 import type { FlowGraph } from '../graph/graph.js';
 import { ids, slug } from '../graph/ids.js';
-import { humanizeName } from '../analyzer/screens.js';
+import { humanizeName, isGenericComponentName } from '../analyzer/screens.js';
 import {
   LAYER_OF,
   type EdgeKind,
@@ -57,6 +57,10 @@ export interface FlowStep {
   avgSelfMs?: number;
   observations?: number;
   meta?: Record<string, unknown>;
+  /** Runs once a response is back: inside `onSuccess`, `onError` or `.then`. */
+  afterResponse?: true;
+  /** Runs later, in a background worker that took the job off a queue. */
+  background?: true;
   /** Everything hanging off this step that is not a call. */
   detail?: StepDetail;
 }
@@ -139,8 +143,13 @@ export interface FeatureFlow {
   hooks: string[];
   /** Weakest evidence along the path: a flow is only confirmed end to end. */
   evidence: Evidence;
-  /** Sum of average step timings, when runtime data exists. */
+  /** End-to-end time (the outermost span), when this action itself was traced. */
   totalMs?: number;
+  /**
+   * This action itself was traced: its own click, when the tracer records
+   * clicks — not a request it shares, timed while another button sent it.
+   */
+  traced?: boolean;
   /** True when the flow reaches the backend at all. */
   hitsBackend: boolean;
   risk: RiskScore;
@@ -208,24 +217,48 @@ function distinctTitles(graph: FlowGraph, flows: FeatureFlow[]): FeatureFlow[] {
   }
 
   const hints: Array<(flow: FeatureFlow) => string | undefined> = [
-    (flow) => (flow.component ? humanizeName(flow.component) : undefined),
+    (flow) =>
+      flow.component && !isGenericComponentName(flow.component)
+        ? humanizeName(flow.component)
+        : undefined,
     (flow) => {
       const page = graph.node(flow.entryNodeId)?.meta?.['page'];
       return typeof page === 'string' ? page : undefined;
+    },
+    // `TimeSlotPopup.js` and `TimeSlotPopupNew.js` both define `TimeSlotPopup`:
+    // the file's own name says which, without the whole path in the sidebar.
+    (flow) => {
+      const base = flow.source?.file
+        .split('/')
+        .pop()
+        ?.replace(/\.[cm]?[jt]sx?$/, '');
+      return base && base !== 'index' ? humanizeName(base) : undefined;
     },
     (flow) => flow.source?.file,
     // Two "Cancel" buttons in one form: only where they sit tells them apart.
     (flow) => (flow.source ? `line ${flow.source.line}` : undefined),
   ];
-  for (const group of byTitle.values()) {
-    if (group.length < 2) continue;
-    const hint = hints.find((read) => {
-      const values = group.map(read);
-      return values.every(Boolean) && new Set(values).size === group.length;
-    });
-    if (!hint) continue;
-    for (const flow of group) flow.title = `${flow.title} (${hint(flow)})`;
-  }
+  /**
+   * The first hint that tells any of them apart, then the next only within
+   * the ones still alike: the detail page's Delete is "(Medicine detail page)",
+   * and only the list's two need a line.
+   */
+  const parts = new Map<FeatureFlow, string[]>();
+  const split = (group: FeatureFlow[], from: number): void => {
+    for (let index = from; index < hints.length; index++) {
+      const values = group.map(hints[index]!);
+      if (!values.every(Boolean) || new Set(values).size < 2) continue;
+      const alike = new Map<string, FeatureFlow[]>();
+      group.forEach((flow, at) => {
+        parts.set(flow, [...(parts.get(flow) ?? []), values[at]!]);
+        alike.set(values[at]!, [...(alike.get(values[at]!) ?? []), flow]);
+      });
+      for (const same of alike.values()) if (same.length > 1) split(same, index + 1);
+      return;
+    }
+  };
+  for (const group of byTitle.values()) if (group.length > 1) split(group, 0);
+  for (const [flow, said] of parts) flow.title = `${flow.title} (${said.join(', ')})`;
   return flows;
 }
 
@@ -285,10 +318,27 @@ export function resolveFlow(graph: FlowGraph, entryNodeId: string): FeatureFlow 
 
   attributeCallSites(graph, steps, depths);
 
-  // Read top to bottom: UI, frontend, network, backend, data.
+  // Read top to bottom: UI, frontend, network, then the server and its data in
+  // the order the code runs them — a query sits under the function that runs it.
+  const { order, afterResponse, background } = executionOrder(graph, entryNodeId);
+  const rank = (step: FlowStep): number => {
+    // A queued job runs in a worker, after the request has already answered.
+    if (background.has(step.nodeId)) return LAYER_ORDER.backend + 0.75;
+    // `onSuccess`, `.then`: what the screen does once the answer is back.
+    if (afterResponse.has(step.nodeId)) return LAYER_ORDER.backend + 0.5;
+    if (step.layer === 'data') return LAYER_ORDER.backend;
+    // An in-process effect (a cache, a log) with a line runs where it is written.
+    if (step.layer === 'external' && step.line !== undefined) return LAYER_ORDER.backend;
+    return LAYER_ORDER[step.layer];
+  };
+  for (const step of steps) {
+    if (afterResponse.has(step.nodeId)) step.afterResponse = true;
+    if (background.has(step.nodeId)) step.background = true;
+  }
   steps.sort(
     (a, b) =>
-      LAYER_ORDER[a.layer] - LAYER_ORDER[b.layer] ||
+      rank(a) - rank(b) ||
+      (order.get(a.nodeId) ?? Infinity) - (order.get(b.nodeId) ?? Infinity) ||
       a.depth - b.depth ||
       a.label.localeCompare(b.label),
   );
@@ -347,9 +397,23 @@ export function resolveFlow(graph: FlowGraph, entryNodeId: string): FeatureFlow 
   // Exclusive times, because a trace is nested: the client round trip contains
   // the server span, which contains the service, which contains the query.
   const timed = steps.filter((step) => step.avgSelfMs !== undefined);
+  // Only an action whose own request (or, with none, its handler) was traced
+  // has a time: a shared lookup timed in another action is that action's.
+  const ownSteps = steps.filter((step) => step.kind === 'api-call' || step.kind === 'route');
+  // Where clicks are traced, a click is timed only if it was itself made:
+  // the shared GET /medicines timed from Search is not the Category filter's.
+  const ownTimed =
+    entry.kind === 'ui-action' && entry.meta?.['event'] !== 'mount' && clicksTraced(graph)
+      ? entry.timing !== undefined
+      : (ownSteps.length > 0
+          ? ownSteps
+          : steps.filter((step) => step.kind === 'ui-action' || step.kind === 'handler')
+        ).some((step) => step.avgMs !== undefined || step.avgSelfMs !== undefined);
+  // End to end: the outermost span, which contains the rest. Adding up the
+  // steps counts the queries a `Promise.all` runs side by side once each.
   const totalMs =
-    timed.length > 0
-      ? round(timed.reduce((sum, step) => sum + (step.avgSelfMs ?? 0), 0))
+    timed.length > 0 && ownTimed
+      ? round(Math.max(...steps.map((step) => step.avgMs ?? step.avgSelfMs ?? 0)))
       : undefined;
 
   const component = entry.meta?.['component'] ? String(entry.meta['component']) : undefined;
@@ -376,6 +440,7 @@ export function resolveFlow(graph: FlowGraph, entryNodeId: string): FeatureFlow 
     hooks,
     evidence,
     ...(totalMs !== undefined ? { totalMs } : {}),
+    ...(timed.length > 0 ? { traced: ownTimed } : {}),
     hitsBackend: endpoints.length > 0 || routes.length > 0,
     risk: { score: 0, level: 'low', reasons: [] },
     ...(entry.source ? { source: { file: entry.source.file, line: entry.source.line } } : {}),
@@ -395,6 +460,60 @@ export function resolveFlow(graph: FlowGraph, entryNodeId: string): FeatureFlow 
  * which is exactly how a correct flow comes to look like a dump of the whole
  * page. The `requests` edge knows better: it was written at the real call site.
  */
+/**
+ * Each node's place in the order the code runs: depth-first from the entry,
+ * every function's calls visited in the order they appear in its body.
+ *
+ * Breadth-first depth with an alphabetical tiebreak put `getDashboardStats`
+ * before the `requireClinic` the handler calls first. A call's position is the
+ * line the edge was written at, else — for a query, read or write, whose node
+ * is the call itself — that node's line when it sits in the caller's file.
+ * Edges with neither keep graph order,
+ * after the placed ones — a runtime shortcut from a route straight to a query
+ * must not pull the query ahead of the handler that runs it.
+ */
+function executionOrder(
+  graph: FlowGraph,
+  entryNodeId: string,
+): { order: Map<string, number>; afterResponse: Set<string>; background: Set<string> } {
+  const order = new Map<string, number>();
+  const afterResponse = new Set<string>();
+  const background = new Set<string>();
+  const visit = (id: string, after: boolean, later: boolean): void => {
+    order.set(id, order.size);
+    if (after) afterResponse.add(id);
+    if (later) background.add(id);
+    const from = graph.node(id);
+    const placed = graph.edgesFrom(id, EXECUTION_EDGES).map((edge, index) => {
+      const target = graph.node(edge.to);
+      const line = edge.meta?.['line'];
+      const position =
+        typeof line === 'number'
+          ? line
+          : // A query's own line is where it runs; a function's is where it is defined.
+            edge.kind !== 'calls' &&
+              target?.source &&
+              from?.source &&
+              target.source.file === from.source.file
+            ? target.source.line
+            : Infinity;
+      const end = edge.meta?.['end'];
+      return {
+        to: edge.to,
+        position,
+        end: typeof end === 'number' ? end : Infinity,
+        index,
+        after: after || edge.meta?.['afterResponse'] === true,
+        later: later || edge.meta?.['background'] === true,
+      };
+    });
+    placed.sort((a, b) => a.position - b.position || a.end - b.end || a.index - b.index);
+    for (const next of placed) if (!order.has(next.to)) visit(next.to, next.after, next.later);
+  };
+  visit(entryNodeId, false, false);
+  return { order, afterResponse, background };
+}
+
 function attributeCallSites(
   graph: FlowGraph,
   steps: FlowStep[],
@@ -544,7 +663,9 @@ export function scoreRisk(graph: FlowGraph, flow: FeatureFlow): RiskScore {
     reasons.push('handler could not be resolved statically — trace at runtime to confirm');
   }
 
-  if (flow.evidence === 'confirmed') {
+  // Every step seen running is not this action seen running: they may all
+  // have run under other buttons.
+  if (flow.evidence === 'confirmed' && flow.traced !== false) {
     score = Math.max(0, score - 10);
     reasons.push('confirmed by runtime tracing');
   }
@@ -658,4 +779,17 @@ function uniqueBy<T>(values: T[], key: (value: T) => string): T[] {
 
 function round(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+const CLICKS_TRACED = new WeakMap<FlowGraph, boolean>();
+/** The browser tracer ran: some click has a span of its own. */
+function clicksTraced(graph: FlowGraph): boolean {
+  let found = CLICKS_TRACED.get(graph);
+  if (found === undefined) {
+    found = graph
+      .nodesOfKind('ui-action')
+      .some((node) => node.timing !== undefined && node.meta?.['event'] !== 'mount');
+    CLICKS_TRACED.set(graph, found);
+  }
+  return found;
 }

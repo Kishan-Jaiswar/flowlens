@@ -15,9 +15,9 @@
  */
 
 import type { FlowGraph } from '../graph/graph.js';
-import type { FlowNode } from '../graph/types.js';
+import type { EdgeKind, FlowNode } from '../graph/types.js';
 import { checkFlowContract, type ContractCheck } from './contract.js';
-import { resolveFlows, type FeatureFlow } from './resolve.js';
+import { resolveFlows, type FeatureFlow, type FlowStep } from './resolve.js';
 
 export interface ApiField {
   name: string;
@@ -58,6 +58,8 @@ export interface ApiDataAccess {
   joins?: string[];
   /** Relation fields the query asks to be filled in: `customer`, `items`. */
   follows?: string[];
+  /** `{ upsert: true }`: updates the match, or inserts one when there is none. */
+  upsert?: boolean;
   file?: string;
   line?: number;
 }
@@ -356,7 +358,9 @@ export function flowApis(graph: FlowGraph, flow: FeatureFlow): FlowApis {
       path: String(node.meta?.['path'] ?? ''),
       ...(node.meta?.['rawPath'] ? { rawPath: String(node.meta['rawPath']) } : {}),
       ...(node.meta?.['client'] ? { client: String(node.meta['client']) } : {}),
-      callSites: asStrings(node.meta?.['callSites']),
+      // This action's own call site first: the endpoint is called from several
+      // screens, and the first in the app is not this one's code.
+      callSites: ownSiteFirst(asStrings(node.meta?.['callSites']), step),
       payload: payloadOf(node),
       queryKeys: asStrings(node.meta?.['queryKeys']),
       matched: routeNode !== undefined,
@@ -418,11 +422,26 @@ export function flowApis(graph: FlowGraph, flow: FeatureFlow): FlowApis {
         ...(routeNode.source ? { file: routeNode.source.file, line: routeNode.source.line } : {}),
       };
 
-      for (const guard of graph.successors(routeNode.id, ['guarded-by'])) {
+      // In the order a request meets them: middleware, then guards, interceptors, pipes.
+      const RUNS = ['middleware', 'guard', 'interceptor', 'pipe', 'filter'];
+      const runs = (role: unknown): number => {
+        const at = RUNS.indexOf(String(role ?? 'middleware'));
+        return at < 0 ? RUNS.length : at;
+      };
+      const guards = graph
+        .edgesFrom(routeNode.id, ['guarded-by'])
+        .map((edge) => ({ edge, guard: graph.node(edge.to)! }))
+        .filter(({ guard }) => guard !== undefined)
+        .sort((a, b) => runs(a.guard.meta?.['role']) - runs(b.guard.meta?.['role']));
+      for (const { edge, guard } of guards) {
+        const file =
+          typeof edge.meta?.['file'] === 'string' ? edge.meta['file'] : guard.source?.file;
+        const line =
+          typeof edge.meta?.['line'] === 'number' ? edge.meta['line'] : guard.source?.line;
         detail.middleware.push({
           name: guard.label,
           role: String(guard.meta?.['role'] ?? 'middleware'),
-          ...(guard.source ? { file: guard.source.file, line: guard.source.line } : {}),
+          ...(file ? { file, ...(line !== undefined ? { line } : {}) } : {}),
         });
       }
 
@@ -447,13 +466,26 @@ export function flowApis(graph: FlowGraph, flow: FeatureFlow): FlowApis {
        * *endpoint*: everything the request does, not only the part this feature
        * happens to highlight.
        */
-      const reached = graph.reachable(routeNode.id, {
-        kinds: ['calls', 'queries', 'reads', 'writes', 'emits'],
-      });
+      const follow = { kinds: ['calls', 'queries', 'reads', 'writes', 'emits'] as EdgeKind[] };
+      const reached = new Map(graph.reachable(routeNode.id, follow));
+      // The middleware in front reads too: the staff and doctor behind the token.
+      const before = new Set<string>();
+      for (const { guard } of guards) {
+        for (const member of ['use', 'canActivate', 'intercept']) {
+          const id = methodIds(graph).get(`${guard.label}.${member}`);
+          if (!id) continue;
+          for (const [nodeId, depth] of graph.reachable(id, follow)) {
+            if (reached.has(nodeId)) continue;
+            reached.set(nodeId, depth);
+            before.add(nodeId);
+          }
+        }
+      }
       for (const [nodeId] of reached) {
         if (nodeId === routeNode.id) continue;
         const reachedNode = graph.node(nodeId);
         if (!reachedNode) continue;
+        if (before.has(nodeId) && reachedNode.kind !== 'db-op') continue;
 
         if (reachedNode.kind === 'method') {
           detail.handlers.push({
@@ -477,6 +509,7 @@ export function flowApis(graph: FlowGraph, flow: FeatureFlow): FlowApis {
               : {}),
             ...(joins.length > 0 ? { joins } : {}),
             ...(follows.length > 0 ? { follows } : {}),
+            ...(reachedNode.meta?.['upsert'] === true ? { upsert: true } : {}),
             ...(reachedNode.source
               ? { file: reachedNode.source.file, line: reachedNode.source.line }
               : {}),
@@ -591,6 +624,7 @@ function aftermathFor(
 ): FlowAftermath {
   const navigatesTo = new Set<string>();
   const keys = new Set<string>();
+  const prefixes = new Map<string, string[]>();
   const errorStates = new Set<string>();
   const notifies = new Set<string>();
   let handlesErrors = false;
@@ -601,13 +635,38 @@ function aftermathFor(
     if (!node) continue;
     for (const entry of asStrings(node.meta?.['navigatesTo'])) navigatesTo.add(entry);
     for (const entry of asStrings(node.meta?.['invalidates'])) keys.add(entry);
+    const resolved = node.meta?.['invalidatePrefixes'] as Record<string, string[]> | undefined;
+    for (const [key, prefix] of Object.entries(resolved ?? {})) prefixes.set(key, prefix);
     for (const entry of asStrings(node.meta?.['errorStates'])) errorStates.add(entry);
     for (const entry of asStrings(node.meta?.['notifies'])) notifies.add(entry);
     if (node.meta?.['handlesErrors'] === true) handlesErrors = true;
   }
 
   const endpoints = graph.nodesOfKind('api-call');
+  /** Every query hook whose key could be read, with what it requests. */
+  const queries = graph
+    .nodesOfKind('hook')
+    .filter((hook) => Array.isArray(hook.meta?.['queryKeyPrefix']))
+    .map((hook) => ({
+      prefix: hook.meta!['queryKeyPrefix'] as string[],
+      requests: graph
+        .successors(hook.id, ['requests'])
+        .filter((node) => node.kind === 'api-call')
+        .map((node) => node.label),
+    }));
   const invalidates = [...keys].map((key) => {
+    /**
+     * By key, as React Query matches: invalidating `["medicines"]` refetches
+     * every query whose key starts with it — and nothing keyed `"imports"`,
+     * whatever its URL says.
+     */
+    const prefix = prefixes.get(key);
+    if (prefix && queries.length > 0) {
+      const refetches = queries
+        .filter((query) => prefix.every((part, index) => query.prefix[index] === part))
+        .flatMap((query) => query.requests);
+      return { key, refetches: [...new Set(refetches)].sort() };
+    }
     /**
      * The part of a key that names a resource.
      *
@@ -806,4 +865,22 @@ function disambiguate<T extends { id: string; title: string; subtitle?: string }
 
 function round(value: number): number {
   return Math.round(value * 10) / 10;
+}
+
+/** `file:line` of the request this flow makes, ahead of the others calling the same endpoint. */
+function ownSiteFirst(sites: string[], step: FlowStep): string[] {
+  if (!step.file || step.line === undefined) return sites;
+  const own = `${step.file}:${step.line}`;
+  return [own, ...sites.filter((site) => site !== own)];
+}
+
+const METHOD_IDS = new WeakMap<FlowGraph, Map<string, string>>();
+/** Method nodes by label — `StaffMiddleware.use` — built once per graph. */
+function methodIds(graph: FlowGraph): Map<string, string> {
+  let found = METHOD_IDS.get(graph);
+  if (!found) {
+    found = new Map(graph.nodesOfKind('method').map((node) => [node.label, node.id]));
+    METHOD_IDS.set(graph, found);
+  }
+  return found;
 }

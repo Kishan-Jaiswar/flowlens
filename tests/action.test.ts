@@ -347,7 +347,7 @@ describe('an action document', () => {
     const name = payload.find((row) => row.startsWith('`name`'))!;
     expect(name).toContain('`values.name`');
     expect(name).toContain('trimmed');
-    expect(payload.find((row) => row.startsWith('`note`'))).toContain('only if filled in');
+    expect(payload.find((row) => row.startsWith('`note`'))).toContain('always — may be left empty');
     expect(text(stage(doc, 'payload'))).toContain('productSchema.safeParse(values)');
   });
 
@@ -484,6 +484,12 @@ describe('an action document for a delete behind a confirmation dialog', () => {
     const keys = doc.stages.filter((entry) => !entry.absent).map((entry) => entry.key);
     expect(keys.indexOf('confirm')).toBe(keys.indexOf('trigger') + 1);
     expect(keys.indexOf('handlers')).toBe(keys.indexOf('confirm') + 1);
+  });
+
+  it('names no missing steps for a load, which nobody triggers', () => {
+    const markdown = renderActionDocument({ ...doc, event: 'mount' });
+    expect(markdown).not.toContain('**Not in this action**');
+    expect(markdown).toContain('## At a glance');
   });
 
   it('marks the steps a delete does not have, and the Markdown leaves them out', () => {
