@@ -1302,7 +1302,12 @@ function cardPathHtml(data, scope) {
       },
       // Which rows: `{ expiring: true, sortBy: "expiryDate", pageSize: 5 }`.
       ...(source.asks
-        ? [{ text: `It asks for \`${source.asks}\` — which rows the card shows`, at: { file: source.file, line: source.line } }]
+        ? [
+            {
+              text: `It asks for \`${source.asks}\` — which rows the card shows`,
+              at: { file: source.file, line: source.line },
+            },
+          ]
         : []),
     ];
     if (page) {

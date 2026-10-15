@@ -15,3 +15,9 @@ packages/*/LICENSE
 .idea/
 .vscode/
 *.log
+
+# Local tool output: Playwright MCP screenshots and snapshots.
+.playwright-mcp/
+
+# graphify knowledge graph, rebuilt locally with `graphify update .`.
+graphify-out/
