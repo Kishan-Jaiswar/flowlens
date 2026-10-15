@@ -1391,7 +1391,6 @@ function switchesOff(
  */
 function componentEventMeta(
   attribute: JsxAttribute,
-  fn: Functionish,
   props: Map<string, string>,
   declared: Array<{ name: string; node: Node }>,
 ): Record<string, unknown> {
@@ -1862,7 +1861,7 @@ function analyzeComponentBody(
         ...(place.area ? { area: place.area } : {}),
         // Only where the component is given these does the element do anything.
         ...(needs ? { needsProps: { any: needs.any, all: needs.all } } : {}),
-        ...componentEventMeta(attribute, fn, props, declaredFunctions),
+        ...componentEventMeta(attribute, props, declaredFunctions),
         // Named after the handler, not words on screen: a component's own
         // button names it better.
         ...(typeof handlerName === 'string' && label === humanizeHandler(handlerName)
@@ -2812,7 +2811,7 @@ export function readHttpCall(
   };
 
   // getRequest({ url, params }) — verb in the function name, path in options.
-  const wrapper = readWrapperCall(call, member, args, config, resolve);
+  const wrapper = readWrapperCall(member, args, config, resolve);
   if (wrapper) return wrapper;
 
   // fetch(url, { method })
@@ -2903,7 +2902,6 @@ function wrapperPattern(pattern: string): RegExp {
 }
 
 function readWrapperCall(
-  call: CallExpression,
   member: string,
   args: ReturnType<CallExpression['getArguments']>,
   config: FrontendConfig,

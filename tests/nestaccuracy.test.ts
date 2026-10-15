@@ -342,7 +342,10 @@ describe('what the hand-drawn chart had that the tab did not', () => {
   });
 
   it('says how the wrapper sends, and that a blob answer hides the error message', () => {
-    const { nodes } = actionDecisions(graph, flows.find((flow) => flow.label === 'Download')!);
+    const { nodes } = actionDecisions(
+      graph,
+      flows.find((flow) => flow.label === 'Download')!,
+    );
     const labels = JSON.stringify(nodes);
     expect(labels).toContain(
       'Send it with client.get — sends a Bearer Authorization header, gives up after 60000 ms, reads the answer as a blob',
@@ -351,7 +354,7 @@ describe('what the hand-drawn chart had that the tab did not', () => {
     expect(labels).toContain('Click the link, so the browser saves the file');
   });
 
-  it('lists what the middleware reads, and the collections looked up, as the request\'s data', () => {
+  it("lists what the middleware reads, and the collections looked up, as the request's data", () => {
     const route = graph.nodesOfKind('route').find((node) => node.label === 'GET /reports/range')!;
     const reached = [...graph.reachable(route.id, { kinds: ['calls', 'queries'] }).keys()];
     expect(reached.some((id) => id.includes('bills.aggregate'))).toBe(true);

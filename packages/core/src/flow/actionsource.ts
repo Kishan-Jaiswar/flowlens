@@ -594,18 +594,6 @@ const VARIABLES_IN = new WeakMap<Node, Map<string, Node>>();
 // Statuses
 // ---------------------------------------------------------------------------
 
-export interface StatusExit {
-  status?: number;
-  /** Every status the expression can produce, for `cond ? 201 : 200`. */
-  statuses: number[];
-  message?: string;
-  /** The code that decides, when it is a condition. */
-  when?: string;
-  /** The returned body, as written. */
-  body?: string;
-  at: SourcePoint;
-}
-
 const NEST_EXCEPTIONS: Record<string, number> = {
   BadRequestException: 400,
   UnauthorizedException: 401,

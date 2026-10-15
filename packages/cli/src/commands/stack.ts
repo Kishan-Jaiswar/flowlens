@@ -5,7 +5,6 @@ import {
   stackSummary,
   type StackEntry,
   type StackReport,
-  type StackRole,
 } from '@flowslens/core';
 import { color, table } from '../ui.js';
 
@@ -123,9 +122,4 @@ function note(entry: StackEntry): string {
   if (entry.read === false) bits.push('not traced');
   if (entry.read === 'edge') bits.push('hand-off only');
   return color.gray(bits.join(' · '));
-}
-
-/** Exposed for tests: the role a package name was filed under. */
-export function roleOf(report: StackReport, packageName: string): StackRole | undefined {
-  return report.entries.find((entry) => entry.package === packageName)?.role;
 }

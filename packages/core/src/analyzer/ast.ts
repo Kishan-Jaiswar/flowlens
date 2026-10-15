@@ -10,7 +10,6 @@ import {
   type FunctionExpression,
   type MethodDeclaration,
   type ObjectLiteralExpression,
-  type SourceFile,
 } from 'ts-morph';
 
 export type Functionish =
@@ -121,10 +120,6 @@ export function getDecorator(
   return node.getDecorators().find((d) => d.getName() === name);
 }
 
-export function decoratorNames(node: ClassDeclaration | MethodDeclaration): string[] {
-  return node.getDecorators().map((d) => d.getName());
-}
-
 /** First argument of a decorator, as a string when it is one. */
 export function decoratorStringArg(
   decorator: Decorator | undefined,
@@ -218,15 +213,7 @@ export function lineOf(node: Node): number {
   return node.getStartLineNumber();
 }
 
-export function columnOf(node: Node): number {
-  return node.getSourceFile().getLineAndColumnAtPos(node.getStart()).column;
-}
-
 /** Every call expression inside a node, including nested ones. */
 export function callsIn(node: Node): CallExpression[] {
   return node.getDescendantsOfKind(SyntaxKind.CallExpression);
-}
-
-export function classesIn(file: SourceFile): ClassDeclaration[] {
-  return file.getClasses();
 }

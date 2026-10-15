@@ -483,7 +483,7 @@ export function runServe(args: ServeArgs): number {
       const cacheKey = loadsOnly ? `${key}#loads` : key;
       answerLater(response, async () => {
         // Counted as the charts draw them: shared helpers once, not in every action.
-        const index = await sharedDecisions();
+        await sharedDecisions();
         let summary = scopes.get(cacheKey);
         if (!summary) {
           const mounts = new Set(

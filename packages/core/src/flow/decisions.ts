@@ -3342,7 +3342,7 @@ function collectionOrigin(walk: Walk, expression: Node, depth: number): string |
   if (Node.isPropertyAccessExpression(node)) {
     // `cols.medicines` where `const cols = await getCollections()`
     const base = unwrap(node.getExpression());
-    return Node.isIdentifier(base) && collectionsSource(walk, base) ? node.getName() : undefined;
+    return Node.isIdentifier(base) && collectionsSource(base) ? node.getName() : undefined;
   }
   if (!Node.isIdentifier(node)) return undefined;
   const declaration = declarationOf(node);
@@ -3360,7 +3360,7 @@ function collectionOrigin(walk: Walk, expression: Node, depth: number): string |
 }
 
 /** `const cols = await getCollections()` — a value whose properties are collections. */
-function collectionsSource(walk: Walk, identifier: Node): boolean {
+function collectionsSource(identifier: Node): boolean {
   const declaration = declarationOf(identifier);
   const init = declaration?.getInitializer();
   return init !== undefined && isCollectionsCall(unwrap(init));
@@ -3382,7 +3382,7 @@ function declarationOf(identifier: Node): VariableDeclaration | undefined {
 }
 
 /** `const cache = new Map()` — state in this process, whatever the graph called it. */
-function isLocalStore(walk: Walk, call: CallExpression): boolean {
+function isLocalStore(call: CallExpression): boolean {
   const callee = call.getExpression();
   if (!Node.isPropertyAccessExpression(callee)) return false;
   const base = unwrap(callee.getExpression());
@@ -3407,7 +3407,7 @@ function effectsAt(walk: Walk, call: CallExpression): FlowNode[] {
       }
       if (node.kind === 'external-effect') {
         if (String(node.meta?.['call'] ?? '') !== calleeText(call)) continue;
-        if (isLocalStore(walk, call)) continue;
+        if (isLocalStore(call)) continue;
       }
       found.push(node);
     }

@@ -183,20 +183,6 @@ export function pluralize(word: string): string {
   return `${word}s`;
 }
 
-/** Mongoose type constructors seen in a schema definition. */
-export const SCHEMA_TYPES = new Set([
-  'String',
-  'Number',
-  'Boolean',
-  'Date',
-  'Buffer',
-  'ObjectId',
-  'Mixed',
-  'Decimal128',
-  'Map',
-  'Array',
-]);
-
 /** `{ upsert: true }` among a write's options: it inserts the document when none matches. */
 export function upsertsIn(call: Node): boolean {
   return (
