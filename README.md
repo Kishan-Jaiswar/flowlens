@@ -388,6 +388,9 @@ edited by hand or passed as flags.
 
   "ignore": ["legacy", "generated"],
   "includeTests": false,
+
+  // Links between collections the code cannot show (Database page, `flowlens db`).
+  "relations": [{ "from": "medicines", "field": "ownerId", "to": "clinics" }],
 }
 ```
 
@@ -474,6 +477,7 @@ scanned in 10.7s      339 URL constants resolved
 | `flowlens instrument [project]` | Set up runtime tracing: new files only, dev only.   |
 | `flowlens diff --base main`     | What this branch changes about the app — for a PR.  |
 | `flowlens unused [project]`     | Files, folders, exports and deps nothing uses.      |
+| `flowlens db [collection]`      | Collections, fields, links and who uses each one.   |
 | `flowlens mcp [project]`        | The graph as tools for an AI assistant (MCP).       |
 
 Add `--json` to any command to get machine-readable output.
@@ -845,6 +849,24 @@ Docs · 7 steps   Decisions · 12 branches   Performance · not run   Tests · n
 | **Tests**           | What would catch it if you broke it?       | Which test files import its files, and the cases still to write                          |
 | **Issues & impact** | What is wrong in it, and what could break? | Your edits, type-checked before and after; `flowlens findings`; then this action's graph |
 | **Unused**          | What does nothing use?                     | `flowlens unused` — project-wide                                                         |
+
+The navbar at the top switches between two pages: **Feature flows** (the
+action list and these tabs) and **Database** (`#page=database`) — every
+collection the code declares or queries, the same as `flowlens db`, in words a
+non-developer can follow. It opens on a search (a label on screen or a key in the
+database), a **health check** (queries that skip the owner filter — the same check
+as `flowlens findings` — deletes that leave linked records behind, lookups no
+index serves, fields nothing fills or reads), a **diagram** of how the
+collections link, and one card per collection counting the actions that add,
+change, remove and read its records (a click opens the list). A collection shows
+an example record, those four lists, what a delete does to linked records, its
+links, indexes and queries, and runtime timings when spans were recorded; every
+field says what it holds, what it is called on screen, where the user types it
+and what changes it. The native MongoDB driver is read too: `db.collection<T>()`
+types as the schema, the database each handle opens, and `createIndex` calls.
+`flowlens db --markdown` writes the same as a document with a Mermaid diagram,
+and `flowlens diff` lists database changes. Read from the source, never from a
+live database.
 
 Beside the tabs, the action list is **grouped by the page the user meets each
 action on** — `/medicines`, `/settings` — not the folder its code lives in. A

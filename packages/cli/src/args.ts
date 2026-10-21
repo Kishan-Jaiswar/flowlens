@@ -25,7 +25,7 @@ import { existsSync, statSync } from 'node:fs';
  */
 
 /** Commands whose first non-path positional is their own argument. */
-const COMMANDS_WITH_ARGUMENT = new Set(['flow', 'impact']);
+const COMMANDS_WITH_ARGUMENT = new Set(['flow', 'impact', 'db']);
 
 /** Commands whose first positional is their own argument even though it is a path. */
 const COMMANDS_WITH_LOCATION = new Set(['where']);

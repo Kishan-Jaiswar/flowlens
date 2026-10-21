@@ -17,6 +17,7 @@ import {
   indexTests,
   planTests,
   projectUnused,
+  databaseReport,
   renderActionDocument,
   resolveFlows,
   scan,
@@ -145,6 +146,7 @@ function apiResponse(path: string): unknown {
   }
   if (path.startsWith('/api/findings')) return projectFindings(scanned.graph);
   if (path.startsWith('/api/unused')) return projectUnused(scanned.graph);
+  if (path.startsWith('/api/database')) return databaseReport(scanned.graph, flows);
   if (path.startsWith('/api/queries')) {
     const flow = flows.find(
       (candidate) => candidate.id === new URL(path, 'http://x').searchParams.get('flow'),
@@ -1393,7 +1395,9 @@ describe('the tabs', () => {
 
   it('shows only one panel at a time', async () => {
     await openTab('impact');
-    const visible = [...document.querySelectorAll('.panel')].filter((panel) => !panel.hidden);
+    const visible = [...document.querySelectorAll('.canvas .panel')].filter(
+      (panel) => !panel.hidden,
+    );
     expect(visible).toHaveLength(1);
     expect(visible[0]?.getAttribute('aria-labelledby')).toBe('tab-impact');
   });
@@ -1736,6 +1740,139 @@ describe('the Unused tab', () => {
     // The schemas Nest never registers are exports nothing imports.
     expect(text).toContain('CustomerSchema');
     expect(document.getElementById('tab-unused')?.textContent).toMatch(/\d|clean/);
+  });
+});
+
+describe('the Database page', () => {
+  it('opens from the navbar, lists the collections, opens one, and jumps back to an action', async () => {
+    document.querySelector<HTMLElement>('[data-page="database"]')!.click();
+    const panel = document.getElementById('panel-database')!;
+    expect(document.getElementById('page-database')?.hidden).toBe(false);
+    expect(document.querySelector<HTMLElement>('.layout')?.hidden).toBe(true);
+    expect(window.location.hash).toBe('#page=database');
+    await vi.waitFor(() => {
+      expect(panel.textContent).toContain('4 collections');
+    });
+    expect(document.getElementById('page-database-count')?.textContent).toBe('4');
+    // Not a tab of an action any more.
+    expect(document.getElementById('tab-database')).toBeNull();
+    // The health check says what is worth fixing, in words; the diagram draws the links.
+    const health = [...panel.querySelectorAll('.db-health-group > summary')].map(
+      (x) => x.textContent,
+    );
+    expect(health.some((text) => /delete leaves linked records behind/.test(text ?? ''))).toBe(
+      true,
+    );
+    expect(health.some((text) => /no index/.test(text ?? ''))).toBe(true);
+    expect(
+      [...panel.querySelectorAll('.db-map-box')].map((box) =>
+        box.getAttribute('data-db-collection'),
+      ),
+    ).toEqual(expect.arrayContaining(['customers', 'orders']));
+    expect(panel.querySelector('.db-map-link.is-guess title')?.textContent).toContain(
+      'orders.customerId → customers',
+    );
+
+    const search = panel.querySelector<HTMLInputElement>('[data-db-filter]')!;
+    search.value = 'phone';
+    search.dispatchEvent(new Event('input'));
+    const shown = [...panel.querySelectorAll<HTMLElement>('[data-db-row]')].filter(
+      (row) => !row.hidden,
+    );
+    expect(shown.map((row) => row.querySelector('button')?.textContent)).toEqual(['customers']);
+    expect(shown[0]!.querySelector('.db-field-hit')?.textContent).toBe('Has phone');
+    // A form label finds the field it is saved into.
+    search.value = 'full name';
+    search.dispatchEvent(new Event('input'));
+    const byLabel = [...panel.querySelectorAll<HTMLElement>('[data-db-row]')].find(
+      (row) => !row.hidden,
+    )!;
+    expect(byLabel.querySelector('.db-field-hit')?.textContent).toContain('name (typed in as');
+    // …and the result says how the form field and the stored key connect.
+    const result = panel.querySelector<HTMLElement>('[data-db-results] .db-result')!;
+    expect(result.querySelector('.db-result-title')?.textContent).toContain('customers.name');
+    const chain = [...result.querySelectorAll('.db-chain-kind')].map((kind) => kind.textContent);
+    expect(chain).toEqual(['Typed into', 'Sent in', 'Saved by', 'Stored as', 'Shown in']);
+    expect(result.textContent).toContain('POST /customers');
+    expect(result.textContent).toContain('Where its value comes from');
+    // The card answers the questions first; everything else sits under Code details.
+    const card = result.querySelector<HTMLElement>('.db-field-body')!;
+    const rows = [...card.querySelectorAll(':scope > .db-row > .db-row-label')].map(
+      (l) => l.textContent,
+    );
+    expect(rows).toEqual(expect.arrayContaining(['Gets in', 'Shown']));
+    const cases = [...card.querySelectorAll('.db-cases tbody tr')].map(
+      (tr) => tr.textContent ?? '',
+    );
+    expect(cases.some((text) => /Create Customer/.test(text) && /set from/.test(text))).toBe(true);
+    expect(cases.some((text) => /removed with the record/.test(text))).toBe(true);
+    expect(card.querySelector(':scope > details.db-code > summary')?.textContent).toMatch(
+      /^Code details/,
+    );
+    expect(result.textContent).toContain('APIs that use it');
+    expect(result.textContent).toContain('saves it');
+    // A long result list folds after ten; `+N more` shows the rest in place, and folds it back.
+    search.value = 'e';
+    search.dispatchEvent(new Event('input'));
+    const visibleResults = () =>
+      [...panel.querySelectorAll<HTMLElement>('[data-db-results] .db-result')].filter(
+        (r) => !r.hidden,
+      );
+    expect(visibleResults()).toHaveLength(10);
+    const more = [
+      ...panel.querySelectorAll<HTMLButtonElement>(
+        '[data-db-results] > .db-more-row > [data-db-more]',
+      ),
+    ][0]!;
+    const total = panel.querySelectorAll('[data-db-results] .db-result').length;
+    expect(more.textContent).toBe(`+${total - 10} more`);
+    more.click();
+    expect(visibleResults()).toHaveLength(total);
+    expect(more.textContent).toBe('Show fewer');
+    more.click();
+    expect(visibleResults()).toHaveLength(10);
+    search.value = 'phone';
+    search.dispatchEvent(new Event('input'));
+
+    // A count tile opens its collection on that box, picked out.
+    panel
+      .querySelector<HTMLElement>('[data-db-collection="customers"][data-db-life="create"]')!
+      .click();
+    expect(panel.querySelector('.db-life.effect-create.is-picked [data-goto-flow]')).not.toBeNull();
+    panel.querySelector<HTMLElement>('[data-db-collection=""]')!.click();
+    panel.querySelector<HTMLElement>('[data-db-collection="orders"]')!.click();
+    const text = panel.textContent ?? '';
+    expect(text).toContain('no schema checks it');
+    expect(text).toContain('guessed from the name');
+    expect(panel.querySelector('[data-goto-flow="orderform-submit-order"]')).not.toBeNull();
+
+    // A link to another collection opens it.
+    panel.querySelector<HTMLElement>('td [data-db-collection="customers"]')!.click();
+    expect(panel.textContent).toContain('required · indexed');
+    // An example record shows the shape, with placeholders for the values.
+    expect(panel.querySelector('.db-example pre')?.textContent).toContain('"phone": "text"');
+    // The page opens on what happens to the records, in four boxes, before any field.
+    expect([...panel.querySelectorAll('.db-life-head')].map((h) => h.textContent?.trim())).toEqual([
+      '➕ Added',
+      '✎ Changed',
+      '🗑 Removed',
+      '👁 Read',
+    ]);
+    expect(panel.querySelector('.db-life.effect-create [data-goto-flow]')).not.toBeNull();
+    // Each field opens on plain sentences: what it is, then where the user types it.
+    const phone = [...panel.querySelectorAll('.db-field')].find(
+      (field) => field.querySelector('.db-field-name')?.textContent === 'phone',
+    )!;
+    const plain = phone.querySelector('.db-field-body > .db-plain')?.textContent ?? '';
+    expect(plain).toContain('kept in every customers record');
+    expect(plain).toContain('it must always be set');
+    expect(panel.textContent).toContain('Where its value comes from');
+
+    // An action named here opens on the flows page.
+    panel.querySelector<HTMLElement>('[data-goto-flow]')!.click();
+    expect(document.getElementById('page-database')?.hidden).toBe(true);
+    expect(document.querySelector<HTMLElement>('.layout')?.hidden).toBe(false);
+    expect(window.location.hash).toContain('flow=');
   });
 });
 

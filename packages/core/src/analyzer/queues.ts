@@ -23,6 +23,8 @@ export function linkQueueWorkers(loaded: LoadedProject, graph: FlowGraph): numbe
   const queueOf = new Map<string, string>();
   /** Queue name -> processor function names. */
   const workers = new Map<string, Set<string>>();
+  /** `file#variable` -> queue name, for the worker's own event handlers. */
+  const workerVars = new Map<string, string>();
 
   for (const file of loaded.sourceFiles) {
     for (const created of file.getDescendantsOfKind(SyntaxKind.NewExpression)) {
@@ -38,6 +40,8 @@ export function linkQueueWorkers(loaded: LoadedProject, graph: FlowGraph): numbe
         if (ownerName) queueOf.set(ownerName, name);
       } else if (ctor === 'Worker' && processor) {
         for (const fn of processorNames(processor)) add(workers, name, fn);
+        const variable = created.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
+        if (variable) workerVars.set(`${file.getFilePath()}#${variable.getName()}`, name);
       }
     }
   }
@@ -45,7 +49,18 @@ export function linkQueueWorkers(loaded: LoadedProject, graph: FlowGraph): numbe
   for (const file of loaded.sourceFiles) {
     for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
       const callee = call.getExpression();
-      if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'process') continue;
+      if (!Node.isPropertyAccessExpression(callee)) continue;
+      /**
+       * `worker.on("failed", (job, err) => failImportRecord(...))`: the code a job
+       * runs when it ends, in the same background process as the processor.
+       */
+      if (callee.getName() === 'on') {
+        const queue = workerVars.get(`${file.getFilePath()}#${callee.getExpression().getText()}`);
+        const handler = call.getArguments()[1];
+        if (queue && handler) for (const fn of processorNames(handler)) add(workers, queue, fn);
+        continue;
+      }
+      if (callee.getName() !== 'process') continue;
       const name = queueName(callee.getExpression(), queueOf);
       const processor = call.getArguments().at(-1);
       if (name && processor) for (const fn of processorNames(processor)) add(workers, name, fn);

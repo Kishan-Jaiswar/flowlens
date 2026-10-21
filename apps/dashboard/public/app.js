@@ -118,6 +118,12 @@ const state = {
   /** Which severities and kinds Issues & impact shows for the rest of the project. */
   issueSeverities: new Set(['high', 'medium']),
   issueKind: 'all',
+  /** `flows` or `database`: the page chosen in the navbar. */
+  page: 'flows',
+  // The Database page: the collection open in it, and the search over the list.
+  database: null,
+  dbCollection: null,
+  dbFilter: '',
 };
 
 /**
@@ -184,6 +190,7 @@ const el = {
     impact: document.getElementById('panel-impact'),
     tests: document.getElementById('panel-tests'),
     unused: document.getElementById('panel-unused'),
+    database: document.getElementById('panel-database'),
   },
 };
 
@@ -237,6 +244,7 @@ async function load() {
     void loadChanged();
     void loadIssues();
     void loadUnused();
+    void loadDatabase();
 
     // `#tab=apis&flow=<id>` (or the older `#docs=<id>`) opens straight onto
     // that tab and action, so a link pasted into a ticket lands where it was
@@ -265,6 +273,7 @@ async function load() {
       renderTabs();
       showTab(state.tab);
     }
+    if (hash.get('page') === 'database') showPage('database');
   } catch (error) {
     el.graph.innerHTML = `<p class="error">Could not load the graph: ${escapeHtml(
       String(error.message),
@@ -3201,8 +3210,8 @@ function flowItem(flow, group) {
 }
 
 /** `plural(2, 'action')` -> `2 actions`. */
-function plural(count, word) {
-  return `${count} ${word}${count === 1 ? '' : 's'}`;
+function plural(count, word, many = `${word}s`) {
+  return `${count} ${count === 1 ? word : many}`;
 }
 
 function clearFilter() {
@@ -3486,7 +3495,7 @@ function showTab(id) {
   else if (state.via) params.set('entry', state.via.key);
   else if (state.selectedFlow) params.set('flow', state.selectedFlow.id);
   if (diagram) params.set('view', 'diagram');
-  window.history.replaceState?.(null, '', `#${params}`);
+  if (state.page !== 'database') window.history.replaceState?.(null, '', `#${params}`);
   for (const [tabId] of TABS) {
     const panel = el.panels[tabId];
     if (!panel) continue;
@@ -3758,6 +3767,1919 @@ function renderUnused() {
   parts.push(notesList(unused.notes));
   panel.innerHTML = parts.join('');
   bindTableFolds(panel);
+}
+
+async function loadDatabase() {
+  try {
+    state.database = await getJson('/api/database');
+  } catch (error) {
+    state.database = { error: String(error.message ?? error) };
+  }
+  const count = document.getElementById('page-database-count');
+  if (count) {
+    count.hidden = !state.database.totals;
+    count.textContent = String(state.database.totals?.collections ?? '');
+  }
+  if (state.page === 'database') renderDatabase();
+}
+
+/**
+ * The two pages in the navbar: the feature flows (the sidebar and its tabs)
+ * and the database. Kept in the address as `#page=database`, so a reload or
+ * a pasted link lands on the same page.
+ */
+function showPage(page) {
+  state.page = page === 'database' ? 'database' : 'flows';
+  const database = state.page === 'database';
+  document.querySelector('.layout').hidden = database;
+  document.getElementById('page-database').hidden = !database;
+  // The toggle and the feature doc belong to the flows page.
+  for (const control of [el.showAll.closest('label'), el.docLink]) control.hidden = database;
+  for (const link of document.querySelectorAll('[data-page]')) {
+    const active = link.dataset.page === state.page;
+    link.classList.toggle('active', active);
+    if (active) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  }
+  if (database) {
+    window.history.replaceState?.(null, '', '#page=database');
+    renderDatabase();
+  } else showTab(state.tab);
+}
+
+for (const link of document.querySelectorAll('[data-page]')) {
+  link.addEventListener('click', () => showPage(link.dataset.page));
+}
+
+/** `read from, deleted from` as the chips the action lists already use. */
+function effectChips(effects) {
+  return effects
+    .map(
+      (effect) =>
+        `<span class="chip small effect-${escapeHtml(effect)}">${escapeHtml(effect)}</span>`,
+    )
+    .join(' ');
+}
+
+/**
+ * The database as the code sees it: every collection with its schema, the
+ * code and actions that use it, and its links to the others. Read from the
+ * source only — nothing here comes from a real database.
+ */
+function renderDatabase() {
+  const panel = el.panels.database;
+  if (!panel) return;
+  if (!state.database) return panelLoading(panel, 'the collections');
+  const db = state.database;
+  if (db.error) {
+    panel.innerHTML = `<p class="error">Could not load this view: ${escapeHtml(db.error)}</p>`;
+    return;
+  }
+  // A schema `ref` names the model, a guessed link the collection: either opens it.
+  const chosen = db.collections.find(
+    (entry) => entry.name === state.dbCollection || entry.model === state.dbCollection,
+  );
+  panel.innerHTML = chosen ? collectionHtml(chosen) : databaseOverviewHtml(db);
+
+  const search = panel.querySelector('[data-db-filter]');
+  search?.addEventListener('input', () => {
+    state.dbFilter = search.value;
+    const query = search.value.trim().toLowerCase();
+    for (const row of panel.querySelectorAll('[data-db-row]')) {
+      row.hidden = Boolean(query) && !row.dataset.dbRow.includes(query);
+      // Say which field matched, so a search for a key answers "where is it".
+      const entry = db.collections.find((c) => c.name === row.querySelector('button')?.textContent);
+      const fields = query
+        ? (entry?.fields ?? []).filter((field) => fieldSearchText(field).includes(query))
+        : [];
+      const hit = row.querySelector('.db-field-hit');
+      hit.hidden = fields.length === 0;
+      // `mrp` finds `sellingPrice`: say why, so the rename is not a mystery.
+      const why = (field) => {
+        if (field.name.toLowerCase().includes(query)) return '';
+        const entry = field.enteredIn.find((e) =>
+          `${e.key} ${e.label ?? ''}`.toLowerCase().includes(query),
+        );
+        if (entry) return ` (typed in as ${escapeHtml(entry.label ?? entry.key)})`;
+        const shown = field.shownIn.find((s) => (s.label ?? '').toLowerCase().includes(query));
+        return shown ? ` (shown as ${escapeHtml(shown.label)})` : '';
+      };
+      hit.innerHTML = fields.length
+        ? `Has ${fold(
+            fields.map((field) => `<code>${escapeHtml(field.name)}</code>${why(field)}`),
+            4,
+            { sep: ', ' },
+          )}`
+        : '';
+    }
+  });
+  const results = panel.querySelector('[data-db-results]');
+  search?.addEventListener('input', () => {
+    const query = search.value.trim().toLowerCase();
+    results.innerHTML = query ? fieldResultsHtml(db, query) : '';
+    bindDatabaseLinks(results);
+  });
+  search?.dispatchEvent(new Event('input'));
+  const fieldSearch = panel.querySelector('[data-db-field-filter]');
+  fieldSearch?.addEventListener('input', () => {
+    const query = fieldSearch.value.trim().toLowerCase();
+    for (const field of panel.querySelectorAll('[data-db-field]')) {
+      field.hidden = Boolean(query) && !field.dataset.dbField.includes(query);
+    }
+  });
+  fieldSearch?.dispatchEvent(new Event('input'));
+  bindTableFolds(panel);
+  bindFolds(panel);
+  bindDatabaseLinks(panel);
+}
+
+/** A collection link opens it; an action link opens on the flows page, where it lives. */
+function bindDatabaseLinks(root) {
+  const panel = el.panels.database;
+  for (const button of root.querySelectorAll('[data-db-collection]')) {
+    // The diagram's boxes are SVG groups, not buttons: Enter and Space open them too.
+    if (button.tagName !== 'BUTTON')
+      button.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        button.dispatchEvent(new Event('click'));
+      });
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      state.dbCollection = button.dataset.dbCollection || null;
+      renderDatabase();
+      panel.scrollTop = 0;
+      const box = button.dataset.dbLife
+        ? panel.querySelector(`.db-life.effect-${button.dataset.dbLife}`)
+        : null;
+      if (box) {
+        box.querySelector('[data-db-more][aria-expanded="false"]')?.click();
+        box.classList.add('is-picked');
+        box.scrollIntoView?.({ block: 'start' });
+      }
+    });
+  }
+  bindFlowJumps(root);
+  for (const button of root.querySelectorAll('[data-goto-flow]')) {
+    button.addEventListener('click', () => showPage('flows'));
+  }
+}
+
+/** Why a field matched the search: its own name, or the frontend name it goes by. */
+function matchReason(field, query) {
+  if (field.name.toLowerCase().includes(query)) return 'the key stored in the database';
+  const entry = field.enteredIn.find((e) =>
+    `${e.key} ${e.label ?? ''}`.toLowerCase().includes(query),
+  );
+  if (entry)
+    return entry.key.toLowerCase().includes(query)
+      ? `the form field \`${entry.key}\``
+      : `the form label **${entry.label}**`;
+  const shown = field.shownIn.find((s) => (s.label ?? '').toLowerCase().includes(query));
+  return shown ? `the screen label **${shown.label}**` : 'a name it goes by';
+}
+
+/** One box of the chain: what this step is, and where. */
+function chainStep(kind, body, source) {
+  return `<li class="db-chain-step"><span class="db-chain-kind">${escapeHtml(kind)}</span><div>${body}</div>${
+    source ? `<div class="db-chain-at">${fileRef(source.file, source.line)}</div>` : ''
+  }</li>`;
+}
+
+/**
+ * How a frontend field and a stored key connect, left to right:
+ * form input → request → the code that saves it → the key → the screens that show it.
+ */
+function fieldChainHtml(collection, field) {
+  const worked = (savedBy) =>
+    savedBy.derivedIn
+      ? chainStep(
+          'Worked out',
+          `in <code>${escapeHtml(savedBy.derivedIn)}</code>${
+            savedBy.derivedFrom?.length
+              ? ` from ${savedBy.derivedFrom.map((name) => `<code>${escapeHtml(name)}</code>`).join(', ')}`
+              : ''
+          }`,
+        )
+      : '';
+  const stored = chainStep(
+    'Stored as',
+    `<button class="link" data-db-collection="${escapeHtml(collection.name)}">${escapeHtml(collection.name)}</button>.<code>${escapeHtml(field.name)}</code>`,
+  );
+  const shown = field.shownIn.length
+    ? chainStep(
+        'Shown in',
+        fold(
+          field.shownIn.map(
+            (place) =>
+              `<div>${place.label ? `<strong>${escapeHtml(place.label)}</strong> ` : ''}${fileRef(place.source.file, place.source.line)}</div>`,
+          ),
+          3,
+          { asRows: true },
+        ),
+      )
+    : chainStep('Shown in', '<span class="muted">not read by any screen that loads it</span>');
+
+  // One chain per form that feeds it; else one per piece of code that writes it.
+  const starts = field.enteredIn.length
+    ? field.enteredIn.map(
+        (entry) =>
+          (entry.kind === 'code'
+            ? chainStep(
+                'Built in code',
+                `<code>${escapeHtml(entry.code ?? entry.key)}</code><div class="muted">${actionLinks([entry])}</div>`,
+                entry.source,
+              )
+            : chainStep(
+                'Typed into',
+                `<strong>${escapeHtml(entry.label ?? entry.key)}</strong><div class="muted">form key <code>${escapeHtml(entry.key)}</code> · ${actionLinks([entry])}</div>`,
+                entry.source,
+              )) +
+          (entry.endpoint
+            ? chainStep('Sent in', `<code>${escapeHtml(entry.endpoint)}</code>`)
+            : '') +
+          (entry.savedBy.queued
+            ? chainStep(
+                'Queued, saved later',
+                `a background job — <code>${escapeHtml(entry.savedBy.queued.in)}</code> picks it up after the request has answered`,
+                entry.savedBy.queued.source,
+              )
+            : '') +
+          (entry.savedBy.via
+            ? chainStep(
+                'Goes through',
+                `<code>${escapeHtml(entry.savedBy.via)}</code><div class="muted">it decides first; <code>${escapeHtml(entry.savedBy.in ?? '')}</code> runs only for new records</div>`,
+              )
+            : '') +
+          chainStep(
+            'Saved by',
+            `<code>${escapeHtml(entry.savedBy.in ?? 'the server')}</code><div class="muted">${
+              entry.through
+                ? `as <code>${escapeHtml(entry.through)}</code>`
+                : `<code>${escapeHtml(field.name)}</code> = <code>${escapeHtml(entry.savedBy.value)}</code>`
+            }</div>`,
+            entry.savedBy.source,
+          ) +
+          worked(entry.savedBy),
+      )
+    : field.writes.length
+      ? field.writes.map((write) =>
+          chainStep(
+            'Set by code',
+            `<code>${escapeHtml(write.in ?? 'the server')}</code><div class="muted"><code>${escapeHtml(field.name)}</code> = <code>${escapeHtml(write.value)}</code> — ${escapeHtml(VALUE_ORIGIN[write.from])}</div>`,
+            write.source,
+          ),
+        )
+      : [chainStep('Set by', '<span class="muted">nothing in this project writes it</span>')];
+  return fold(
+    starts.map((start) => `<ol class="db-chain">${start}${stored}${shown}</ol>`),
+    3,
+    { asRows: true },
+  );
+}
+
+/** Every field the search names, across all collections, each with its chain and all its details. */
+function fieldResultsHtml(db, query) {
+  const matches = db.collections.flatMap((collection) =>
+    collection.fields
+      .filter((field) => fieldSearchText(field).includes(query))
+      .map((field) => ({ collection, field })),
+  );
+  if (!matches.length)
+    return `<p class="muted">No field matches “${escapeHtml(query)}” — not as a key, a form field or a label on screen.</p>`;
+  return (
+    `<h3 class="tab-heading">${plural(matches.length, 'field')} match “${escapeHtml(query)}”</h3>` +
+    fold(
+      matches.map(
+        ({ collection, field }) => `<section class="db-result">
+          <div class="db-result-title">${
+            screenNames(field)[0] ? `<strong>${escapeHtml(screenNames(field)[0])}</strong> → ` : ''
+          }stored as <code>${escapeHtml(collection.name)}.${escapeHtml(field.name)}</code>
+            <span class="muted">${richText(`found by ${matchReason(field, query)}`)}</span></div>
+          ${fieldHtml(field, true, collection)}
+        </section>`,
+      ),
+      10,
+      { asRows: true },
+    )
+  );
+}
+
+/** Where a value comes from, in plain words. */
+const VALUE_ORIGIN = {
+  input: 'passed in by the caller',
+  fixed: 'a fixed value',
+  time: 'the current time',
+  computed: 'worked out in the code',
+};
+
+/** When a write happens, by how it writes. */
+function writeWhen(how) {
+  return (
+    {
+      insert: 'when a record is created',
+      replace: 'when the whole record is replaced',
+      $set: 'when a record is updated',
+      $setOnInsert: 'only when an upsert creates the record',
+      $inc: 'added to the current number',
+      $mul: 'multiplied',
+      $min: 'lowered to the smaller value',
+      $max: 'raised to the larger value',
+      $push: 'an item added to the list',
+      $addToSet: 'an item added to the list, once',
+      $pull: 'an item removed from the list',
+      $pullAll: 'items removed from the list',
+      $unset: 'removed from the record',
+      $rename: 'renamed',
+      $currentDate: 'set to the current time',
+    }[how] ?? `written with \`${how}\``
+  );
+}
+
+/** The functions that touch a collection, grouped by what they do to it. */
+function writersByEffect(entry) {
+  const by = {};
+  for (const op of entry.operations) {
+    if (!op.method) continue;
+    (by[op.effect] ??= new Set()).add(op.method.split('.').pop());
+  }
+  return by;
+}
+
+/** `CLINICS_DB` (env var) or `pharma`: the database a handle is opened in. */
+const databaseLabel = (db) => `\`${db.name}\`${db.env ? ' (env var)' : ''}`;
+
+/** `model Customer`, or `type Medicine` when a TypeScript type is the only schema. */
+const modelHtml = (entry) =>
+  entry.model
+    ? ` <span class="muted">${entry.typed ? 'type' : 'model'} <code>${escapeHtml(entry.model)}</code></span>`
+    : '';
+
+/** `ownerId ↑, createdAt ↓`: an index's keys in order. */
+const indexKeys = (index) =>
+  index.keys
+    .map(([key, kind]) => `\`${key}\` ${kind === '1' ? '↑' : kind === '-1' ? '↓' : kind}`)
+    .join(', ');
+
+/** A TTL in words: `0` is "when the date it holds is reached". */
+const ttlText = (seconds) =>
+  seconds === 0
+    ? 'deleted automatically when the date it holds is reached'
+    : `deleted automatically ${seconds} s after the date it holds`;
+
+/** A type in everyday words: `string` → text, `Batch[]` → a list of Batch. */
+function plainType(type) {
+  if (!type) return '';
+  const text = String(type).trim();
+  const list = /^(.+)\[\]$/.exec(text) ?? /^(?:Readonly)?Array<(.+)>$/.exec(text);
+  if (list) return `a list of ${plainType(list[1]).replace(/^an? /, '')}`;
+  if (/^['"`].*\|/.test(text))
+    return `one of ${text
+      .split('|')
+      .map((part) => part.trim())
+      .join(', ')}`;
+  if (/^(string|String|text)$/.test(text)) return 'text';
+  if (/^(number|Number|Int|Float|Decimal|BigInt)$/.test(text)) return 'a number';
+  if (/^(boolean|Boolean)$/.test(text)) return 'yes / no';
+  if (/^(Date|DateTime)$/.test(text)) return 'a date';
+  if (/ObjectId$/.test(text)) return 'a record id';
+  if (/^(object|Json|Mixed)$/.test(text)) return 'a group of fields';
+  return text;
+}
+
+/**
+ * The four things that happen to records, each with the user actions that do it.
+ * `write` (a `save()` or `bulkWrite()` that may be either) counts as a change.
+ */
+const LIFECYCLE = [
+  ['create', '➕', 'Added', 'New records are created by'],
+  ['update', '✎', 'Changed', 'Existing records are changed by'],
+  ['delete', '🗑', 'Removed', 'Records are deleted by'],
+  ['read', '👁', 'Read', 'Records are loaded by'],
+];
+
+function lifecycleOf(entry) {
+  const actions = { read: [], create: [], update: [], delete: [] };
+  for (const use of entry.usedBy)
+    for (const effect of use.effects) {
+      const key = effect === 'write' ? 'update' : effect;
+      if (!actions[key].some((other) => other.flowId === use.flowId)) actions[key].push(use);
+    }
+  const code = writersByEffect(entry);
+  if (code.write) code.update = new Set([...(code.update ?? []), ...code.write]);
+  // An upsert creates the record when none matches: its actions add records too.
+  for (const op of entry.operations.filter((op) => op.upsert && op.source)) {
+    if (op.method) (code.create ??= new Set()).add(op.method.split('.').pop());
+    for (const field of entry.fields)
+      for (const write of field.writes)
+        if (write.source?.file === op.source.file && write.source.line === op.source.line)
+          for (const action of write.actions)
+            if (!actions.create.some((other) => other.flowId === action.flowId))
+              actions.create.push(action);
+  }
+  return { actions, code };
+}
+
+/** Indexes that make the database delete records by itself. */
+const ttlIndexes = (entry) => (entry.indexes ?? []).filter((index) => index.ttlSeconds != null);
+
+/**
+ * Actions as a short list, one row each: `Update stock · on Medicines · 4 places`.
+ * The same action reached from several places (`… (line 111)`, `… (line 141)`) is one row;
+ * the first five show, the rest fold.
+ */
+function actionListHtml(uses, keep = 5) {
+  const groups = new Map();
+  for (const use of uses) {
+    const name = plainTitle(use.title);
+    groups.set(name, [...(groups.get(name) ?? []), use]);
+  }
+  const items = [...groups].map(([name, group]) => {
+    const at = name.lastIndexOf(' · ');
+    const action = at === -1 ? name : name.slice(at + 3);
+    const screen = at === -1 ? '' : name.slice(0, at);
+    return `<li><button class="link" data-goto-flow="${escapeHtml(group[0].flowId)}">${escapeHtml(action)}</button>${
+      screen ? ` <span class="muted">on ${escapeHtml(screen)}</span>` : ''
+    }${group.length > 1 ? ` <span class="muted">· ${group.length} places</span>` : ''}</li>`;
+  });
+  return {
+    count: groups.size,
+    html: `<ul class="db-life-list">${fold(items, keep, { asRows: true })}</ul>`,
+  };
+}
+
+/** The lifecycle as four boxes: what adds, changes, removes and reads its records. */
+function lifecycleHtml(entry) {
+  const { actions, code } = lifecycleOf(entry);
+  const boxes = LIFECYCLE.map(([effect, icon, title, lead]) => {
+    const uses = actions[effect];
+    const fns = [...(code[effect] ?? [])];
+    const ttl = effect === 'delete' ? ttlIndexes(entry) : [];
+    const expires = ttl.length
+      ? `<p>The database deletes each record by itself: ${ttl
+          .map(
+            (index) =>
+              `<code>${escapeHtml(index.keys[0][0])}</code> — ${escapeHtml(ttlText(index.ttlSeconds))}`,
+          )
+          .join('; ')}.</p>`
+      : '';
+    const list = uses.length ? actionListHtml(uses) : undefined;
+    const body = list
+      ? `<p>${escapeHtml(lead)} ${plural(list.count, 'action')}:</p>${list.html}`
+      : fns.length
+        ? `<p>${escapeHtml(lead)} ${escapeHtml(RUN_WORDS[runnerOf(entry, effect)][1])} — never by a user action.</p>`
+        : expires
+          ? ''
+          : `<p class="muted">Nothing in this app does this.</p>`;
+    return `<div class="db-life effect-${effect}${uses.length || fns.length || expires ? '' : ' is-empty'}">
+      <div class="db-life-head"><span aria-hidden="true">${icon}</span> ${title}</div>
+      ${body}${expires}
+      ${fns.length ? `<p class="db-life-code">Code: ${fns.map((fn) => `<code>${escapeHtml(fn)}</code>`).join(' ')}</p>` : ''}
+    </div>`;
+  });
+  return `<div class="db-life-grid">${boxes.join('')}</div>${findingHtml(entry)}${runtimeHtml(entry)}`;
+}
+
+/** How records are looked up and ordered, from the fields' own lookups and sorts. */
+function findingHtml(entry) {
+  const named = (fields) =>
+    fields.map((field) => `<code>${escapeHtml(field.name)}</code>`).join(', ');
+  const searched = entry.fields.filter((field) => field.lookups.some((l) => l.match === 'search'));
+  const matched = entry.fields.filter((field) => field.lookups.length && !searched.includes(field));
+  const sorted = entry.fields.filter((field) => field.sorts.length);
+  const lines = [
+    searched.length &&
+      `🔎 <strong>Search</strong> — typing in a search box matches part of ${named(searched)}.`,
+    matched.length && `🎯 <strong>Find</strong> — the code picks out records by ${named(matched)}.`,
+    sorted.length && `↕ <strong>Sort</strong> — lists can be ordered by ${named(sorted)}.`,
+  ].filter(Boolean);
+  return lines.length
+    ? `<ul class="db-finding">${lines.map((l) => `<li>${l}</li>`).join('')}</ul>`
+    : '';
+}
+
+/** One link as a sentence: "Each movements record points to one medicines record, through `medicineId`." */
+function linkSentence(r) {
+  const open = (name) =>
+    `<button class="link" data-db-collection="${escapeHtml(name)}"><strong>${escapeHtml(name)}</strong></button>`;
+  return `Each ${open(r.from)} record points to ${r.many ? 'several' : 'one'} ${open(r.to)} record${
+    r.many ? 's' : ''
+  }, through its <code>${escapeHtml(r.field)}</code> field.`;
+}
+
+/** How sure the link is, in words: the code says so, or the name only suggests it. */
+const linkBasis = (r) =>
+  r.via === 'naming'
+    ? 'guessed from the name'
+    : r.via === 'query'
+      ? 'stated in the code: a query looks records up by it'
+      : `stated in the code (${r.via})`;
+
+/** Every link in the database, once. */
+function allLinks(db) {
+  const seen = new Map();
+  for (const entry of db.collections)
+    for (const r of [...entry.references, ...entry.referencedBy])
+      seen.set(`${r.from}.${r.field}>${r.to}`, r);
+  return [...seen.values()];
+}
+
+/** What runs a query no user action reaches, in a word for the tile and in words for the box. */
+const RUN_WORDS = {
+  job: ['job', 'a background job (a queue worker)'],
+  endpoint: ['api', 'an API endpoint no screen calls'],
+  script: ['script', 'a script someone runs by hand'],
+};
+
+/** The non-user runner of an effect on a collection: a job beats an endpoint beats a script. */
+function runnerOf(entry, effect) {
+  const ops = entry.operations.filter(
+    (op) =>
+      op.runBy !== 'user' &&
+      (op.effect === effect ||
+        (effect === 'update' && op.effect === 'write') ||
+        (effect === 'create' && op.upsert)),
+  );
+  for (const kind of ['job', 'endpoint', 'script'])
+    if (ops.some((op) => op.runBy === kind)) return kind;
+  return 'script';
+}
+
+const collectionButton = (name) =>
+  `<button class="link" data-db-collection="${escapeHtml(name)}"><strong>${escapeHtml(name)}</strong></button>`;
+
+/** Who runs an unscoped query, in words: a script on purpose reads every owner. */
+const runByWords = (runBy) =>
+  runBy === 'user' ? 'run by user actions' : `run by ${RUN_WORDS[runBy][1]}`;
+
+/**
+ * The health check: the four things worth fixing, each a fold with every case
+ * and the line to open. Said in words a non-developer can act on.
+ */
+function healthHtml(db) {
+  const unscoped = db.collections.flatMap((c) => (c.unscoped ?? []).map((q) => ({ c, q })));
+  const orphans = db.collections.flatMap((c) =>
+    (c.onDelete ?? []).filter((d) => d.outcome === 'kept').map((d) => ({ c, d })),
+  );
+  const slow = db.collections.flatMap((c) => (c.slowQueries ?? []).map((q) => ({ c, q })));
+  const unused = db.collections.flatMap((c) =>
+    c.fields.filter((f) => f.unused).map((f) => ({ c, f })),
+  );
+  const at = (source) => (source ? fileRef(source.file, source.line) : '');
+  const where = (q) => (q.method ? ` in <code>${escapeHtml(q.method)}</code>` : '');
+  const groups = [
+    unscoped.length && {
+      tone: unscoped.some(({ q }) => q.severity === 'high') ? 'danger' : 'warn',
+      icon: '🔒',
+      title: `${plural(unscoped.length, 'query', 'queries')} don’t keep owners apart`,
+      text: `Most queries filter by \`${db.tenantKey}\`, so each owner only sees their own records. These don’t: they could read or change another owner’s records. A script that works on every owner on purpose is fine.`,
+      rows: unscoped.map(
+        ({ c, q }) =>
+          `<li><span class="chip small sev-${q.severity}">${q.severity}</span> ${collectionButton(c.name)} <code>${escapeHtml(q.label)}</code>${where(q)} <span class="muted">— ${escapeHtml(runByWords(q.runBy))}${
+            q.filters.length
+              ? `, finds by ${q.filters.map((f) => `<code>${escapeHtml(f)}</code>`).join(', ')}`
+              : ', no filter'
+          }</span> ${at(q.source)}<div class="db-hint">${richText(q.fix)}</div></li>`,
+      ),
+    },
+    orphans.length && {
+      tone: 'warn',
+      icon: '🔗',
+      title: `${plural(orphans.length, 'delete leaves', 'deletes leave')} linked records behind`,
+      text: 'When a record is deleted, the records that hold its id stay — pointing at something that no longer exists. Screens that show them may break or show empty names.',
+      rows: orphans.map(
+        ({ c, d }) =>
+          `<li>Deleting a ${collectionButton(c.name)} record keeps its ${collectionButton(d.from)} records (their <code>${escapeHtml(d.field)}</code> points at it) <span class="muted">— by ${escapeHtml(
+            [...new Set(d.actions.map((a) => plainTitle(a.title)))].join(', '),
+          )}</span></li>`,
+      ),
+    },
+    slow.length && {
+      tone: 'warn',
+      icon: '🐢',
+      title: `${plural(slow.length, 'lookup has', 'lookups have')} no index`,
+      text: 'The database has to read every record to answer these. Fine while a collection is small; slow once it grows.',
+      rows: slow.map(
+        ({ c, q }) =>
+          `<li>${collectionButton(c.name)} <code>${escapeHtml(q.label)}</code>${where(q)} <span class="muted">— finds by ${q.fields.map((f) => `<code>${escapeHtml(f)}</code>`).join(', ')}${
+            q.reason === 'text-search' ? ', a text search that matches part of a value' : ''
+          }</span> ${at(q.source)}</li>`,
+      ),
+    },
+    unused.length && {
+      tone: 'muted',
+      icon: '🧹',
+      title: `${plural(unused.length, 'field looks', 'fields look')} unused`,
+      text: 'Candidates for cleanup — check before removing: another app or a database script may use them.',
+      rows: unused.map(
+        ({ c, f }) =>
+          `<li>${collectionButton(c.name)} <code>${escapeHtml(f.name)}</code> <span class="muted">— ${
+            f.unused === 'never-written'
+              ? 'nothing in this app fills it'
+              : 'saved, but nothing reads it back'
+          }</span></li>`,
+      ),
+    },
+  ].filter(Boolean);
+  if (!groups.length)
+    return answer(
+      'ok',
+      'Health check: nothing to fix',
+      'Every scoped query filters by its owner, deletes leave nothing behind, lookups have indexes and every field is used.',
+    );
+  return (
+    heading(
+      'Health check',
+      'What the code shows is worth fixing. Open a line to see every case and the file to open.',
+    ) +
+    `<div class="db-health">${groups
+      .map(
+        (g) =>
+          `<details class="db-health-group tone-${g.tone}"><summary><span aria-hidden="true">${g.icon}</span> <strong>${escapeHtml(g.title)}</strong></summary><p class="db-hint">${richText(g.text)}</p><ul class="db-lines">${g.rows.join('')}</ul></details>`,
+      )
+      .join('')}</div>`
+  );
+}
+
+/**
+ * The links as a picture: one box per linked collection, an arrow from the
+ * collection holding the id to the one it points at. Collections nothing points
+ * at sit on the left, the ones everything points at on the right. A guessed link
+ * is dashed. Boxes open their collection.
+ */
+function diagramHtml(db, links) {
+  const linked = [...new Set(links.flatMap((r) => [r.from, r.to]))].sort();
+  if (!linked.length) return '';
+  const out = new Map(
+    linked.map((name) => [name, links.filter((r) => r.from === name && r.to !== name)]),
+  );
+  const rank = new Map();
+  const rankOf = (name, seen = new Set()) => {
+    if (rank.has(name)) return rank.get(name);
+    if (seen.has(name)) return 0;
+    seen.add(name);
+    const value = Math.max(0, ...out.get(name).map((r) => 1 + rankOf(r.to, seen)));
+    rank.set(name, value);
+    return value;
+  };
+  linked.forEach((name) => rankOf(name));
+  const top = Math.max(...rank.values());
+  const W = 190;
+  const H = 46;
+  const COL = 300;
+  const ROW = 76;
+  // Each group of linked collections gets its own band, so arrows of one group never cross another's.
+  const group = new Map(linked.map((name) => [name, name]));
+  const find = (name) => (group.get(name) === name ? name : find(group.get(name)));
+  for (const r of links) group.set(find(r.from), find(r.to));
+  const bands = new Map();
+  for (const name of linked) bands.set(find(name), [...(bands.get(find(name)) ?? []), name]);
+  const neighbours = (name) =>
+    links.flatMap((r) => (r.from === name ? [r.to] : r.to === name ? [r.from] : []));
+  const pos = new Map();
+  let y = 20;
+  for (const members of bands.values()) {
+    const columns = new Map();
+    for (const name of members) {
+      const col = top - rank.get(name);
+      columns.set(col, [...(columns.get(col) ?? []), name]);
+    }
+    // Left to right, each column in the order of what it links to: arrows run level, not across.
+    const rowOf = new Map();
+    for (const col of [...columns.keys()].sort((a, b) => a - b)) {
+      const order = (name) => {
+        const placed = neighbours(name).filter((other) => rowOf.has(other));
+        return placed.length
+          ? placed.reduce((sum, other) => sum + rowOf.get(other), 0) / placed.length
+          : Infinity;
+      };
+      const names = columns.get(col).sort((a, b) => order(a) - order(b) || a.localeCompare(b));
+      names.forEach((name, row) => {
+        rowOf.set(name, row);
+        pos.set(name, { x: 20 + col * COL, y: y + row * ROW });
+      });
+    }
+    y += Math.max(...[...columns.values()].map((names) => names.length)) * ROW;
+  }
+  const width = 40 + top * COL + W;
+  const height = y - (ROW - H) + 20;
+  const dbOf = (name) =>
+    db.collections
+      .find((c) => c.name === name)
+      ?.databases?.map((d) => d.name)
+      .join(' + ') ?? '';
+  const arrows = links
+    .filter((r) => r.from !== r.to)
+    .map((r) => {
+      const a = pos.get(r.from);
+      const b = pos.get(r.to);
+      const x1 = a.x + W;
+      const y1 = a.y + H / 2;
+      const x2 = b.x;
+      const y2 = b.y + H / 2;
+      const mid = (x1 + x2) / 2;
+      const guess = r.via === 'naming';
+      return `<g class="db-map-link${guess ? ' is-guess' : ''}"><title>${escapeHtml(`${r.from}.${r.field} → ${r.to} (${linkBasis(r)})`)}</title>
+        <path d="M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2 - 6},${y2}" marker-end="url(#db-arrow)"/>
+        <text x="${mid}" y="${(y1 + y2) / 2 - 6}" text-anchor="middle">${escapeHtml(r.field)}</text></g>`;
+    })
+    .join('');
+  const boxes = linked
+    .map((name) => {
+      const { x, y } = pos.get(name);
+      return `<g class="db-map-box" data-db-collection="${escapeHtml(name)}" role="button" tabindex="0" aria-label="Open ${escapeHtml(name)}">
+        <rect x="${x}" y="${y}" width="${W}" height="${H}" rx="8"/>
+        <text x="${x + W / 2}" y="${y + (dbOf(name) ? 20 : 28)}" text-anchor="middle" class="db-map-name">${escapeHtml(name)}</text>
+        ${dbOf(name) ? `<text x="${x + W / 2}" y="${y + 36}" text-anchor="middle" class="db-map-db">${escapeHtml(dbOf(name))}</text>` : ''}
+      </g>`;
+    })
+    .join('');
+  const alone = db.collections.filter((c) => !linked.includes(c.name)).map((c) => c.name);
+  return `<div class="db-map"><svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="How the collections link">
+      <defs><marker id="db-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+      ${arrows}${boxes}</svg></div>
+    <p class="db-hint">An arrow goes from the collection that holds the id to the one it points at. A dashed arrow is guessed from the field’s name. Click a box to open it.${
+      alone.length ? ` Not linked to any other: ${alone.map(collectionButton).join(', ')}.` : ''
+    }</p>`;
+}
+
+/** A sample value for a field, by its type: what a record holds, without real data. */
+function sampleValue(field) {
+  if (field.ref) return `id of a ${field.ref} record`;
+  if (field.name === '_id') return 'a record id';
+  const type = plainType(field.type);
+  // A date kept as text (`createdAt: string`) still holds a date.
+  if (type === 'text' && /(At|Date|_at|_date)$/.test(field.name)) return '2026-01-31T10:00:00.000Z';
+  if (type === 'text') return 'text';
+  if (type === 'a number') return 0;
+  if (type === 'yes / no') return true;
+  if (type === 'a date') return '2026-01-31T10:00:00.000Z';
+  if (type === 'a record id') return 'a record id';
+  if (type.startsWith('one of '))
+    return type
+      .slice(7)
+      .split(', ')[0]
+      .replace(/^['"`]|['"`]$/g, '');
+  if (type.startsWith('a list of')) return [];
+  if (type === 'a group of fields') return {};
+  return field.type ? field.type : null;
+}
+
+/** One made-up record built from the fields, nested the way it is stored. */
+function exampleRecordHtml(entry) {
+  if (!entry.fields.length) return '';
+  const record = {};
+  // The report lists a parent before the fields inside it, so the shape builds in order.
+  for (const field of entry.fields) {
+    const parts = field.name.split('.');
+    let target = record;
+    parts.forEach((part, i) => {
+      const list = part.endsWith('[]');
+      const key = list ? part.slice(0, -2) : part;
+      const last = i === parts.length - 1;
+      if (last && !list) {
+        if (!(key in target) || typeof target[key] !== 'object' || target[key] === null)
+          target[key] = sampleValue(field);
+        return;
+      }
+      if (list) {
+        if (!Array.isArray(target[key]) || !target[key].length) target[key] = [{}];
+        if (typeof target[key][0] !== 'object' || target[key][0] === null) target[key][0] = {};
+        target = target[key][0];
+      } else {
+        if (typeof target[key] !== 'object' || target[key] === null || Array.isArray(target[key]))
+          target[key] = {};
+        target = target[key];
+      }
+    });
+  }
+  return `<details class="more db-example" open><summary>What a record looks like</summary><p class="db-hint">Made up from the fields — the shape is real, the values are placeholders.</p><pre><code>${escapeHtml(JSON.stringify(record, null, 2))}</code></pre></details>`;
+}
+
+/** Numbers measured while the app ran with runtime tracing, when there are any. */
+function runtimeHtml(entry) {
+  const timed = entry.operations.filter((op) => op.timing);
+  if (!timed.length) return '';
+  const count = timed.reduce((sum, op) => sum + op.timing.count, 0);
+  const slowest = timed.reduce((a, b) => (b.timing.maxMs > a.timing.maxMs ? b : a));
+  const avg = timed.reduce((sum, op) => sum + op.timing.avgMs * op.timing.count, 0) / count;
+  return `<p class="db-runtime">⏱ Measured while the app ran: <strong>${count}</strong> ${count === 1 ? 'query' : 'queries'}, ${formatMs(avg)} on average; slowest <code>${escapeHtml(slowest.label)}</code>${
+    slowest.method ? ` in <code>${escapeHtml(slowest.method)}</code>` : ''
+  } at ${formatMs(slowest.timing.maxMs)}.</p>`;
+}
+
+/** What deleting a record does to the records elsewhere that hold its id. */
+function deleteHtml(entry) {
+  if (!entry.onDelete?.length) return '';
+  const words = {
+    deleted: '✓ deleted too',
+    changed: '✎ updated in the same action',
+    kept: '⚠ kept, pointing at a record that no longer exists',
+  };
+  return (
+    heading(
+      'When a record is deleted',
+      'Records in other collections that hold its id, and what happens to them.',
+    ) +
+    `<ul class="db-lines">${entry.onDelete
+      .map(
+        (d) =>
+          `<li class="${d.outcome === 'kept' ? 'db-warn' : ''}">${collectionButton(d.from)} records (by <code>${escapeHtml(d.field)}</code>): ${escapeHtml(words[d.outcome])}</li>`,
+      )
+      .join('')}</ul>`
+  );
+}
+
+/** The health check for one collection. */
+function collectionChecksHtml(entry) {
+  const lines = [
+    ...(entry.unscoped ?? []).map(
+      (q) =>
+        `🔒 <code>${escapeHtml(q.label)}</code>${q.method ? ` in <code>${escapeHtml(q.method)}</code>` : ''} doesn’t filter by the owner <span class="chip small sev-${q.severity}">${q.severity}</span> <span class="muted">— ${escapeHtml(runByWords(q.runBy))}</span> ${q.source ? fileRef(q.source.file, q.source.line) : ''}<div class="db-hint">${richText(q.why)}</div>`,
+    ),
+    ...(entry.slowQueries ?? []).map(
+      (q) =>
+        `🐢 <code>${escapeHtml(q.label)}</code>${q.method ? ` in <code>${escapeHtml(q.method)}</code>` : ''} finds by ${q.fields.map((f) => `<code>${escapeHtml(f)}</code>`).join(', ')} with no index ${q.source ? fileRef(q.source.file, q.source.line) : ''}`,
+    ),
+    ...entry.fields
+      .filter((f) => f.unused)
+      .map(
+        (f) =>
+          `🧹 <code>${escapeHtml(f.name)}</code> ${f.unused === 'never-written' ? 'is never filled by this app' : 'is saved but never read back'}`,
+      ),
+    ...entry.notes.map((note) => `ℹ ${escapeHtml(note)}`),
+  ];
+  if (entry.indexesKnown === false)
+    lines.push(
+      'ℹ The code creates no index here — indexes may be set up in the database directly, so lookups were not checked.',
+    );
+  return lines.length
+    ? heading('Worth a look') +
+        `<ul class="db-lines db-checks">${lines.map((l) => `<li>${l}</li>`).join('')}</ul>`
+    : '';
+}
+
+function databaseOverviewHtml(db) {
+  const intro = panelIntro(
+    'Your app’s data, read from its code. A collection is like a table: it holds records, and every record has the same fields. ' +
+      'Search a field by the name you see on screen or by its key in the database, or open a collection to see how its records are added, changed, removed and read. ' +
+      'Flowslens never connects to your database: everything here comes from the code, never from real data.',
+  );
+  if (db.collections.length === 0) {
+    return (
+      intro + answer('muted', 'No collections found', 'No Mongoose or Prisma model, and no query.')
+    );
+  }
+  const { totals } = db;
+  const summary = answer(
+    'ok',
+    `${plural(totals.collections, 'collection')} · ${plural(totals.operations, 'query', 'queries')} · ${plural(totals.relations, 'link')}`,
+    'Type a label from the app (`MRP`, `Full name`) or a database key (`sellingPrice`) to see everything about that field: what it holds, where the user types it, which code saves and changes it, and where it is shown.',
+  );
+  const search = `<div class="db-search db-search-main"><input type="search" data-db-filter placeholder="Search a field — a label on screen (e.g. Price) or its key in the database" aria-label="Search a field" autocomplete="off" value="${escapeHtml(state.dbFilter ?? '')}" /></div>`;
+
+  const links = allLinks(db);
+  const connections = links.length
+    ? heading(
+        'How the collections connect',
+        'A record in one collection often holds the id of a record in another — that is how they are joined.',
+      ) +
+      diagramHtml(db, links) +
+      `<details class="more"><summary>The same links in words</summary><ul class="db-links">${links
+        .map(
+          (r) =>
+            `<li>${linkSentence(r)} <span class="chip small${r.via === 'naming' ? ' tone-warn' : ''}">${escapeHtml(linkBasis(r))}</span></li>`,
+        )
+        .join('')}</ul></details>`
+    : '';
+
+  const card = (entry) => {
+    const key = [entry.name, entry.model ?? '', ...entry.fields.map(fieldSearchText)]
+      .join(' ')
+      .toLowerCase();
+    const { actions, code } = lifecycleOf(entry);
+    // One tile per thing that happens to records: how many actions do it, or who else does.
+    const tiles = LIFECYCLE.map(([effect, icon, title]) => {
+      const count = new Set(actions[effect].map((use) => plainTitle(use.title))).size;
+      const runner = code[effect]?.size ? RUN_WORDS[runnerOf(entry, effect)] : undefined;
+      const auto = effect === 'delete' && ttlIndexes(entry).length > 0;
+      const value = count ? String(count) : runner ? runner[0] : auto ? 'auto' : '—';
+      const tip = count
+        ? `${title} by ${plural(count, 'action')}`
+        : runner
+          ? `${title} only by ${runner[1]}, never by a user action`
+          : auto
+            ? 'Removed automatically by the database when a record expires'
+            : `Never ${title.toLowerCase()} by this app`;
+      const inner = `<span class="db-tile-value">${escapeHtml(value)}</span>
+          <span class="db-tile-label"><span aria-hidden="true">${icon}</span> ${title}</span>`;
+      // A tile with something behind it opens the collection on that box, its list unfolded.
+      return value === '—'
+        ? `<div class="db-tile effect-${effect} is-empty" title="${escapeHtml(tip)}">${inner}</div>`
+        : `<button class="db-tile effect-${effect}" data-db-collection="${escapeHtml(entry.name)}" data-db-life="${effect}" title="${escapeHtml(tip)} — click to see them">${inner}</button>`;
+    }).join('');
+    const linked = [
+      ...new Set([...entry.references.map((r) => r.to), ...entry.referencedBy.map((r) => r.from)]),
+    ];
+    const elsewhere =
+      entry.databases?.length > 1
+        ? `<p class="db-card-note">Also kept in database ${entry.databases
+            .map((db) => `<code>${escapeHtml(db.name)}</code>`)
+            .join(' and ')} — same name, two places.</p>`
+        : '';
+    return `<div class="db-card" data-db-row="${escapeHtml(key)}">
+        <div class="db-card-head">
+          <button class="link db-card-name" data-db-collection="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</button>
+          <span class="muted">${plural(entry.fields.length, 'field')}</span>
+        </div>
+        <div class="db-tiles">${tiles}</div>
+        <p class="db-card-links">${
+          linked.length
+            ? `Linked with ${linked.map((n) => `<strong>${escapeHtml(n)}</strong>`).join(', ')}`
+            : '<span class="muted">Not linked to other collections</span>'
+        }</p>
+        ${elsewhere}
+        <span class="db-field-hit" hidden></span>
+      </div>`;
+  };
+
+  // One group per database, when the code names them; a name in two databases has its own group.
+  const groups = new Map();
+  for (const entry of db.collections) {
+    const label = entry.databases?.length
+      ? entry.databases.map((db) => `\`${db.name}\``).join(' and ')
+      : '';
+    groups.set(label, [...(groups.get(label) ?? []), entry]);
+  }
+  const cards = [...groups]
+    .map(
+      ([label, entries]) =>
+        (groups.size > 1 || label
+          ? `<h4 class="db-group-title">${
+              label
+                ? `${label.includes(' and ') ? 'In both databases' : 'Database'} ${richText(label)}`
+                : 'Database not named in the code'
+            }</h4>`
+          : '') + `<div class="db-cards">${entries.map(card).join('')}</div>`,
+    )
+    .join('');
+
+  return (
+    intro +
+    summary +
+    search +
+    `<div data-db-results></div>` +
+    healthHtml(db) +
+    connections +
+    heading(
+      'Collections',
+      'Each box is one collection. The numbers count the user actions that add, change, remove and read its records — open it to see which ones, and every field.',
+    ) +
+    cards
+  );
+}
+
+let foldIds = 0;
+
+/**
+ * The first `keep` items, then a `+N more` button that shows the rest in place
+ * (and `Show fewer` to fold them back). `items` are HTML strings; with
+ * `asRows` they are `<li>`/block elements and the button gets its own row.
+ */
+function fold(items, keep, { sep = '', asRows = false } = {}) {
+  if (items.length <= keep) return items.join(sep);
+  const id = `f${(foldIds += 1)}`;
+  const rest = items.length - keep;
+  const button = `<button class="link db-more" data-db-more="${id}" data-db-more-count="${rest}" aria-expanded="false">+${rest} more</button>`;
+  if (asRows) {
+    const extra = items
+      .slice(keep)
+      .map((item) => item.replace(/^\s*<(\w+)/, `<$1 data-db-extra="${id}" hidden`));
+    const tag = /^\s*<li/.test(items[0]) ? 'li' : 'div';
+    return (
+      [...items.slice(0, keep), ...extra].join(sep) +
+      `<${tag} class="db-more-row">${button}</${tag}>`
+    );
+  }
+  return `${items.slice(0, keep).join(sep)}<span data-db-extra="${id}" hidden>${sep}${items
+    .slice(keep)
+    .join(sep)}</span> ${button}`;
+}
+
+/** One handler for every `+N more` on the Database page, however often it re-renders. */
+function bindFolds(panel) {
+  if (panel.dataset.foldsBound) return;
+  panel.dataset.foldsBound = '1';
+  panel.addEventListener('click', (event) => {
+    const button = event.target.closest?.('[data-db-more]');
+    if (!button) return;
+    event.preventDefault();
+    const open = button.getAttribute('aria-expanded') !== 'true';
+    for (const extra of panel.querySelectorAll(`[data-db-extra="${button.dataset.dbMore}"]`))
+      extra.hidden = !open;
+    button.setAttribute('aria-expanded', String(open));
+    button.textContent = open ? 'Show fewer' : `+${button.dataset.dbMoreCount} more`;
+  });
+}
+
+/** Up to three actions as links, then the rest behind `+N more`. */
+function actionLinks(actions) {
+  if (!actions.length)
+    return '<span class="muted">no user action — a script, a job, or an endpoint no screen calls</span>';
+  return fold(
+    actions.map(
+      (action) =>
+        `<button class="link" data-goto-flow="${escapeHtml(action.flowId)}">${escapeHtml(action.title)}</button>`,
+    ),
+    3,
+    { sep: ', ' },
+  );
+}
+
+function fieldSiteHtml(site, lead) {
+  return `<li>${lead}${site.in ? ` in <code>${escapeHtml(site.in)}</code>` : ''} ${
+    site.source ? fileRef(site.source.file, site.source.line) : ''
+  }<div class="db-site-actions">From: ${actionLinks(site.actions)}</div></li>`;
+}
+
+/** What a search can find a field by: its name, the form key and label it is typed under, the labels it is shown with. */
+function fieldSearchText(field) {
+  return [
+    field.name,
+    ...field.enteredIn.flatMap((entry) => [entry.key, entry.label ?? '']),
+    ...field.shownIn.map((shown) => shown.label ?? ''),
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
+/** The field in one or two sentences: typed in where, saved by what, shown where. */
+const MATCH_WORDS = {
+  search: 'text search (matches part of it)',
+  equals: 'exact match',
+  'one-of': 'matches one of a list',
+  range: 'a range (more / less than)',
+  exists: 'whether it is set at all',
+  not: 'excludes a value',
+};
+
+const endpointList = (endpoints) => endpoints.map((e) => `\`${e}\``).join(', ');
+
+/** `optional · string · trimmed · defaults to ""` for one schema entry. */
+function validationText(rule) {
+  return [rule.required ? 'required' : 'optional', rule.type, ...rule.rules, ...rule.transforms]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+/** What one endpoint does with a field, in words. */
+function apiUseText(use) {
+  const where = `${use.in ? ` in <code>${escapeHtml(use.in)}</code>` : ''} ${
+    use.source ? fileRef(use.source.file, use.source.line) : ''
+  }`;
+  if (use.does === 'saves')
+    return `<strong>saves it</strong> as <code>${escapeHtml(use.value ?? '')}</code>, ${richText(
+      writeWhen(use.how),
+    )}${where}${
+      use.queued || use.via
+        ? `<div class="muted">${[
+            use.queued &&
+              `later, in a background job: <code>${escapeHtml(use.queued.in)}</code> ${
+                use.queued.source ? fileRef(use.queued.source.file, use.queued.source.line) : ''
+              }`,
+            use.via &&
+              `through <code>${escapeHtml(use.via)}</code>, which finds existing records first`,
+          ]
+            .filter(Boolean)
+            .join(' → ')}</div>`
+        : ''
+    }`;
+  if (use.does === 'finds')
+    return `<strong>${use.match === 'search' ? 'searches records by it' : 'finds records by it'}</strong>${
+      use.match && use.match !== 'search' ? ` — ${escapeHtml(MATCH_WORDS[use.match])}` : ''
+    }${where}`;
+  if (use.does === 'sorts') return `<strong>sorts results by it</strong>${where}`;
+  if (use.does === 'uses') return `<strong>uses it</strong> after loading the record${where}`;
+  if (use.does === 'returns')
+    return `<strong>sends it back</strong> with the records it returns${
+      use.shown === false
+        ? ' <span class="muted">— but no screen that calls it shows it</span>'
+        : ''
+    }${where}`;
+  return `loads the whole record${where}`;
+}
+
+function apiRows(apis) {
+  return apis.map((api) => ({
+    cells: [
+      {
+        html: `<code>${escapeHtml(api.endpoint)}</code>${
+          api.source ? `<div>${fileRef(api.source.file, api.source.line)}</div>` : ''
+        }`,
+      },
+      { html: api.uses.map((use) => `<div>${apiUseText(use)}</div>`).join('') },
+      {
+        html: api.calledFrom.length
+          ? api.calledFrom.map((at) => `<div>${fileRef(at.file, at.line)}</div>`).join('')
+          : '<span class="muted">no screen calls it</span>',
+      },
+    ],
+    ...(api.uses.some((use) => use.does === 'saves') ? { tone: 'ok' } : {}),
+  }));
+}
+
+/** APIs that do something with the field; the ones that only load the record, folded away. */
+function fieldApisHtml(field) {
+  const columns = ['API', 'What it does with this field', 'Called from'];
+  const real = field.apis.filter((api) => api.uses.some((use) => use.does !== 'loads'));
+  const onlyLoads = field.apis.filter((api) => !real.includes(api));
+  return (
+    (real.length
+      ? `<h4>APIs that use it — ${real.length}</h4>` +
+        renderDocTable({ columns, rows: apiRows(real) })
+      : '<p class="muted">No API does anything with it beyond loading the record.</p>') +
+    (onlyLoads.length
+      ? `<details class="more"><summary>${plural(onlyLoads.length, 'more API loads', 'more APIs load')} the whole record but never use this field</summary>${renderDocTable(
+          { columns, rows: apiRows(onlyLoads) },
+        )}</details>`
+      : '')
+  );
+}
+
+const sitesList = (title, items) =>
+  items.length
+    ? `<h4>${title}</h4><ul class="db-sites">${fold(items, 6, { asRows: true })}</ul>`
+    : '';
+
+/** `Add medicine (line 147)` → `Add medicine`: the action as a reader names it. */
+const plainTitle = (title) => title.replace(/\s*\([^)]*\)\s*$/, '');
+
+/** Finders whose result a branch checks: `const existing = await findDuplicate(…)`. */
+const FINDER = /^(find|get|load|fetch|lookup|read)|duplicate|exist/i;
+
+/** A scenario in plain words: the action that starts it, and the case it is. */
+function scenarioLabel(scenario) {
+  const who = scenario.script
+    ? `${scenario.kind === 'job' ? 'Background job' : 'Script'} <code>${escapeHtml(scenario.script.in)}</code>${
+        scenario.script.runBy ? `, run by <code>${escapeHtml(scenario.script.runBy.in)}</code>` : ''
+      }`
+    : scenario.actions[0]
+      ? escapeHtml(plainTitle(scenario.actions[0].title))
+      : `<code>${escapeHtml(scenario.endpoint)}</code> <span class="muted">(no screen calls it)</span>`;
+  const cases = [];
+  const finders = scenario.when.filter((c) => c.from && FINDER.test(c.from));
+  if (finders.length)
+    cases.push(
+      finders.every((c) => c.holds)
+        ? 'matches an existing record'
+        : finders.every((c) => !c.holds)
+          ? scenario.nothing
+            ? 'the record is not found'
+            : 'new record'
+          : 'partly matches',
+    );
+  for (const c of scenario.when.filter((c) => !finders.includes(c)))
+    cases.push(`when ${richText(c.words ?? c.code)}`);
+  if (scenario.queued) cases.push('in the background');
+  return `<strong>${who}</strong>${cases.length ? ` · ${cases.join(' · ')}` : ''}${
+    scenario.alsoWrites.length || (scenario.endpoint && scenario.actions[0])
+      ? `<div class="muted">${[
+          scenario.actions[0] &&
+            scenario.endpoint &&
+            `<code>${escapeHtml(scenario.endpoint)}</code>`,
+          scenario.alsoWrites.length &&
+            `also writes ${scenario.alsoWrites.map((c) => `<code>${escapeHtml(c)}</code>`).join(', ')}`,
+        ]
+          .filter(Boolean)
+          .join(' · ')}</div>`
+      : ''
+  }`;
+}
+
+/** What one scenario does to the field, in the card's small fixed vocabulary. */
+/** Every way a case writes the field, each on its own line with the condition it needs. */
+function outcomeHtml(outcome, scenario, field) {
+  const ways = outcome.alternatives ?? [outcome];
+  return ways
+    .map(
+      (way) =>
+        `<div>${oneOutcomeHtml({ ...outcome, ...way }, scenario, field)}${
+          way.onlyWhen
+            ? ` <span class="muted" title="${escapeHtml(way.onlyWhen.replace(/`/g, ''))}">only when ${richText(way.onlyWhenWords ?? way.onlyWhen)}</span>`
+            : ''
+        }</div>`,
+    )
+    .join('');
+}
+
+function oneOutcomeHtml(outcome, scenario, field) {
+  const entry = field.enteredIn.find((e) => e.endpoint === scenario.endpoint);
+  const fromInput = entry
+    ? entry.kind === 'form'
+      ? ` from <strong>${escapeHtml(entry.label ?? entry.key)}</strong>`
+      : ' from the imported row'
+    : '';
+  switch (outcome.does) {
+    case 'sets':
+      return `✎ set${fromInput || ` to <code>${escapeHtml(outcome.value ?? '')}</code>${outcome.from && outcome.from !== 'input' ? ` <span class="muted">(${escapeHtml(VALUE_ORIGIN[outcome.from])})</span>` : ''}`}`;
+    case 'recalculated':
+      return `↻ recalculated in <code>${escapeHtml(outcome.derivedIn ?? '')}</code>`;
+    case 'adds':
+      return `+ added to (<code>${escapeHtml(outcome.value ?? '')}</code>)`;
+    case 'removes':
+      return `− taken off (<code>${escapeHtml(outcome.value ?? '')}</code>)`;
+    case 'ignored':
+      return '<span class="db-warn">⚠ keeps its old value — the value sent is ignored</span>';
+    case 'keeps':
+      return '<span class="muted">— not touched</span>';
+    case 'not-set':
+      return '<span class="muted">— not set</span>';
+    case 'removed':
+      return '🗑 removed with the record';
+    case 'unread':
+      return '<span class="muted">? writes whole records the code passes in — which keys they hold is not visible</span>';
+    case 'list-changed':
+      return `↻ changes with the list${
+        outcome.by?.length
+          ? ` — in ${outcome.by.map((name) => `<code>${escapeHtml(name)}</code>`).join(', ')}`
+          : ''
+      }`;
+    case 'stale':
+      return `<span class="db-warn">⚠ out of sync — <code>${escapeHtml(outcome.by?.[0] ?? '')}</code> recalculates it here, but this save leaves it out</span>`;
+    case 'matched':
+      return '<span class="muted">— the record is found by it</span>';
+    case 'nothing':
+      return `<span class="muted">— nothing is written${
+        scenario.nothing?.source
+          ? ` (stops in <code>${escapeHtml(scenario.nothing.in)}</code>)`
+          : ''
+      }</span>`;
+    default:
+      return escapeHtml(outcome.does);
+  }
+}
+
+/** One row per case; cases with the same outcome share a row. */
+function scenarioTableHtml(collection, field) {
+  const rows = new Map();
+  collection.scenarios.forEach((scenario, i) => {
+    const outcome = field.outcomes[i];
+    if (!outcome) return;
+    const html = outcomeHtml(outcome, scenario, field);
+    const row = rows.get(html) ?? rows.set(html, { labels: [], sources: [] }).get(html);
+    row.labels.push(scenarioLabel(scenario));
+    if (outcome.source) row.sources.push(outcome.source);
+  });
+  const checked = [...new Set(collection.scenarios.map((s) => s.checkedBy).filter(Boolean))];
+  if (!rows.size && !checked.length) return '';
+  const body = [...rows].map(
+    ([html, row]) =>
+      `<tr><td>${row.labels.map((label) => `<div class="db-case">${label}</div>`).join('')}</td><td>${html}${
+        row.sources[0] ? ` ${fileRef(row.sources[0].file, row.sources[0].line)}` : ''
+      }</td></tr>`,
+  );
+  if (checked.length)
+    body.push(
+      `<tr><td><div class="db-case"><strong>Invalid input</strong><div class="muted">checked by ${checked.map((c) => `<code>${escapeHtml(c)}</code>`).join(', ')}</div></div></td><td>✕ rejected — nothing is saved</td></tr>`,
+    );
+  return `<table class="db-cases"><thead><tr><th>Case</th><th>What happens to it</th></tr></thead><tbody>${body.join('')}</tbody></table>`;
+}
+
+/** `text · optional · trimmed · default ""`, or that the code works it out. */
+function whatItIs(field) {
+  const rule = field.validation[0];
+  const derived = field.writes.filter((w) => w.derivedIn);
+  const worked =
+    derived.length &&
+    derived.length === field.writes.filter((w) => w.from !== 'input').length &&
+    !field.writes.some((w) => w.from === 'input');
+  return [
+    plainType(field.type ?? rule?.type),
+    field.required || rule?.required ? 'required' : rule ? 'optional' : '',
+    ...(rule ? [...rule.rules, ...rule.transforms] : []),
+    field.unique ? 'unique' : field.indexed ? 'indexed' : '',
+    field.expiresAfterSeconds != null ? ttlText(field.expiresAfterSeconds) : '',
+    field.ref ? `links to ${field.ref}` : '',
+    worked ? 'worked out by the code, never typed directly' : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+/** One line per way in: where the user acts, the request, and the code that saves it. */
+function getsInHtml(field) {
+  const lines = field.enteredIn.map((entry) => {
+    const start =
+      entry.kind === 'form'
+        ? `✎ <strong>${escapeHtml(entry.label ?? entry.key)}</strong> in ${escapeHtml(plainTitle(entry.title))}`
+        : `⇪ <code>${escapeHtml(entry.code ?? entry.key)}</code> in ${escapeHtml(plainTitle(entry.title))}`;
+    const steps = [
+      entry.endpoint && `<code>${escapeHtml(entry.endpoint)}</code>`,
+      entry.savedBy.queued && `queued → <code>${escapeHtml(entry.savedBy.queued.in)}</code>`,
+      entry.savedBy.via && `<code>${escapeHtml(entry.savedBy.via)}</code>`,
+      entry.savedBy.in && `<code>${escapeHtml(entry.savedBy.in)}</code>`,
+    ].filter(Boolean);
+    return `<li>${start} → ${steps.join(' → ')}${
+      entry.through
+        ? ` <span class="muted">(as <code>${escapeHtml(entry.through)}</code>)</span>`
+        : ''
+    } ${entry.source ? fileRef(entry.source.file, entry.source.line) : ''}</li>`;
+  });
+  // No form or import behind it: what the code itself puts there.
+  if (!lines.length)
+    for (const write of field.writes.filter((w) => !w.derivedIn))
+      lines.push(
+        `<li>⚙ <code>${escapeHtml(write.value)}</code> <span class="muted">(${escapeHtml(VALUE_ORIGIN[write.from])})</span> in <code>${escapeHtml(write.in ?? '')}</code> ${write.source ? fileRef(write.source.file, write.source.line) : ''}</li>`,
+      );
+  return lines.length ? `<ul class="db-lines">${fold(lines, 6, { asRows: true })}</ul>` : '';
+}
+
+/** Warnings only for what surprises: set once, worked out, returned but never shown, never checked. */
+function fieldWarnings(collection, field) {
+  const warnings = [];
+  for (const f of field.onlyOnCreate)
+    warnings.push(
+      `Set only when the record is new. <code>${escapeHtml(f.in)}</code>${
+        f.endpoints.length
+          ? ` (${f.endpoints.map((e) => `<code>${escapeHtml(e)}</code>`).join(', ')})`
+          : ''
+      } updates an existing one without it${
+        f.matchedFirstBy.length
+          ? `, and so does ${f.matchedFirstBy.map((g) => `<code>${escapeHtml(g.in)}</code>`).join(', ')}`
+          : ''
+      }; ${
+        field.changedBy.length
+          ? `only ${field.changedBy.map((g) => `<code>${escapeHtml(g.in)}</code>`).join(', ')} changes it later`
+          : 'nothing changes it later'
+      }.`,
+    );
+  const unseen = field.apis
+    .filter((api) => api.uses.some((use) => use.does === 'returns' && use.shown === false))
+    .map((api) => api.endpoint);
+  if (unseen.length && !field.shownIn.length)
+    warnings.push(
+      `Sent back by ${unseen.map((e) => `<code>${escapeHtml(e)}</code>`).join(', ')}, but no screen shows it.`,
+    );
+  const stale = collection.scenarios.filter((_, i) => field.outcomes[i]?.does === 'stale');
+  if (stale.length)
+    warnings.push(
+      `Can go out of sync: <code>${escapeHtml(field.outcomes.find((o) => o.does === 'stale').by?.[0] ?? '')}</code> recalculates it, but ${stale
+        .map((s) => `<code>${escapeHtml(s.endpoint ?? s.script?.in ?? '')}</code>`)
+        .join(
+          ', ',
+        )} save${stale.length === 1 ? 's' : ''} the record without it — the stored value keeps the old one.`,
+    );
+  if (field.enteredIn.length && !field.validation.length && field.origin !== 'declared')
+    warnings.push('Nothing checks this value before it is saved.');
+  return warnings.map((w) => `<p class="db-warn">⚠ ${w}</p>`).join('');
+}
+
+/** Other fields of the collection worked out from this one. */
+function feedsInto(collection, field) {
+  return collection.fields.filter((other) =>
+    other.writes.some((w) => w.derivedFrom?.includes(field.name)),
+  );
+}
+
+/** Search, sort, lookups, reads by name, and fields worked out from it. */
+function usedByHtml(collection, field) {
+  const uses = [];
+  const seen = new Set();
+  for (const lookup of field.lookups) {
+    const words =
+      lookup.match === 'search'
+        ? 'the search box (part of the text matches)'
+        : `finding records — ${MATCH_WORDS[lookup.match ?? 'equals']}`;
+    if (seen.has(words + lookup.in)) continue;
+    seen.add(words + lookup.in);
+    const at = lookup.builtAt ?? lookup.source;
+    uses.push(
+      `${escapeHtml(words)} in <code>${escapeHtml(lookup.in ?? '')}</code> ${at ? fileRef(at.file, at.line) : ''}`,
+    );
+  }
+  for (const sort of field.sorts)
+    uses.push(
+      `sorting in <code>${escapeHtml(sort.in ?? '')}</code> ${sort.source ? fileRef(sort.source.file, sort.source.line) : ''}`,
+    );
+  for (const read of field.projected)
+    uses.push(
+      `read by name in <code>${escapeHtml(read.in ?? '')}</code> ${read.source ? fileRef(read.source.file, read.source.line) : ''}`,
+    );
+  for (const other of feedsInto(collection, field))
+    uses.push(`works out <code>${escapeHtml(other.name)}</code>`);
+  return uses.length ? fold(uses, 4, { sep: ' · ' }) : '';
+}
+
+function shownHtml(field) {
+  if (!field.shownIn.length) return '';
+  return fold(
+    field.shownIn.map(
+      (place) =>
+        `${place.label ? `<strong>${escapeHtml(place.label)}</strong> ` : ''}${fileRef(place.source.file, place.source.line)}`,
+    ),
+    4,
+    { sep: ' · ' },
+  );
+}
+
+/** The names a field goes by on screen: its form labels, then the labels it is shown under. */
+function screenNames(field) {
+  return [
+    ...new Set(
+      [
+        ...field.enteredIn.filter((e) => e.kind === 'form').map((e) => e.label ?? e.key),
+        ...field.shownIn.map((s) => s.label),
+      ].filter((name) => name && name !== field.name),
+    ),
+  ];
+}
+
+/** Everything about a field in plain sentences, before the details: what, called, set, changed, found, shown. */
+function fieldPlainHtml(collection, field) {
+  const strong = (text) => `<strong>${escapeHtml(text)}</strong>`;
+  const titles = (actions) => [...new Set(actions.map((a) => plainTitle(a.title)))];
+  const list = (items, keep = 3) =>
+    items.length <= keep
+      ? items.map(strong).join(', ')
+      : `${items.slice(0, keep).map(strong).join(', ')} and ${items.length - keep} more`;
+  const lines = [];
+
+  const type = plainType(field.type ?? field.validation[0]?.type);
+  lines.push([
+    '📦',
+    `<code>${escapeHtml(field.name)}</code> is ${type ? `<strong>${escapeHtml(type)}</strong>` : 'a value'} kept in every ${strong(collection.name)} record${
+      field.required
+        ? ' — it must always be set'
+        : field.origin === 'declared'
+          ? ' — it can be left empty'
+          : ''
+    }.${field.unique ? ' No two records can have the same value.' : ''}${
+      field.expiresAfterSeconds != null
+        ? ` The record is ${ttlText(field.expiresAfterSeconds)}.`
+        : ''
+    }${
+      field.ref
+        ? ` It holds the id of a <button class="link" data-db-collection="${escapeHtml(field.ref)}"><strong>${escapeHtml(field.ref)}</strong></button> record — that is how the two are connected.`
+        : ''
+    }`,
+  ]);
+
+  const names = screenNames(field);
+  if (names.length) lines.push(['🏷', `On screen it is called ${list(names)}.`]);
+
+  const forms = field.enteredIn.filter((e) => e.kind === 'form');
+  const built = field.enteredIn.filter((e) => e.kind === 'code');
+  const created = field.writes.filter((w) => w.how === 'insert' || w.how === '$setOnInsert');
+  if (forms.length)
+    lines.push([
+      '✍',
+      `The user types it into ${list([...new Set(forms.map((e) => e.label ?? e.key))])} when they ${list(titles(forms))}.`,
+    ]);
+  if (built.length)
+    lines.push([
+      '⇪',
+      `It is filled in by the app’s own code when the user does ${list(titles(built))}.`,
+    ]);
+  if (!forms.length && !built.length && field.writes.length) {
+    const write = field.writes[0];
+    lines.push([
+      '⚙',
+      `The code sets it to <code>${escapeHtml(write.value)}</code> (${escapeHtml(VALUE_ORIGIN[write.from])})${
+        titles(write.actions).length ? ` when the user does ${list(titles(write.actions))}` : ''
+      }.`,
+    ]);
+  }
+  if (!field.writes.length && !field.enteredIn.length)
+    lines.push([
+      '⚙',
+      'Nothing in this app writes it — it is filled in somewhere else (another app, a script or by hand).',
+    ]);
+
+  const changes = titles(
+    field.writes
+      .filter((w) => !created.includes(w) && w.how !== 'insert')
+      .flatMap((w) => w.actions),
+  );
+  if (field.onlyOnCreate.length)
+    lines.push([
+      '🔒',
+      'It is set once, when the record is created; saving the record again leaves it as it was.',
+    ]);
+  else if (changes.length) lines.push(['✎', `It is changed when the user does ${list(changes)}.`]);
+
+  const { actions } = lifecycleOf(collection);
+  if (actions.delete.length)
+    lines.push([
+      '🗑',
+      `It is removed with the whole record when the user does ${list(titles(actions.delete))}.`,
+    ]);
+
+  const search = field.lookups.some((l) => l.match === 'search');
+  const finds = field.lookups.some((l) => l.match !== 'search');
+  if (search || finds || field.sorts.length)
+    lines.push([
+      '🔎',
+      [
+        search && 'a search box matches part of it',
+        finds && 'the code finds records by it',
+        field.sorts.length && 'lists can be sorted by it',
+      ]
+        .filter(Boolean)
+        .join('; ')
+        .replace(/^./, (c) => c.toUpperCase()) + '.',
+    ]);
+
+  if (field.shownIn.length)
+    lines.push(['👁', `It is shown in ${plural(field.shownIn.length, 'place')} on screen.`]);
+  if (field.unused)
+    lines.push([
+      '🧹',
+      field.unused === 'never-written'
+        ? 'Nothing in this app fills it — it may be left over, or filled by another app.'
+        : 'It is saved, but nothing in this app reads it back — it may be left over.',
+    ]);
+
+  return `<ul class="db-plain">${lines
+    .map(
+      ([icon, text]) =>
+        `<li><span class="db-plain-icon" aria-hidden="true">${icon}</span><span>${text}</span></li>`,
+    )
+    .join('')}</ul>`;
+}
+
+/** The card: what it is, how it gets in, what is surprising, where it shows, what uses it, and every case. */
+function fieldCardHtml(collection, field) {
+  const derived = field.writes.find((w) => w.derivedIn && w.derivedFrom?.length);
+  const getsIn = getsInHtml(field);
+  const shown = shownHtml(field);
+  const used = usedByHtml(collection, field);
+  const cases = scenarioTableHtml(collection, field);
+  const row = (label, html) =>
+    html
+      ? `<div class="db-row"><span class="db-row-label">${label}</span><div>${html}</div></div>`
+      : '';
+  return [
+    derived
+      ? row(
+          'Worked out',
+          `in <code>${escapeHtml(derived.derivedIn)}</code> from ${derived.derivedFrom.map((n) => `<code>${escapeHtml(n)}</code>`).join(', ')} ${derived.source ? fileRef(derived.source.file, derived.source.line) : ''}`,
+        )
+      : '',
+    row(
+      derived && field.enteredIn.some((e) => e.through)
+        ? 'Gets in (via what it is worked out from)'
+        : 'Gets in',
+      getsIn,
+    ),
+    fieldWarnings(collection, field),
+    row('Shown', shown),
+    row('Used by', used),
+    cases ? `<div class="db-row db-row-cases">${cases}</div>` : '',
+  ].join('');
+}
+
+function fieldHtml(field, open, collection) {
+  const rules = [
+    field.type && `<code>${escapeHtml(field.type)}</code>`,
+    field.required && 'required',
+    field.unique ? 'unique' : field.indexed && 'indexed',
+    field.expiresAfterSeconds != null && ttlText(field.expiresAfterSeconds),
+    field.ref &&
+      `links to <button class="link" data-db-collection="${escapeHtml(field.ref)}">${escapeHtml(field.ref)}</button>`,
+    field.origin === 'declared'
+      ? collection?.typed
+        ? `in the TypeScript type <code>${escapeHtml(collection.model)}</code>`
+        : 'in the database schema'
+      : field.validation.length
+        ? `checked by ${field.validation.map((rule) => `<code>${escapeHtml(rule.schema)}</code>`).join(', ')}`
+        : 'no schema checks it',
+  ].filter(Boolean);
+  const counts = [
+    field.writes.length && `written in ${plural(field.writes.length, 'place')}`,
+    field.lookups.length && `used to find records (${plural(field.lookups.length, 'condition')})`,
+    field.shownIn.length && 'shown on screen',
+  ].filter(Boolean);
+
+  const warning = field.onlyOnCreate.length
+    ? answer(
+        'warn',
+        'Only set when a record is created',
+        field.onlyOnCreate
+          .map(
+            (f) =>
+              `When \`${f.in}\` finds an existing record${f.endpoints.length ? ` (${endpointList(f.endpoints)})` : ''}, it updates it without this field — sending a new value there will not change it.` +
+              f.matchedFirstBy
+                .map(
+                  (g) =>
+                    ` \`${g.in}\`${g.endpoints.length ? ` (${endpointList(g.endpoints)})` : ''} finds existing records itself and updates them without this field; it calls \`${f.in}\` only when nothing matches.`,
+                )
+                .join(''),
+          )
+          .join(' ') +
+          (field.changedBy.length
+            ? ` Only ${field.changedBy
+                .map(
+                  (f) =>
+                    `\`${f.in}\`${f.endpoints.length ? ` (${endpointList(f.endpoints)})` : ''}`,
+                )
+                .join(', ')} change it later.`
+            : ' Nothing in this project changes it later.'),
+      )
+    : '';
+
+  const validation = sitesList(
+    'Rules it must follow',
+    field.validation.map(
+      (rule) =>
+        `<li><code>${escapeHtml(rule.schema)}</code> <span class="muted">${escapeHtml(rule.library)}</span>: ${escapeHtml(validationText(rule))} ${fileRef(rule.source.file, rule.source.line)}</li>`,
+    ),
+  );
+  const entered = sitesList(
+    'Typed in by the user',
+    field.enteredIn
+      .filter((entry) => entry.kind === 'form')
+      .map(
+        (entry) =>
+          `<li><strong>${escapeHtml(entry.label ?? entry.key)}</strong>${
+            entry.key !== field.name
+              ? ` <span class="muted">form key <code>${escapeHtml(entry.key)}</code></span>`
+              : ''
+          } ${entry.source ? fileRef(entry.source.file, entry.source.line) : ''}<div class="db-site-actions">In: ${actionLinks([entry])}${
+            entry.endpoint ? ` → <code>${escapeHtml(entry.endpoint)}</code>` : ''
+          }${
+            entry.through
+              ? ` → saved as <code>${escapeHtml(entry.through)}</code>, worked out from it${
+                  entry.savedBy.derivedIn
+                    ? ` in <code>${escapeHtml(entry.savedBy.derivedIn)}</code>`
+                    : ''
+                }`
+              : ''
+          }</div></li>`,
+      ),
+  );
+  const built = sitesList(
+    'Built in code and sent to be saved',
+    field.enteredIn
+      .filter((entry) => entry.kind === 'code')
+      .map(
+        (entry) =>
+          `<li><code>${escapeHtml(entry.code ?? entry.key)}</code> ${entry.source ? fileRef(entry.source.file, entry.source.line) : ''}<div class="db-site-actions">In: ${actionLinks([entry])}${
+            entry.endpoint ? ` → <code>${escapeHtml(entry.endpoint)}</code>` : ''
+          }${entry.savedBy.queued ? ` → queued → <code>${escapeHtml(entry.savedBy.queued.in)}</code>` : ''}${
+            entry.savedBy.via ? ` → <code>${escapeHtml(entry.savedBy.via)}</code>` : ''
+          } → <code>${escapeHtml(entry.savedBy.in ?? '')}</code></div></li>`,
+      ),
+  );
+  const shown = field.shownIn.length
+    ? `<h4>Shown in the frontend</h4><p class="muted db-hint">Found by name in the screens that load this collection.</p><ul class="db-sites">${fold(
+        field.shownIn.map(
+          (place) =>
+            `<li>${place.label ? `<strong>${escapeHtml(place.label)}</strong> — ` : ''}<code>${escapeHtml(place.code)}</code> ${fileRef(place.source.file, place.source.line)}</li>`,
+        ),
+        6,
+        { asRows: true },
+      )}</ul>`
+    : '';
+  const mentions = field.mentions.length
+    ? `<h4>Other code that sets or names it</h4><p class="muted db-hint">Imports, column mappings, defaults and helpers — found by the name <code>${escapeHtml(field.name)}</code>.</p><ul class="db-sites">${fold(
+        field.mentions.map(
+          (m) =>
+            `<li><span class="chip small">${m.kind === 'sets' ? 'sets it' : 'names it'}</span> <code>${escapeHtml(m.code)}</code>${
+              m.in ? ` in <code>${escapeHtml(m.in)}</code>` : ''
+            } ${fileRef(m.source.file, m.source.line)}</li>`,
+        ),
+        6,
+        { asRows: true },
+      )}</ul>`
+    : '';
+
+  const writes = field.writes.length
+    ? sitesList(
+        'Where its value comes from',
+        field.writes.map((write) =>
+          fieldSiteHtml(
+            write,
+            `<span class="chip small origin-${escapeHtml(write.from)}">${escapeHtml(VALUE_ORIGIN[write.from])}</span> <code>${escapeHtml(write.value)}</code>, ${richText(writeWhen(write.how))}${
+              write.derivedIn
+                ? ` <span class="muted">— worked out in <code>${escapeHtml(write.derivedIn)}</code>${
+                    write.derivedFrom?.length
+                      ? ` from ${write.derivedFrom.map((name) => `<code>${escapeHtml(name)}</code>`).join(', ')}`
+                      : ''
+                  }</span>`
+                : ''
+            }`,
+          ),
+        ),
+      )
+    : `<p class="muted">No code in this project writes it. It is set somewhere else — another service, a migration, a seed, or by hand.</p>`;
+  const lookups = sitesList(
+    'Records are found by it',
+    field.lookups.map((lookup) =>
+      fieldSiteHtml(
+        { ...lookup, source: lookup.builtAt ?? lookup.source },
+        `${escapeHtml(MATCH_WORDS[lookup.match ?? 'equals'])} against <code>${escapeHtml(lookup.value)}</code>${
+          lookup.alsoIn.length
+            ? ` <span class="muted">— used by ${[
+                lookup.operation,
+                ...lookup.alsoIn.map((other) => other.operation),
+              ]
+                .map((op) => `<code>${escapeHtml(op)}</code>`)
+                .join(', ')}</span>`
+            : ''
+        }`,
+      ),
+    ),
+  );
+  const sorts = sitesList(
+    'Results can be sorted by it',
+    field.sorts.map((sort) =>
+      fieldSiteHtml(
+        sort,
+        String(sort.value).trim() === '-1' ? 'newest / largest first' : 'oldest / smallest first',
+      ),
+    ),
+  );
+  const projected = sitesList(
+    'Asked for by name',
+    field.projected.map((read) =>
+      fieldSiteHtml(read, 'a read that loads only the fields it names'),
+    ),
+  );
+  const sub = field.name.includes('[]');
+  return `<details class="db-field${sub ? ' db-subfield' : ''}" data-db-field="${escapeHtml(fieldSearchText(field))}"${open ? ' open' : ''}>
+    <summary><code class="db-field-name">${escapeHtml(field.name)}</code>${
+      screenNames(field).length
+        ? ` <span class="db-field-aka">on screen: ${screenNames(field)
+            .slice(0, 2)
+            .map((name) => `<strong>${escapeHtml(name)}</strong>`)
+            .join(', ')}</span>`
+        : ''
+    }
+      ${
+        field.unused
+          ? `<span class="chip small tone-warn">${field.unused === 'never-written' ? 'never filled' : 'never read'}</span>`
+          : ''
+      }
+      <span class="db-field-meta">${escapeHtml(whatItIs(field) || (field.origin === 'declared' ? 'in the database schema' : ''))}</span>
+    </summary>
+    <div class="db-field-body">
+      ${fieldPlainHtml(collection, field)}
+      ${fieldCardHtml(collection, field)}
+      <details class="more db-code"><summary>Code details${field.apis.length ? ` — ${plural(field.apis.length, 'API')}` : ''}</summary>
+      ${fieldChainHtml(collection, field)}
+      ${rules.length ? `<p class="muted">${rules.join(' · ')} · ${escapeHtml(counts.join(' · ') || 'not written or queried here')}</p>` : ''}
+      ${warning}
+      ${validation ? `<div class="db-group"><h5>Rules</h5>${validation}</div>` : ''}
+      <div class="db-group"><h5>On the frontend</h5>${entered}${built}${shown}${
+        entered || built || shown
+          ? ''
+          : '<p class="muted">No form fills it, and no screen that loads it reads it.</p>'
+      }</div>
+      ${mentions ? `<div class="db-group"><h5>Other code</h5>${mentions}</div>` : ''}
+      ${field.apis.length ? `<div class="db-group"><h5>Through the API</h5>${fieldApisHtml(field)}</div>` : ''}
+      <div class="db-group"><h5>In the backend code</h5>${writes}${lookups}${sorts}${projected}</div>
+      </details>
+    </div>
+  </details>`;
+}
+
+function collectionHtml(entry) {
+  const wanted = (state.dbFilter ?? '').trim().toLowerCase();
+  const where = entry.databases?.length
+    ? `, in database ${entry.databases.map(databaseLabel).join(' and ')}`
+    : '';
+  const parts = [
+    `<button class="link" data-db-collection="">← All collections</button>`,
+    `<h2 class="db-title"><code>${escapeHtml(entry.name)}</code>${modelHtml(entry)}${entry.source ? ` ${fileRef(entry.source.file, entry.source.line)}` : ''}</h2>`,
+    `<p class="db-lead">${richText(
+      `**${entry.name}** is a collection of records${where}. Every record has ${plural(entry.fields.length, 'field')}${
+        entry.usedBy.length ? `, and ${plural(entry.usedBy.length, 'user action')} use it` : ''
+      }.`,
+    )}</p>`,
+  ];
+  parts.push(exampleRecordHtml(entry), collectionChecksHtml(entry));
+
+  parts.push(
+    heading(
+      'What happens to its records',
+      'Who adds, changes, removes and reads them. Click an action to follow it from the click to the database.',
+    ),
+    lifecycleHtml(entry),
+    deleteHtml(entry),
+  );
+
+  const links = [
+    ...entry.references.map((r) => ({ r, other: r.to, text: `\`${r.field}\` → ` })),
+    ...entry.referencedBy.map((r) => ({
+      r,
+      other: r.from,
+      text: `\`${r.from}.${r.field}\` → here, from `,
+    })),
+  ];
+  parts.push(
+    heading(
+      'Connected collections',
+      links.length
+        ? 'A record here holds the id of a record there (or the other way round). A link the code states is a fact; one only guessed from a field name like `customerId` is marked as a guess.'
+        : 'No field here holds the id of a record in another collection, and none points here.',
+    ),
+  );
+  if (links.length)
+    parts.push(
+      renderDocTable({
+        columns: ['Connection', 'In words', 'How sure'],
+        rows: links.map(({ r, other, text }) => ({
+          cells: [
+            {
+              html: `${richText(text)}<button class="link" data-db-collection="${escapeHtml(other)}">${escapeHtml(other)}</button>`,
+            },
+            { html: linkSentence(r) },
+            r.via === 'naming' ? '_guessed from the name_' : linkBasis(r),
+          ],
+          ...(r.via === 'naming' ? { tone: 'warn' } : {}),
+          ...(r.source ? { at: r.source } : {}),
+        })),
+      }),
+    );
+
+  parts.push(
+    heading(
+      'Fields',
+      entry.fields.length
+        ? 'Each field is one piece of every record. Open one to see, in plain words, what it holds, where the user types it, what saves and changes it, and where it is shown — with the code below.'
+        : 'No schema declares this collection, and no query names a field of it.',
+    ),
+  );
+  if (entry.fields.length) {
+    // A field searched for on the overview opens straight away.
+    const hits = wanted
+      ? entry.fields.filter((field) => fieldSearchText(field).includes(wanted))
+      : [];
+    parts.push(
+      `<div class="db-search"><input type="search" data-db-field-filter placeholder="Search a field: its key, a form label or a screen label" aria-label="Search fields" autocomplete="off" value="${hits.length ? escapeHtml(wanted) : ''}" /></div>`,
+      `<div class="db-fields">${entry.fields
+        .map((field) => fieldHtml(field, hits.length <= 3 && hits.includes(field), entry))
+        .join('')}</div>`,
+    );
+  }
+
+  const technical = [];
+  if (entry.indexes?.length)
+    technical.push(
+      `<h4>Indexes</h4><p class="muted db-hint">Created by the code with <code>createIndex</code>. They make lookups fast, and a unique one stops two records sharing a value.</p>` +
+        renderDocTable({
+          columns: ['Keys', 'Kind'],
+          rows: entry.indexes.map((index) => ({
+            cells: [
+              indexKeys(index),
+              [
+                index.unique ? 'unique: no two records share it' : '',
+                index.ttlSeconds != null ? `TTL: ${ttlText(index.ttlSeconds)}` : '',
+                index.sparse ? 'sparse' : '',
+                index.name ? `named \`${index.name}\`` : '',
+                ...(index.options ?? []).map((option) => `\`${option}\``),
+              ]
+                .filter(Boolean)
+                .join(' · ') || 'lookup and sort',
+            ],
+            at: index.source,
+          })),
+        }),
+    );
+  if (entry.usedBy.length)
+    technical.push(
+      `<h4>Every user action that reaches it</h4>` +
+        renderDocTable({
+          columns: ['Action', 'What it does here'],
+          rows: entry.usedBy.map((use) => ({
+            cells: [flowLinkCell(use.flowId, use.title), { html: effectChips(use.effects) }],
+          })),
+        }),
+    );
+  if (entry.operations.length)
+    technical.push(
+      `<h4>Every query on it — ${entry.operations.length}</h4>` +
+        renderDocTable({
+          // Which database only matters when the name is in more than one.
+          columns: ['Query', 'Does', 'In', ...(entry.databases?.length > 1 ? ['Database'] : [])],
+          rows: entry.operations.map((op) => ({
+            cells: [
+              `\`${op.label}\``,
+              { html: effectChips([op.effect]) },
+              op.method ? `\`${op.method}\`` : '',
+              ...(entry.databases?.length > 1
+                ? [op.databaseName ? databaseLabel(op.databaseName) : '']
+                : []),
+            ],
+            ...(op.source ? { at: op.source } : {}),
+          })),
+        }),
+    );
+  if (technical.length)
+    parts.push(
+      `<details class="more db-technical"><summary>Technical details — indexes, actions and queries</summary>${technical.join('')}</details>`,
+    );
+  return parts.join('');
 }
 
 function renderFlowHeader(flow) {
@@ -4536,6 +6458,8 @@ load();
  */
 window.addEventListener('hashchange', () => {
   const hash = new URLSearchParams(window.location.hash.slice(1));
+  if (hash.get('page') === 'database') return showPage('database');
+  if (state.page === 'database') showPage('flows');
   const tab = hash.get('tab');
   const legacy = tab ? LEGACY_TABS[tab] : undefined;
   if (legacy) {

@@ -279,7 +279,7 @@ interface Ctx {
   front: FrontFn[];
   calls: CallContext[];
   frontSchemas: Array<{ facts: SchemaFacts; method: string; call: CallExpression }>;
-  labels: Map<string, { label?: string; required: boolean }>;
+  labels: Map<string, FormFieldLabel>;
   limits: Set<string>;
   /** Read once by `confirmationsOf`. */
   confirms?: Confirmation[];
@@ -837,9 +837,42 @@ const FIELD_PATTERNS = [
   /\berrors\.(\w+)/,
 ];
 
+interface FormFieldLabel {
+  label?: string;
+  required: boolean;
+  line: number;
+}
+
+export interface FormField {
+  /** The key the form keeps the value under: `mrp` in `values.mrp`. */
+  key: string;
+  /** The words on screen: `MRP / unit (₹)`. */
+  label?: string;
+  required: boolean;
+  at: SourcePoint;
+}
+
+/** The inputs of the form an action submits, with the label each shows. */
+export function formFieldsOf(
+  graph: FlowGraph,
+  flow: FeatureFlow,
+  reader: SourceReader = new SourceReader(graph),
+): FormField[] {
+  const ctx = locatedContext(graph, flow, reader);
+  const formFn = ctx.popup?.fn ?? ctx.formFn;
+  if (!formFn) return [];
+  const file = reader.point(formFn).file;
+  return [...fieldLabels(formFn)].map(([key, entry]) => ({
+    key,
+    ...(entry.label ? { label: entry.label } : {}),
+    required: entry.required,
+    at: { file, line: entry.line },
+  }));
+}
+
 /** `name` -> "Product name", required — from the JSX around each input. */
-function fieldLabels(fn: Functionish): Map<string, { label?: string; required: boolean }> {
-  const labels = new Map<string, { label?: string; required: boolean }>();
+function fieldLabels(fn: Functionish): Map<string, FormFieldLabel> {
+  const labels = new Map<string, FormFieldLabel>();
   // `const [phone, setPhone] = useState("")` + `<input value={phone} />`
   const stateNames = new Set(
     fn
@@ -908,13 +941,13 @@ function fieldLabels(fn: Functionish): Map<string, { label?: string; required: b
       if (!label && placeholder && literalText(placeholder))
         label = `placeholder "${literalText(placeholder)}"`;
     }
-    labels.set(key, { ...(label ? { label } : {}), required });
+    labels.set(key, { ...(label ? { label } : {}), required, line: opening.getStartLineNumber() });
   }
   return labels;
 }
 
 /** `"Product name"`, or the words in `{stockLabel?.label ?? "Quantity"}`. */
-function labelText(node: Node): string {
+export function labelText(node: Node): string {
   const direct = literalText(node);
   if (direct !== undefined) return direct;
   // `action === "adjust" ? "New stock level" : "Quantity"`: the words shown, not the value compared.

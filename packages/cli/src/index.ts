@@ -5,6 +5,7 @@ import { parseArgs } from 'node:util';
 import { loadConfig } from '@flowslens/core';
 import { splitPositionals } from './args.js';
 import { runFlow, runFlows } from './commands/flows.js';
+import { runDb } from './commands/db.js';
 import { runDiff } from './commands/diff.js';
 import { runFindings } from './commands/findings.js';
 import { runDoctor, runImpact } from './commands/impact.js';
@@ -58,6 +59,8 @@ ${color.bold('COMMANDS')}
   doctor [project]        Broken API calls, dead endpoints, shared writes
   findings [project]      Bugs with the line to open: no auth, missing tenant
                           filter, mass assignment, N+1, sequential reads
+  db [collection]         The database as the code sees it: collections,
+                          fields, links, and the actions that reach each one
   trace [project]         Merge recorded runtime spans into the graph
   unused [project]        Files, folders, exports and dependencies nothing
                           uses, imports that point at nothing, and endpoints
@@ -75,7 +78,8 @@ ${color.bold('OPTIONS')}
       --trace <file>      Trace file (default: a machine-local cache path)
   -o, --out <file>        Write output to a file
       --json              Machine-readable output
-      --markdown          Render a feature document (flow command)
+      --markdown          Render a document: one feature (flow), or the whole
+                          database with a diagram (db)
       --all               Include UI actions that never call the backend
       --api-prefix <p>    Strip this prefix from BOTH frontend URLs and backend
                           routes (repeatable, default /api)
@@ -124,6 +128,7 @@ ${color.bold('EXAMPLES')}
   flowlens flow create-customer my-app --markdown --out docs/create-customer.md
   flowlens where web/src/components/OrderForm.tsx:20 my-app
   flowlens impact CustomersService.create -p my-app
+  flowlens db customers my-app
   flowlens serve my-app
 
 ${color.bold('ENVIRONMENT')}
@@ -398,6 +403,15 @@ export function main(argv = process.argv.slice(2)): number {
         });
       }
 
+      case 'db':
+        return runDb({
+          ...common,
+          ...(args[0] ? { collection: args[0] } : {}),
+          ...(fileConfig.relations ? { relations: fileConfig.relations } : {}),
+          markdown: values.markdown,
+          ...(values.out ? { out: values.out } : {}),
+        });
+
       case 'unused':
         return runUnused({
           root: common.root,
@@ -417,6 +431,7 @@ export function main(argv = process.argv.slice(2)): number {
       case 'serve':
         return runServe({
           ...common,
+          ...(fileConfig.relations ? { relations: fileConfig.relations } : {}),
           gitignore: gitignoreForWrites,
           ...(values.port ? { port: Number(values.port) } : {}),
           ...(values.host ? { host: values.host } : {}),

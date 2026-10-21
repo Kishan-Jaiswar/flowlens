@@ -7,6 +7,171 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A Database page in a new navbar, and `flowlens db [collection]`.** The
+  dashboard's navbar switches between Feature flows and Database. Every collection the
+  code declares or queries, with its model, field count, reads, writes and the
+  actions that reach it, searchable by collection, model or field. Opening one
+  shows its fields (type, `required`, `unique`/`index`, the collection a field
+  links to, and whether the field is declared in the schema or only used in a
+  query), the user actions that reach it with what each does there, the code
+  that touches it with file and line, and its links both ways — a link the code
+  states kept apart from one guessed from a field name. Read from the source
+  only: no database connection (`/api/database`, `databaseReport()`).
+- **The Database page checks the data, draws it, and shows a record.** A health
+  check lists what is worth fixing, in words: queries that skip the owner filter
+  (the `flowlens findings` tenant check, with its severity and who runs the query),
+  deletes that leave linked records pointing at nothing, lookups no index the code
+  creates can serve, and fields nothing fills or reads (audit timestamps and items
+  inside a list are left out). A diagram draws the links, guessed ones dashed, each
+  box opening its collection. A collection shows an example record built from its
+  fields, what a delete does to the records that hold its id, runtime timings when
+  spans were recorded, and its own checks. A count tile no user action explains
+  now says `script`, `job` or `api`, and every query says what runs it (`runBy`).
+  Links the code cannot show can be declared in `flowlens.config.json` under
+  `relations`. `flowlens db --markdown` (or `--out`) writes the database as a
+  document with a Mermaid diagram and the checks, and `flowlens diff` adds a
+  _Database changes_ section: collections, fields, indexes and links added or
+  removed (`databaseChanges()`).
+- **A Database page anyone can read.** The overview opens on one big search box (a
+  label on screen or a key in the database), then the links between collections as
+  sentences ("Each movements record points to one medicines record, through its
+  `medicineId` field", marked when only guessed), then the collections grouped by
+  database, each saying who adds, changes, removes and reads its records, named by
+  user action. A collection opens on four boxes, Added / Changed / Removed / Read,
+  with the actions and the code behind each (an upsert counts as adding, a TTL index
+  as removing), what its search box matches, what finds and sorts it, and its
+  connections; indexes, every action and every query sit under Technical details.
+  Every field opens on plain sentences: what it holds and whether it must be set,
+  what it is called on screen, where the user types it, what changes it, whether
+  it is unique, expires or links to another collection, and where it is shown,
+  before the full details.
+- **The native MongoDB driver, read like a schema.** `db.collection<Medicine>("medicines")`
+  makes the TypeScript type the collection's schema: every field with its type
+  (`extends`, a union alias spelled out, fields inside lists and objects such as
+  `batches[].mrp` and `extra_details.entityId`) and whether it is optional. Each
+  collection and each query names the database it is opened in, followed from
+  `client.db(process.env.CLINICS_DB)` through wrappers, factories and parameters,
+  with a note when one collection name lives in two databases. Indexes from
+  `createIndex`/`createIndexes` are listed with their keys, `unique`, TTL, name and
+  other options, and mark their fields `unique`/`indexed`/deleted after a time.
+  Typed fields are read for links by name (`medicineId` → `medicines`), and a new
+  `query` link records an id a query looks up off another collection's record
+  (`smsEndpoints.findOne({ _id: template.endpoint_id })`). A BullMQ
+  `worker.on("failed", …)` handler is now part of the job it belongs to.
+- **Where each field's value comes from.** Every field on the Database page opens
+  to the code that writes it, the value it writes (`input.name`, `nowIso()`,
+  `"processing"`) said in plain words — passed in, fixed, the current time or
+  worked out in the code — when (`insert`, `$set`, `$inc` …), and the user
+  actions that lead there; plus the queries that find records by it. Read from
+  the query code too, so a raw-driver collection with no schema still lists its
+  fields. Each collection opens with a short plain-words summary, and searching a
+  field name on the overview names the collection that holds it.
+- **A field's whole journey, front to back.** Each field also says which form
+  input the user types it into (with the label on screen, even when the form
+  calls it something else — `mrp` saved as `sellingPrice`), where the frontend
+  shows it again (`Current MRP`, file and line), and which lists are sorted by
+  it, opening with one plain sentence.
+- **Search a field from either end.** Type a key stored in the database, a form
+  field (`mrp`), a label on the form or a label on screen, and every matching
+  field is listed with how the two connect — typed into → sent in → saved by →
+  stored as → shown in, each step with its file and line — and every detail of
+  the field below it.
+- **Every API a field passes through.** Each field lists the endpoints whose
+  code touches it — found by walking back from each query to its route, so an
+  endpoint no screen calls is listed too — saying what each does with it (saves
+  it and as what, finds records by it, sorts by it, or reads it back) and where
+  the frontend calls it from. A field's details are grouped as on the frontend,
+  through the API and in the backend code, under a one-paragraph summary.
+- **Field details that hold up to a review.** A form used both to add and to
+  edit a record shows both paths. Code outside the database calls that sets or
+  names the key — an import parser, a column mapping, a form default — is listed,
+  kept to code near the collection's other fields so a common name stays quiet.
+  The zod, yup or joi rules that check it are shown (optional, trimmed, its
+  default), from schemas whose fields are mostly that collection's. Filters
+  built in a helper or step by step (`filter.$or = …`, `and.push(…)`) are read,
+  and a text search is called one. An API that only loads the whole record is
+  folded away from those that use, return or search the field. And a field set
+  only when a record is created — the same function updates an existing record
+  without it — is flagged, with what does change it later.
+- **Field paths that name the right code.** The create-only warning names the
+  endpoints that reach the function directly, and the writers that find the
+  record themselves first (`importReconcileMedicine` before `upsertMedicine`).
+  Code that builds the value — an import parser — gets its own path: built in
+  code → sent in → goes through → saved by. One filter reused by a count and a
+  find is one lookup, at the line the condition is written. A schema rule
+  points at the field's own line, file paths are shown in full, and an API that
+  sends the field back says when no screen calling it shows it.
+- **A save that waits for a background job says so.** When the path from a
+  request to a save runs through a queue, the field's path shows a "queued,
+  saved later" step naming the worker and the line it carries on from
+  (`processImportJob`, `lib/queue/import.processor.ts:60`), and the API table's
+  save names it too, along with the writer the request goes through first.
+- **Fields worked out by helpers, inside arrays, or spread from another record.**
+  A helper that takes the record and returns it (`syncFromBatches`) is opened:
+  the values it works out replace the placeholders it was given (a new
+  record's stock is the sum of its batches, not the `0` passed in), each marked
+  with the helper and the fields it reads (`batches[].mrp`), and the field takes
+  the inputs of those fields — typed in as MRP, edited, imported. An array of
+  records opens into its own fields (`batches[].billNo`), followed through
+  `[newBatch(…)]`, `.push(…)`, `list[i] = …` and a condition. A spread of a record
+  a helper builds is followed into other files (`{ ...base }`), and a read's
+  `projection` lists the fields it asks for. A name only counts beside the
+  collection's other keys (not the words of a message), and a screen read only
+  on a variable that also reads another of its fields or is named after the
+  collection — so a toast's `description` is no longer a medicine's.
+- **One card per field, and every case that writes it.** A field opens to five
+  short answers — what it is (type, rules, default, or that the code works it
+  out), how it gets in (one line per path: where the user acts → request →
+  queue → the code that saves it), a warning only when something surprises,
+  where it is shown, and what uses it — then a table of cases. The cases are
+  read from the code's own branches: each request (or script) that writes the
+  collection is followed down its calls, and every `if` around a write, or
+  early `return` before it, in the functions that write the collection splits
+  a case — a single add of a new record or one that matches, an edit, an
+  import, a stock change, a delete, a script, an invalid request. Each row says
+  what that case does to the field (set from the form, recalculated, keeps its
+  old value — the value sent is ignored, removed), and what else it writes.
+  Everything else sits under one "Code details" toggle. `flowlens serve` works
+  the report out once per scan.
+- **Cases that hold up on lists, stale values, auth and imports.** An item field
+  changes with a list a helper rebuilds in place (`addStockToBatches`,
+  `applyImportRowDetails`), followed through `x.batches` back to what built it
+  and through a variable's latest value. A field a helper recalculates in a case
+  but the save leaves out is flagged out of sync. Every path down is read, every
+  call site of a function in its caller, so a write in one branch is not lost to
+  another; a write gated on a writer's result (`if (!ok) return`) is kept out of
+  the cases that return false; writes in a background job are their own case.
+  Early returns before any write, and an `if` whose other side writes, are
+  "nothing written" cases (locked, not found, cooldown). Conditional update
+  objects, conditional spreads and `bulkWrite` over `.map` are read; the key a
+  record is found by is no longer "ignored"; a job's handler is named by what
+  runs it.
+- **What a case does under its own conditions.** A field written only on some
+  runs of a save says when: one side of `cond ? { … } : { … }`, a conditional
+  spread, an array item built under its own `if` (a merged batch or a new one),
+  the side of a `? :` the list came from (`delta > 0` adds stock, `delta < 0`
+  takes it off), or `cond ? new : existing.x` (adopted only when blank). `x + n`
+  on the field's own old value is "added to", `x - n` "taken off"; a case that
+  writes a field more than one way lists each. A record spread in from a helper
+  (`{ ...redated }`) and a list a helper returns are read, so a re-date changes
+  only the two fields it touches. Cases say whether a request, a background job
+  or a script starts them; a schema check inside a job is its own "invalid row"
+  case; and two checks are one only when the finder and the variable both match.
+- **Conditions in plain words.** Every case and every "only when" reads as a
+  sentence built from what the code shows — "the quantity is more than 0 and
+  no matching batch is found", "the stored dosage form is empty", "the code
+  expiry is before now", "it fails `medicineSchema.safeParse`" — with the code
+  kept as a tooltip. A variable is named for the value it was made from
+  (`addQty` from `input.quantity` is "the quantity"), a `findIndex` result for
+  what it finds, a finder's result for the record. Conditions are simplified
+  first: `(not A and B) or A` is `A or B`, `A or not A` is always, and a
+  comparison a stronger one already says is dropped. An exit after a write under
+  an `if` is a "nothing written" case where that `if` was false (an unchanged
+  import row). A value built from what was sent — a template, a sum — is
+  computed, not input.
+
 ## [1.4.0] - 2026-10-15
 
 ### Added

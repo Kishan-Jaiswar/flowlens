@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   analyzeChanged,
+  databaseChanges,
   diffGraphs,
+  hasDatabaseChanges,
   indexTests,
   introducesAtLeast,
   projectFindings,
@@ -12,6 +14,7 @@ import {
   SourceReader,
   type ChangedInput,
   type ChangedReport,
+  type DatabaseChanges,
   type Finding,
   type FindingSeverity,
   type FlowGraph,
@@ -97,13 +100,14 @@ export function runDiff(args: DiffArgs): number {
     tests: indexTests([root]),
   });
   const level = levelOf(diff, changed);
+  const database = databaseChanges(baseGraph, head.graph);
 
   if (args.json) {
-    const body = `${JSON.stringify({ base: args.base, forkPoint, level, diff, changed }, null, 2)}\n`;
+    const body = `${JSON.stringify({ base: args.base, forkPoint, level, diff, changed, database }, null, 2)}\n`;
     if (args.out) writeFileSync(args.out, body, 'utf8');
     else process.stdout.write(body);
   } else {
-    const body = renderDiff(args.base, level, diff, changed);
+    const body = renderDiff(args.base, level, diff, changed, database);
     if (args.out) {
       writeFileSync(args.out, body, 'utf8');
       process.stderr.write(`${color.green('wrote')} ${args.out}\n`);
@@ -156,6 +160,7 @@ export function renderDiff(
   level: Level,
   diff: GraphDiff,
   changed: ChangedReport,
+  database?: DatabaseChanges,
 ): string {
   const out: string[] = [REPORT_MARKER, '## FlowLens — what this change does to the app', ''];
   const introduced = diff.findings.introduced.length;
@@ -249,6 +254,19 @@ export function renderDiff(
           ` — before: ${entry.before.map((name) => `\`${name}\``).join(', ')}`,
       );
     }
+    out.push('');
+  }
+
+  if (database && hasDatabaseChanges(database)) {
+    out.push('### Database changes', '');
+    const part = (what: string, change: { added: string[]; removed: string[] }) => {
+      for (const item of change.added) out.push(`- new ${what} \`${item}\``);
+      for (const item of change.removed) out.push(`- **removed ${what}** \`${item}\``);
+    };
+    part('collection', database.collections);
+    part('field', database.fields);
+    part('index', database.indexes);
+    part('link', database.links);
     out.push('');
   }
 

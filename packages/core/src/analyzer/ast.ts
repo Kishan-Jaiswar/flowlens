@@ -217,3 +217,45 @@ export function lineOf(node: Node): number {
 export function callsIn(node: Node): CallExpression[] {
   return node.getDescendantsOfKind(SyntaxKind.CallExpression);
 }
+
+/**
+ * The call a variable was last loaded from before `at`: `await this.patientModel.create(dto)`
+ * for `patient` in `patient.uuid = uuid; await patient.save()`. Undefined when it was
+ * built with `new` (that write is recorded where it is built) or is not a call.
+ */
+export function loadedFrom(name: string, at: Node): CallExpression | undefined {
+  const fn = at.getFirstAncestor(
+    (node) =>
+      Node.isFunctionDeclaration(node) ||
+      Node.isMethodDeclaration(node) ||
+      Node.isArrowFunction(node) ||
+      Node.isFunctionExpression(node),
+  );
+  if (!fn) return undefined;
+  const values: Array<{ end: number; value: Node | undefined }> = [];
+  for (const declaration of fn.getDescendantsOfKind(SyntaxKind.VariableDeclaration))
+    if (declaration.getName() === name)
+      values.push({ end: declaration.getEnd(), value: declaration.getInitializer() });
+  for (const assignment of fn.getDescendantsOfKind(SyntaxKind.BinaryExpression))
+    if (
+      assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken &&
+      assignment.getLeft().getText() === name
+    )
+      values.push({ end: assignment.getEnd(), value: assignment.getRight() });
+  const last = values
+    .filter((entry) => entry.end <= at.getStart())
+    .sort((a, b) => a.end - b.end)
+    .at(-1);
+  let value = last?.value;
+  while (value && (Node.isAwaitExpression(value) || Node.isParenthesizedExpression(value)))
+    value = value.getExpression();
+  // `this.model.findById(id).exec()` / `.populate(…)`: the model call is at the start of the chain.
+  while (value && Node.isCallExpression(value)) {
+    const callee = value.getExpression();
+    if (!Node.isPropertyAccessExpression(callee)) break;
+    const inner = callee.getExpression();
+    if (!Node.isCallExpression(inner)) break;
+    value = inner;
+  }
+  return value && Node.isCallExpression(value) ? value : undefined;
+}
