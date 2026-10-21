@@ -1435,6 +1435,7 @@ const RELATION_BASIS: Record<RelationVia, string> = {
   declared: 'The schema declares the link, so this is what the code says.',
   prisma: 'The schema declares the link, so this is what the code says.',
   lookup: 'A query joins the two, so the link is in the code that runs.',
+  query: 'A query looks records up by this id, so the link is in the code that runs.',
   naming:
     'Inferred from the field name and a matching collection — nothing in the code ' +
     'declares this link, so check it before relying on it.',
@@ -1442,6 +1443,7 @@ const RELATION_BASIS: Record<RelationVia, string> = {
 
 const RELATION_RANK: Record<RelationVia, number> = {
   lookup: 0,
+  query: 0,
   declared: 1,
   prisma: 1,
   naming: 2,

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import type { DeclaredRelation } from './flow/database.js';
 import type { FlowslensConfig } from './scan.js';
 
 /**
@@ -27,6 +28,11 @@ export interface FileConfig extends FlowslensConfig {
    * team opts in once instead of every developer being told by the CLI.
    */
   gitignore?: boolean;
+  /**
+   * Links between collections the code cannot show, for the Database page:
+   * `[{ "from": "medicines", "field": "ownerId", "to": "clinics" }]`.
+   */
+  relations?: DeclaredRelation[];
 }
 
 export interface LoadedConfig {

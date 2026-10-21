@@ -19,6 +19,14 @@
           <p id="subtitle">loading…</p>
         </div>
       </div>
+      <nav id="pages" class="pages" aria-label="Pages">
+        <button class="page-link active" data-page="flows" aria-current="page">
+          Feature flows
+        </button>
+        <button class="page-link" data-page="database">
+          Database <span id="page-database-count" class="tab-badge neutral" hidden></span>
+        </button>
+      </nav>
       <div class="actions">
         <label class="toggle">
           <input type="checkbox" id="show-all" checked />
@@ -113,6 +121,11 @@
       <aside id="details" class="details">
         <p class="muted">Select a step to inspect it.</p>
       </aside>
+    </main>
+
+    <!-- The second page: the database, about the whole project, full width. -->
+    <main id="page-database" class="db-page" hidden>
+      <div id="panel-database" class="panel"></div>
     </main>
 
     <script type="module" src="/app.js"></script>

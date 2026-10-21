@@ -144,14 +144,25 @@ _already been built_, and they are worth more than any new feature.
       branch introduces. `--fail-on` and a GitHub Actions workflow
       (`docs/ci/flowlens-pr.yml`) make it the CI story.
 
+## Database Explorer
+
+- [x] **Source-only MVP.** The Database page (navbar) and `flowlens db`: collections,
+      fields with `required`/`unique`/`index`, declared vs queried fields, the
+      actions and code using each collection, and links (stated vs guessed).
+- [ ] **Relationship map.** The links drawn as a graph, grouped by module.
+- [ ] **Query and index health.** Compound `schema.index()` indexes, filters
+      no index supports, unbounded `find()`.
+- [ ] **Field change impact.** `flowlens db impact customers.phone`.
+- [ ] **Prisma fields.** Prisma tables list their code, actions and links, but
+      not their columns yet.
+
 ## More of the stack
 
 - [x] PostgreSQL/MySQL via Prisma
 - [ ] TypeORM, Sequelize and Drizzle adapters
 - [ ] Redis: cache reads/writes as first-class data nodes rather than a single
       terminal effect
-- [ ] Queues (BullMQ): follow the job into the worker that handles it. The
-      `add()` that enqueues it is already a step; what runs next is not read
+- [x] Queues (BullMQ): follow the job into the worker that handles it
 - [ ] Vue and Svelte frontend analyzers
 - [ ] tRPC and GraphQL resolvers as route equivalents
 

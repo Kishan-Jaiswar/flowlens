@@ -42,8 +42,10 @@ import {
   testsForFlow,
   planTests,
   projectUnused,
+  databaseReport,
   type ActionDecisions,
   type BreakageReport,
+  type DatabaseReport,
   type FlowGraph,
   type SharedDecisions,
   type AppSidebar,
@@ -54,14 +56,19 @@ import {
   type SidebarEntry,
   type SidebarItem,
   type TestIndex,
+  type DeclaredRelation,
 } from '@flowslens/core';
 import { changedFiles, withCommittedText } from '../changedfiles.js';
 import { artifactPaths, existingConfigFiles, guardArtifacts } from '../gitignore.js';
 import { browserTracerFile, dashboardDir, graphPath, saveGraph, tracePath } from '../paths.js';
 import { color } from '../ui.js';
 
+const DATABASE_REPORTS = new WeakMap<FlowGraph, DatabaseReport>();
+
 export interface ServeArgs {
   root: string;
+  /** Links between collections declared in `flowlens.config.json`, for the Database page. */
+  relations?: DeclaredRelation[];
   /** Sibling repositories scanned into the same graph. */
   extraRoots?: string[];
   port?: number;
@@ -636,6 +643,24 @@ export function runServe(args: ServeArgs): number {
     /** Code nothing uses — read at scan time, so this is a lookup. */
     if (path === '/api/unused') {
       sendJson(response, projectUnused(graph));
+      return;
+    }
+
+    /** The database as the code sees it — the Database tab. */
+    if (path === '/api/database') {
+      // Reads every scanned file: worked out once per loaded graph, again after a rescan.
+      let report = DATABASE_REPORTS.get(graph);
+      if (!report) {
+        reader ??= new SourceReader(graph);
+        findings ??= projectFindings(graph, { reader });
+        report = databaseReport(graph, resolveFlows(graph, { includeLocalOnly: true }), {
+          reader,
+          findings,
+          ...(args.relations ? { relations: args.relations } : {}),
+        });
+        DATABASE_REPORTS.set(graph, report);
+      }
+      sendJson(response, report);
       return;
     }
 

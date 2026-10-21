@@ -10,6 +10,7 @@ import { collectConstants, type ConstantTable } from './analyzer/constants.js';
 import { analyzeFileRoutes } from './analyzer/fileroutes.js';
 import { analyzeServerModules } from './analyzer/servermodules.js';
 import { linkQueueWorkers } from './analyzer/queues.js';
+import { declareDriverSchemas } from './analyzer/driver.js';
 import { linkGuardCalls, linkNestConsumerMiddleware } from './analyzer/middleware.js';
 import { collectionAliasesOf } from './analyzer/dbaccess.js';
 import { isEmptyPrismaSchema, loadPrismaSchema } from './analyzer/prisma.js';
@@ -210,6 +211,8 @@ export function scan(options: ScanOptions & FlowslensConfig): ScanResult {
   analyzeServerModules(loaded, graph, collectionAliases, prisma);
   // After the module pass: the worker's processor is one of its functions.
   linkQueueWorkers(loaded, graph);
+  // Native-driver types, databases and indexes: after every query, before the relations read their fields.
+  declareDriverSchemas(loaded, graph, collectionAliases);
   /**
    * How the collections link to each other — last of the data passes, because
    * an inferred link is only reported when the collection on the other end is

@@ -23,7 +23,12 @@
  * trusted on either.
  */
 
-import { Node, type SourceFile } from 'ts-morph';
+import {
+  Node,
+  type CallExpression,
+  type PropertyAccessExpression,
+  type SourceFile,
+} from 'ts-morph';
 import type { FlowGraph } from '../graph/graph.js';
 import type { FlowEdge, FlowNode } from '../graph/types.js';
 import { ids } from '../graph/ids.js';
@@ -40,6 +45,8 @@ export type RelationVia =
   | 'prisma'
   /** An aggregation `$lookup` that joins the two. */
   | 'lookup'
+  /** A query looks records up by an id read off another collection's record: `{ _id: template.endpointId }`. */
+  | 'query'
   /** The field's name and an existing collection with the matching name. */
   | 'naming';
 
@@ -228,14 +235,15 @@ function inferredFromNames(
         ? { source: { file: field.source.file, line: field.source.line } }
         : {};
 
-      const guess = referenceTargetOf(field.label, collections);
+      // `batches[].supplierId`: the key's own name, a list when any step is one.
+      const guess = referenceTargetOf(field.label.split('.').at(-1)!, collections);
       if (guess) {
         record(graph, field.id, {
           from,
           field: field.label,
           to: guess.collection,
           via: 'naming',
-          many: guess.many,
+          many: guess.many || field.label.includes('[]'),
           followed: false,
           ...source,
         });
@@ -352,12 +360,16 @@ function queryJoins(loaded: LoadedProject, graph: FlowGraph, collections: Set<st
     wanted.set(file, [...(wanted.get(file) ?? []), operation]);
   }
 
-  const statements = new Map<string, string>();
+  const statements = new Map<string, { text: string; call: CallExpression }>();
   for (const file of loaded.sourceFiles) {
     const mine = wanted.get(loaded.rel(file));
     if (!mine) continue;
-    for (const [id, text] of statementsFor(file, mine)) statements.set(id, text);
+    for (const [id, text, call] of statementsFor(file, mine)) statements.set(id, { text, call });
   }
+  /** Queries by where they are, for "this record came from that query". */
+  const opAt = new Map<string, FlowNode>();
+  for (const operation of operations)
+    opAt.set(`${operation.source!.file}:${operation.source!.line}`, operation);
 
   /** Every recorded link, so a populated path can be matched to one. */
   const linksOf = new Map<string, CollectionRelation[]>();
@@ -386,8 +398,9 @@ function queryJoins(loaded: LoadedProject, graph: FlowGraph, collections: Set<st
     const collection = operation.meta?.['collection'];
     if (typeof collection !== 'string' || !operation.source) continue;
 
-    const text = statements.get(operation.id);
-    if (!text) continue;
+    const found = statements.get(operation.id);
+    if (!found) continue;
+    const text = found.text;
 
     /** Collections this one query brings back alongside its own. */
     const joins = new Set<string>();
@@ -433,6 +446,22 @@ function queryJoins(loaded: LoadedProject, graph: FlowGraph, collections: Set<st
         const edge = edgeOf.get(linkKey(relation.from, relation.field, relation.to));
         if (edge) edge.meta = { ...edge.meta, followed: true };
       }
+    }
+
+    for (const follow of idFollowsIn(found.call)) {
+      const source = opAt.get(`${operation.source.file}:${follow.loadedAt}`);
+      const from = source?.meta?.['collection'];
+      if (typeof from !== 'string' || from === collection || !collections.has(from)) continue;
+      record(graph, fieldNodeFor(graph, from, follow.field), {
+        from,
+        field: follow.field,
+        to: collection,
+        via: 'query',
+        many: false,
+        followed: true,
+        source: { file: operation.source.file, line: operation.source.line },
+      });
+      linked += 1;
     }
 
     if (joins.size === 0 && follows.size === 0) continue;
@@ -504,7 +533,7 @@ export function collectionRelations(graph: FlowGraph): CollectionRelation[] {
 function statementsFor(
   file: SourceFile,
   operations: ReadonlyArray<FlowNode>,
-): Array<[string, string]> {
+): Array<[string, string, CallExpression]> {
   const byLine = new Map<number, FlowNode[]>();
   for (const operation of operations) {
     const line = operation.source?.line;
@@ -512,7 +541,7 @@ function statementsFor(
     byLine.set(line, [...(byLine.get(line) ?? []), operation]);
   }
 
-  const found: Array<[string, string]> = [];
+  const found: Array<[string, string, CallExpression]> = [];
   for (const call of callsIn(file)) {
     const candidates = byLine.get(lineOf(call));
     if (!candidates) continue;
@@ -526,7 +555,55 @@ function statementsFor(
     const statement = call.getFirstAncestor(
       (node) => Node.isStatement(node) || Node.isVariableStatement(node),
     );
-    found.push([match.id, (statement ?? call).getText()]);
+    found.push([match.id, (statement ?? call).getText(), call]);
+  }
+  return found;
+}
+
+/**
+ * Ids a query looks records up by, read off a record another query loaded.
+ *
+ * `const t = await templates.findOne(...)` then `endpoints.findOne({ _id: t.endpoint_id })`
+ * says `endpoint_id` holds an endpoints id, whatever it is called. Only `_id`
+ * and `id` keys count, and only when the record is a query's result in the
+ * same function: that is the code following the link, not a name suggesting it.
+ */
+function idFollowsIn(call: CallExpression): Array<{ field: string; loadedAt: number }> {
+  const filter = call.getArguments()[0];
+  if (!filter || !Node.isObjectLiteralExpression(filter)) return [];
+  const found: Array<{ field: string; loadedAt: number }> = [];
+  for (const property of filter.getProperties()) {
+    if (!Node.isPropertyAssignment(property)) continue;
+    if (!/^['"]?_?id['"]?$/.test(property.getName())) continue;
+    let value = property.getInitializer();
+    // `{ $in: list.map((m) => m.clinicId) }`, `{ $eq: t.endpointId }`
+    if (value && Node.isObjectLiteralExpression(value)) {
+      const operator = value.getProperties()[0];
+      value =
+        operator && Node.isPropertyAssignment(operator) ? operator.getInitializer() : undefined;
+    }
+    let holder: Node | undefined;
+    let field: string | undefined;
+    if (value && Node.isPropertyAccessExpression(value)) {
+      holder = value.getExpression();
+      field = value.getName();
+    } else if (value && Node.isCallExpression(value) && calleeMember(value) === 'map') {
+      const mapper = value.getArguments()[0];
+      const body = mapper && Node.isArrowFunction(mapper) ? mapper.getBody() : undefined;
+      if (body && Node.isPropertyAccessExpression(body)) {
+        holder = (value.getExpression() as PropertyAccessExpression).getExpression();
+        field = body.getName();
+      }
+    }
+    if (!holder || !field || !Node.isIdentifier(holder) || NOT_REFERENCES.has(field.toLowerCase()))
+      continue;
+    const declaration = holder.getSymbol()?.getDeclarations()[0];
+    const init =
+      declaration && Node.isVariableDeclaration(declaration)
+        ? declaration.getInitializer()
+        : undefined;
+    if (!init) continue;
+    found.push({ field, loadedAt: lineOf(init) });
   }
   return found;
 }

@@ -19,6 +19,7 @@ import {
   functionName,
   getDecorator,
   lineOf,
+  loadedFrom,
   objectKeys,
   propertyValue,
   readPathLike,
@@ -304,6 +305,7 @@ function declareSchemaClass(
          * read here because this is the only place it is written down.
          */
         ...schemaRefOf(asObjectLiteral(prop.getArguments()[0]), declaredType),
+        ...fieldRulesOf(asObjectLiteral(prop.getArguments()[0])),
       },
     });
     graph.addEdge({ from: modelId, to: fieldId, kind: 'defines' });
@@ -361,6 +363,25 @@ function literalRefOf(value: Node | undefined): { ref?: string; refMany?: boolea
     return inner.ref ? { ref: inner.ref, refMany: true } : {};
   }
   return schemaRefOf(asObjectLiteral(value));
+}
+
+/**
+ * `required`, `unique` and `index` on one schema field, for the Database tab.
+ * `required: [true, 'message']` counts; a function or a variable is not read.
+ */
+function fieldRulesOf(options: ObjectLiteralExpression | undefined): {
+  required?: true;
+  unique?: true;
+  indexed?: true;
+} {
+  if (!options) return {};
+  const on = (key: string) =>
+    /^(true|\[\s*true\b)/.test(propertyValue(options, key)?.getText() ?? '');
+  return {
+    ...(on('required') ? { required: true } : {}),
+    ...(on('unique') ? { unique: true } : {}),
+    ...(on('index') ? { indexed: true } : {}),
+  };
 }
 
 function declareDto(
@@ -434,7 +455,11 @@ function declareMongooseModels(
         kind: 'field',
         label: fieldName,
         source: { file: rel, line: lineOf(schemaLiteral) },
-        meta: { owner: modelName, ...literalRefOf(value) },
+        meta: {
+          owner: modelName,
+          ...literalRefOf(value),
+          ...fieldRulesOf(asObjectLiteral(value)),
+        },
       });
       graph.addEdge({ from: modelId, to: fieldId, kind: 'defines' });
     }
@@ -672,6 +697,25 @@ function resolveMethodBodies(
           effect,
         });
         continue;
+      }
+
+      // 1b. A loaded document saved back: `patient.uuid = uuid; await patient.save()`.
+      if (member === 'save' && /^[A-Za-z_$][\w$]*$/.test(receiver)) {
+        const load = loadedFrom(receiver, call);
+        const loadReceiver = load ? calleeReceiver(load) : undefined;
+        const loadedModel = loadReceiver ? resolveModelReceiver(loadReceiver, info) : undefined;
+        if (load && loadedModel && dbEffectOf(calleeMember(load))) {
+          recordDbOp(graph, index, {
+            methodId,
+            modelName: loadedModel,
+            operation: 'save',
+            file: info.file,
+            line: lineOf(call),
+            site: `${info.name}.${methodName}`,
+            effect: 'update',
+          });
+          continue;
+        }
       }
 
       // 2. Injected service: this.customersService.create(...)

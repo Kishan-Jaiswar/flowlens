@@ -166,7 +166,11 @@ export class SourceReader {
   declaration(name: string, file: SourceFile, depth = 0): Node | undefined {
     if (depth > 4) return undefined;
     const local =
-      file.getFunction(name) ?? file.getVariableDeclaration(name) ?? file.getClass(name);
+      file.getFunction(name) ??
+      file.getVariableDeclaration(name) ??
+      file.getClass(name) ??
+      file.getInterface(name) ??
+      file.getTypeAlias(name);
     if (local) return local;
 
     for (const declaration of file.getImportDeclarations()) {
@@ -801,6 +805,8 @@ export interface SchemaField {
   /** Messages shown when a check fails, as written. */
   messages: string[];
   required: boolean;
+  /** The field's own line in the schema. */
+  at?: SourcePoint;
 }
 
 export interface SchemaFacts {
@@ -868,6 +874,7 @@ export function readSchema(
       transforms: [],
       messages: [],
       required: true,
+      at: reader.point(property),
     };
     const value = property.getInitializer();
     if (value) describeChain(reader, value, field, new Map(), 0);

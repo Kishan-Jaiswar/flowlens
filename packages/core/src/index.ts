@@ -398,3 +398,39 @@ export {
   type CardValue,
 } from './flow/carddata.js';
 export { queryDetail } from './flow/querydetail.js';
+export {
+  databaseReport,
+  relationIsDeclared,
+  type DatabaseCollection,
+  type DatabaseField,
+  type DatabaseOperation,
+  type DatabaseRelation,
+  type DatabaseReport,
+  type DatabaseUse,
+  type DeclaredRelation,
+  type DeleteEffect,
+  type SlowQuery,
+  type UnscopedQuery,
+  type CreateOnly,
+  type FieldApi,
+  type FieldApiUse,
+  type FieldMention,
+  type FieldValidation,
+  type FunctionEndpoints,
+  type LookupMatch,
+  type ScenarioOutcome,
+  type FieldDisplay,
+  type FieldEntry,
+  type FieldLookup,
+  type FieldWrite,
+  type ValueOrigin,
+} from './flow/database.js';
+export { type CollectionIndex, type DatabaseName } from './analyzer/driver.js';
+export { databaseChanges, hasDatabaseChanges, type DatabaseChanges } from './flow/dbchecks.js';
+export {
+  type QueueHop,
+  type Scenario,
+  type ScenarioCondition,
+  type ScenarioWrite,
+} from './flow/scenarios.js';
+export { render, simplify, type Literal, type Terms } from './flow/conditionwords.js';

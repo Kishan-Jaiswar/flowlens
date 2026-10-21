@@ -1,7 +1,7 @@
 import { Node, SyntaxKind, type SourceFile } from 'ts-morph';
 import type { FlowGraph } from '../graph/graph.js';
 import { ids } from '../graph/ids.js';
-import { callsIn, calleeMember, calleeReceiver, lineOf } from './ast.js';
+import { callsIn, calleeMember, calleeReceiver, lineOf, loadedFrom } from './ast.js';
 import { linkExternalEffects } from './effects.js';
 import { collectionNameOf, dbEffectOf, upsertsIn } from './mongo.js';
 import { prismaEffectOf, prismaTableOf, type PrismaSchema } from './prisma.js';
@@ -115,11 +115,24 @@ export function linkDbOperations(
     const table = prismaTableOf(receiver, prisma);
     const prismaEffect = table ? prismaEffectOf(operation) : undefined;
 
-    const effect = prismaEffect ?? (table ? undefined : dbEffectOf(operation));
+    // A loaded document saved back: `const doc = await Note.findById(id); doc.title = t; await doc.save()`.
+    const load =
+      !table && operation === 'save' && /^[A-Za-z_$][\w$]*$/.test(receiver)
+        ? loadedFrom(receiver, call)
+        : undefined;
+    const loadReceiver = load ? calleeReceiver(load) : undefined;
+    const savedFrom =
+      load && loadReceiver && dbEffectOf(calleeMember(load))
+        ? collectionFor(loadReceiver, file, aliases)
+        : undefined;
+
+    const effect = savedFrom
+      ? 'update'
+      : (prismaEffect ?? (table ? undefined : dbEffectOf(operation)));
     if (!effect) continue;
     const access = effect === 'read' ? 'read' : 'write';
 
-    const collection = table ?? collectionFor(receiver, file, aliases);
+    const collection = table ?? savedFrom ?? collectionFor(receiver, file, aliases);
     if (!collection) continue;
 
     /**
