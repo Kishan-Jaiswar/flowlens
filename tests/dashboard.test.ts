@@ -146,7 +146,13 @@ function apiResponse(path: string): unknown {
   }
   if (path.startsWith('/api/findings')) return projectFindings(scanned.graph);
   if (path.startsWith('/api/unused')) return projectUnused(scanned.graph);
-  if (path.startsWith('/api/database')) return databaseReport(scanned.graph, flows);
+  // As the server answers: the overview without cases, then one collection in full.
+  if (path.startsWith('/api/database/collection'))
+    return databaseReport(scanned.graph, flows, {
+      only: new URL(path, 'http://x').searchParams.get('name') ?? '',
+    }).collections[0];
+  if (path.startsWith('/api/database'))
+    return databaseReport(scanned.graph, flows, { scenarios: false });
   if (path.startsWith('/api/queries')) {
     const flow = flows.find(
       (candidate) => candidate.id === new URL(path, 'http://x').searchParams.get('flow'),
@@ -1764,14 +1770,26 @@ describe('the Database page', () => {
       true,
     );
     expect(health.some((text) => /no index/.test(text ?? ''))).toBe(true);
-    expect(
-      [...panel.querySelectorAll('.db-map-box')].map((box) =>
-        box.getAttribute('data-db-collection'),
-      ),
-    ).toEqual(expect.arrayContaining(['customers', 'orders']));
-    expect(panel.querySelector('.db-map-link.is-guess title')?.textContent).toContain(
+    // The map: a row per collection in its group; hovering one draws its links.
+    const mapRows = [...panel.querySelectorAll<HTMLElement>('.db-map2 .db-row2')];
+    expect(mapRows.map((row) => row.dataset.dbNode)).toEqual(
+      expect.arrayContaining(['customers', 'orders']),
+    );
+    const ordersRow = mapRows.find((row) => row.dataset.dbNode === 'orders')!;
+    ordersRow.dispatchEvent(new Event('mouseenter'));
+    expect(panel.querySelector('.db-map2-lines .is-guess title')?.textContent).toContain(
       'orders.customerId → customers',
     );
+    // …with the key each link is joined by, on the line and in words above the map.
+    expect(panel.querySelector('.db-map2-lines .is-guess text')?.textContent).toBe('customerId');
+    expect(panel.querySelector('[data-db-map-info]')?.textContent).toContain(
+      'points to customers by customerId',
+    );
+    expect(
+      panel.querySelector('.db-map2.has-focus .db-row2.is-linked')?.getAttribute('data-db-node'),
+    ).toBe('customers');
+    ordersRow.dispatchEvent(new Event('mouseleave'));
+    expect(panel.querySelector('.db-map2-lines path')).toBeNull();
 
     const search = panel.querySelector<HTMLInputElement>('[data-db-filter]')!;
     search.value = 'phone';
@@ -1788,6 +1806,10 @@ describe('the Database page', () => {
       (row) => !row.hidden,
     )!;
     expect(byLabel.querySelector('.db-field-hit')?.textContent).toContain('name (typed in as');
+    // The overview comes without each write's cases: they arrive for the collections the results are in.
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-db-results] .db-cases-loading')).toBeNull(),
+    );
     // …and the result says how the form field and the stored key connect.
     const result = panel.querySelector<HTMLElement>('[data-db-results] .db-result')!;
     expect(result.querySelector('.db-result-title')?.textContent).toContain('customers.name');

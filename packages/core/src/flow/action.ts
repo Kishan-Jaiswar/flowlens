@@ -23,7 +23,14 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { Node, SyntaxKind, type CallExpression, type IfStatement, type SourceFile } from 'ts-morph';
+import {
+  Node,
+  SyntaxKind,
+  type CallExpression,
+  type IfStatement,
+  type JsxElement,
+  type SourceFile,
+} from 'ts-morph';
 import type { Functionish } from '../analyzer/ast.js';
 import { DB_EFFECT_LABEL, type DbEffect } from '../analyzer/mongo.js';
 import type { FlowGraph } from '../graph/graph.js';
@@ -413,13 +420,24 @@ export function locateAction(
   };
 }
 
-function locatedContext(graph: FlowGraph, flow: FeatureFlow, reader: SourceReader): Ctx {
+function locatedContext(
+  graph: FlowGraph,
+  flow: FeatureFlow,
+  reader: SourceReader,
+  given?: readonly FeatureFlow[],
+): Ctx {
+  // Every flow in the project, resolved once and only when needed: the form readers call
+  // this once per action, and resolving all of them each time is quadratic.
+  let flows: FeatureFlow[] | undefined = given ? [...given] : undefined;
+  const all = () => (flows ??= resolveFlows(graph, { includeLocalOnly: true }));
   const ctx: Ctx = {
     graph,
     flow,
     reader,
-    apis: flowApis(graph, flow),
-    flows: resolveFlows(graph, { includeLocalOnly: true }),
+    apis: flowApis(graph, flow, all()),
+    get flows() {
+      return all();
+    },
     front: [],
     calls: [],
     frontSchemas: [],
@@ -841,6 +859,7 @@ interface FormFieldLabel {
   label?: string;
   required: boolean;
   line: number;
+  picked?: true;
 }
 
 export interface FormField {
@@ -850,6 +869,8 @@ export interface FormField {
   label?: string;
   required: boolean;
   at: SourcePoint;
+  /** Picked with buttons (`Increase / Decrease`), not typed into an input. */
+  picked?: true;
 }
 
 /** The inputs of the form an action submits, with the label each shows. */
@@ -857,8 +878,9 @@ export function formFieldsOf(
   graph: FlowGraph,
   flow: FeatureFlow,
   reader: SourceReader = new SourceReader(graph),
+  flows?: readonly FeatureFlow[],
 ): FormField[] {
-  const ctx = locatedContext(graph, flow, reader);
+  const ctx = locatedContext(graph, flow, reader, flows);
   const formFn = ctx.popup?.fn ?? ctx.formFn;
   if (!formFn) return [];
   const file = reader.point(formFn).file;
@@ -867,12 +889,20 @@ export function formFieldsOf(
     ...(entry.label ? { label: entry.label } : {}),
     required: entry.required,
     at: { file, line: entry.line },
+    ...(entry.picked ? { picked: true as const } : {}),
   }));
 }
 
+/** One form component serves many actions (add, edit, a dialog opened from three pages): read it once. */
+const LABELS = new WeakMap<object, Map<string, FormFieldLabel>>();
+
 /** `name` -> "Product name", required — from the JSX around each input. */
 function fieldLabels(fn: Functionish): Map<string, FormFieldLabel> {
+  // Keyed on the compiler's node, which outlives ts-morph's wrappers.
+  const cached = LABELS.get(fn.compilerNode);
+  if (cached) return cached;
   const labels = new Map<string, FormFieldLabel>();
+  LABELS.set(fn.compilerNode, labels);
   // `const [phone, setPhone] = useState("")` + `<input value={phone} />`
   const stateNames = new Set(
     fn
@@ -889,6 +919,15 @@ function fieldLabels(fn: Functionish): Map<string, FormFieldLabel> {
     if (nameAttr && literalText(nameAttr)) key = literalText(nameAttr);
     if (!key) {
       for (const attr of opening.getAttributes()) {
+        // react-hook-form: `<input {...register("first_name")} />`.
+        if (Node.isJsxSpreadAttribute(attr)) {
+          const registered = /\bregister\(\s*['"`]([\w.[\]]+)['"`]/.exec(attr.getText())?.[1];
+          if (registered) {
+            key = registered;
+            break;
+          }
+          continue;
+        }
         if (!Node.isJsxAttribute(attr)) continue;
         const name = attr.getNameNode().getText();
         if (
@@ -934,6 +973,40 @@ function fieldLabels(fn: Functionish): Map<string, FormFieldLabel> {
         if (attribute(parentOpening, 'required') !== null) required = true;
       }
     }
+    // `<label htmlFor="first_name">Patient's First Name</label><input id="first_name" …/>`,
+    // or the label element just before the input.
+    if (!label) {
+      const isLabel = (node: Node): node is JsxElement =>
+        Node.isJsxElement(node) &&
+        /^(label|Label|FormLabel|InputLabel)$/.test(
+          node.getOpeningElement().getTagNameNode().getText(),
+        );
+      const id = literalText(attribute(opening, 'id') ?? undefined);
+      const tied = id
+        ? fn
+            .getDescendantsOfKind(SyntaxKind.JsxElement)
+            .filter(isLabel)
+            .find(
+              (element) =>
+                literalText(attribute(element.getOpeningElement(), 'htmlFor') ?? undefined) === id,
+            )
+        : undefined;
+      const before = self
+        .getPreviousSiblings()
+        .reverse()
+        .find((node) => Node.isJsxElement(node));
+      const element = tied ?? (before && isLabel(before) ? before : undefined);
+      const words = element
+        ?.getJsxChildren()
+        .filter((child) => Node.isJsxText(child))
+        .map((child) => child.getText())
+        .join(' ')
+        .replace(/&apos;|&#39;/g, "'")
+        .replace(/&amp;/g, '&')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (words) label = words;
+    }
     if (!label) {
       const placeholder = attribute(opening, 'placeholder');
       const aria = attribute(opening, 'aria-label');
@@ -943,7 +1016,77 @@ function fieldLabels(fn: Functionish): Map<string, FormFieldLabel> {
     }
     labels.set(key, { ...(label ? { label } : {}), required, line: opening.getStartLineNumber() });
   }
+  for (const [key, entry] of pickedValues(fn)) if (!labels.has(key)) labels.set(key, entry);
   return labels;
+}
+
+/**
+ * Values the user picks with buttons rather than types:
+ *
+ *   {ACTIONS.map((a) => <button onClick={() => setAction(a.value)}>…)}
+ *   mutate({ actionType: action })
+ *
+ * keyed by what the form sends (`actionType`), labelled with the buttons' words
+ * from the list they are drawn from (`Increase / Decrease / Set to`).
+ */
+function pickedValues(fn: Functionish): Map<string, FormFieldLabel> {
+  // Most components draw no buttons from a list: the text says so without walking the tree.
+  const text = fn.getText();
+  if (!text.includes('useState') || !/\.map\(/.test(text) || !/\bon[A-Z]\w*=/.test(text))
+    return new Map();
+  const stateOf = new Map<string, string>();
+  for (const binding of fn.getDescendantsOfKind(SyntaxKind.ArrayBindingPattern)) {
+    if (!/useState/.test(binding.getParent()?.getText() ?? '')) continue;
+    const [value, setter] = binding.getElements();
+    if (value && setter && Node.isBindingElement(value) && Node.isBindingElement(setter))
+      stateOf.set(setter.getName(), value.getName());
+  }
+  const found = new Map<string, FormFieldLabel>();
+  for (const call of fn.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+    const state = stateOf.get(call.getExpression().getText());
+    const handler = call.getFirstAncestorByKind(SyntaxKind.JsxAttribute);
+    if (!state || !handler || !/^on[A-Z]/.test(handler.getNameNode().getText())) continue;
+    // Set from the item a list draws a button for: `a.value` inside `ACTIONS.map((a) => …)`.
+    const loop = handler.getFirstAncestor(
+      (node) => Node.isCallExpression(node) && /\.map$/.test(node.getExpression().getText()),
+    );
+    if (!loop || !Node.isCallExpression(loop)) continue;
+    const callee = loop.getExpression();
+    const list = Node.isPropertyAccessExpression(callee) ? callee.getExpression() : undefined;
+    // By name in the file, not `getSymbol()`: that builds the type checker for the whole project.
+    const declaration =
+      list && Node.isIdentifier(list)
+        ? fn
+            .getSourceFile()
+            .getDescendantsOfKind(SyntaxKind.VariableDeclaration)
+            .find((candidate) => candidate.getName() === list.getText())
+        : undefined;
+    const items =
+      declaration && Node.isVariableDeclaration(declaration)
+        ? declaration.getInitializer()
+        : undefined;
+    const words = (items && Node.isArrayLiteralExpression(items) ? items.getElements() : [])
+      .map((item) => {
+        const label = Node.isObjectLiteralExpression(item) ? item.getProperty('label') : undefined;
+        const value =
+          label && Node.isPropertyAssignment(label) ? label.getInitializer() : undefined;
+        return value && Node.isStringLiteral(value) ? value.getLiteralValue() : undefined;
+      })
+      .filter((word): word is string => word !== undefined);
+    // The key the value travels under: `actionType: action` in what the form sends.
+    const sent = fn
+      .getDescendantsOfKind(SyntaxKind.PropertyAssignment)
+      .find((property) => property.getInitializer()?.getText() === state);
+    const key = sent ? sent.getName() : state;
+    if (found.has(key)) continue;
+    found.set(key, {
+      ...(words.length ? { label: words.join(' / ') } : {}),
+      required: false,
+      line: handler.getStartLineNumber(),
+      picked: true,
+    });
+  }
+  return found;
 }
 
 /** `"Product name"`, or the words in `{stockLabel?.label ?? "Quantity"}`. */

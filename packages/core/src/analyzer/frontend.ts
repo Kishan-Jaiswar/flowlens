@@ -505,6 +505,12 @@ function linkPopupFeatures(graph: FlowGraph, loaded: LoadedProject): void {
       if (names.length === 0) continue;
       // What opens it: a click here that sets one of those states to something.
       const openers = own.filter((action) => {
+        // `onClose={() => handleClosePopup(false)}`, a Cancel button: a close, whatever its setter is given.
+        if (
+          /^on(Close|Cancel|Hide|Dismiss)$/.test(String(action.meta?.['event'] ?? '')) ||
+          /^(close|cancel|dismiss|hide|back)\b/i.test(action.label)
+        )
+          return false;
         const handler = graph.successors(action.id, ['triggers'])[0];
         // Its own handler, or the one it calls: `onClick={() => handleUpdatePayment(bill)}`.
         const handlers = handler
@@ -1419,15 +1425,22 @@ function componentEventMeta(
   const init = attribute.getInitializer();
   const handler = init && Node.isJsxExpression(init) ? init.getExpression() : undefined;
   const bodies: Node[] = handler ? [handler] : [];
-  if (handler && Node.isIdentifier(handler)) {
-    const local = declared.find((candidate) => candidate.name === handler.getText());
-    if (local) bodies.push(local.node);
+  // The local function it names — directly, or handed to a wrapper: `handleSubmit(onSubmit)`.
+  const named = handler
+    ? [handler, ...handler.getDescendantsOfKind(SyntaxKind.Identifier)].filter((node) =>
+        Node.isIdentifier(node),
+      )
+    : [];
+  for (const name of named) {
+    const local = declared.find((candidate) => candidate.name === name.getText());
+    if (local && !bodies.includes(local.node)) bodies.push(local.node);
   }
   const called = new Set<string>();
   for (const body of bodies) {
     for (const call of body.getDescendantsOfKind(SyntaxKind.CallExpression)) {
       const prop = props.get(call.getExpression().getText());
-      if (prop && /^on[A-Z]/.test(prop)) called.add(prop);
+      // Any prop the click calls is a callback — `onSave`, or `action(data)`; a render prop is not.
+      if (prop && !/^render([A-Z]|$)/.test(prop)) called.add(prop);
     }
   }
   if (called.size) meta['callsProps'] = [...called];
@@ -1651,6 +1664,21 @@ function analyzeFrontendFile(
         // An owner that makes a request is real, whatever kind it is.
         owner?.ensure();
         linkApiCall(graph, owner?.id, request, rel, call);
+      }
+      // `url: relative ? archiveRelative(p, r) : archivePatient(p)`: the other side is a request too.
+      const other = otherSidePath(call, config);
+      if (other && other !== request.rawPath) {
+        const second = buildRequest(request.method, other, undefined, config, request.client);
+        if (isConcreteEndpoint(second)) {
+          owner?.ensure();
+          linkApiCall(
+            graph,
+            owner?.id,
+            { ...second, payloadKeys: request.payloadKeys, payloadSources: request.payloadSources },
+            rel,
+            call,
+          );
+        }
       }
       continue;
     }
@@ -2783,6 +2811,25 @@ export interface DetectedRequest {
   /** Query-string parameter names: `?page=1&size=20` -> ['page', 'size']. */
   queryKeys: string[];
   client: string;
+}
+
+/**
+ * The URL on the other side of a conditional one — `readPathLike` keeps the
+ * first readable side as the call's own; this is the second.
+ */
+function otherSidePath(call: CallExpression, config: FrontendConfig): string | undefined {
+  const [first] = call.getArguments();
+  const options = asObjectLiteral(first);
+  const value = options
+    ? config.urlKeys.map((key) => propertyValue(options, key)).find((v) => v !== undefined)
+    : first;
+  let node = value;
+  while (node && Node.isParenthesizedExpression(node)) node = node.getExpression();
+  if (!node || !Node.isConditionalExpression(node)) return undefined;
+  const resolve = config.resolveConstant;
+  const whenTrue = readPathLike(node.getWhenTrue(), resolve);
+  const whenFalse = readPathLike(node.getWhenFalse(), resolve);
+  return whenTrue !== undefined ? whenFalse : undefined;
 }
 
 /**

@@ -1,7 +1,16 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Node, SyntaxKind, type CallExpression, type SourceFile, type TypeNode } from 'ts-morph';
 import type { FlowGraph } from '../graph/graph.js';
 import { ids } from '../graph/ids.js';
-import { calleeMember, calleeReceiver, enclosingFunction, functionName, lineOf } from './ast.js';
+import {
+  calleeMember,
+  calleeReceiver,
+  declarationOf,
+  enclosingFunction,
+  functionName,
+  lineOf,
+} from './ast.js';
 import { collectionFor, type CollectionAliases } from './dbaccess.js';
 import type { LoadedProject } from './project.js';
 
@@ -26,6 +35,10 @@ export interface DatabaseName {
   name: string;
   /** True when `name` is an environment variable, not the database's own name. */
   env?: boolean;
+  /** The database's own name, read from the project's env file: `pharma-dev`. */
+  value?: string;
+  /** The env file it was read from: `.env.local`. */
+  from?: string;
 }
 
 export interface CollectionIndex {
@@ -352,7 +365,7 @@ class DatabaseResolver {
   private readonly callers = new Map<string, CallExpression[]>();
 
   constructor(
-    loaded: LoadedProject,
+    private readonly loaded: LoadedProject,
     private readonly functions: Map<string, FunctionLike>,
   ) {
     for (const file of loaded.sourceFiles) {
@@ -377,7 +390,7 @@ class DatabaseResolver {
     if (made) return this.nameOf(made.getArguments()[0], depth + 1);
 
     if (Node.isIdentifier(expr)) {
-      const declaration = expr.getSymbol()?.getDeclarations()[0];
+      const declaration = declarationOf(expr);
       if (declaration && Node.isVariableDeclaration(declaration))
         return this.of(declaration.getInitializer(), depth + 1);
       if (declaration && Node.isParameterDeclaration(declaration))
@@ -411,6 +424,12 @@ class DatabaseResolver {
     return agreed(calls.map((call) => this.of(call.getArguments()[index], depth)));
   }
 
+  /** An env variable naming a database, with the name it holds in the project's env files. */
+  private envName(name: string): DatabaseName {
+    const found = envValue(this.loaded.roots, name);
+    return { name, env: true, ...found };
+  }
+
   /** `"pharma"`, `process.env.CLINICS_DB`, `requireEnv("CLINICS_DB")`, `process.env.X || "dev"`. */
   private nameOf(node: Node | undefined, depth: number): DatabaseName | undefined {
     if (!node || depth > MAX_DEPTH) return undefined;
@@ -420,14 +439,14 @@ class DatabaseResolver {
     const env = /\bprocess\.env(?:\.([A-Za-z_]\w*)|\[\s*['"`]([A-Za-z_]\w*)['"`]\s*\])/.exec(
       expr.getText(),
     );
-    if (env) return { name: (env[1] ?? env[2])!, env: true };
+    if (env) return this.envName((env[1] ?? env[2])!);
     if (Node.isBinaryExpression(expr)) return this.nameOf(expr.getLeft(), depth + 1);
     if (Node.isCallExpression(expr)) {
       const args = expr.getArguments();
       const only = args.length === 1 ? args[0] : undefined;
       // `requireEnv("CLINICS_DB")`: a helper that reads the variable it is given.
       if (only && Node.isStringLiteral(only) && /env/i.test(expr.getExpression().getText()))
-        return { name: only.getLiteralValue(), env: true };
+        return this.envName(only.getLiteralValue());
       // `name.trim()`
       const callee = expr.getExpression();
       return Node.isPropertyAccessExpression(callee)
@@ -435,12 +454,45 @@ class DatabaseResolver {
         : undefined;
     }
     if (Node.isIdentifier(expr)) {
-      const declaration = expr.getSymbol()?.getDeclarations()[0];
+      const declaration = declarationOf(expr);
       if (declaration && Node.isVariableDeclaration(declaration))
         return this.nameOf(declaration.getInitializer(), depth + 1);
     }
     return undefined;
   }
+}
+
+/**
+ * Where a project keeps its development settings, in the order Next.js and
+ * dotenv read them; the example file last, as the fallback a fresh clone has.
+ */
+const ENV_FILES = [
+  '.env.local',
+  '.env.development.local',
+  '.env.development',
+  '.env',
+  '.env.example',
+];
+
+/**
+ * The value one variable has in the project's env files. Only that variable is
+ * read and kept: the same files hold credentials, which must never reach the graph.
+ */
+function envValue(roots: string[], name: string): { value: string; from: string } | undefined {
+  if (!/^[A-Za-z_]\w*$/.test(name)) return undefined;
+  const line = new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=\\s*(.*)$`, 'm');
+  for (const root of roots)
+    for (const file of ENV_FILES) {
+      const path = join(root, file);
+      if (!existsSync(path)) continue;
+      const raw = line.exec(readFileSync(path, 'utf8'))?.[1]?.trim();
+      if (!raw) continue;
+      // `"pharma-dev" # comment` → `pharma-dev`; unquoted, the comment still ends it.
+      const quoted = /^(['"])(.*?)\1/.exec(raw);
+      const value = quoted ? quoted[2]! : raw.replace(/\s+#.*$/, '');
+      if (value) return { value, from: file };
+    }
+  return undefined;
 }
 
 function unwrap(node: Node): Node {
@@ -517,13 +569,17 @@ function declareIndexes(loaded: LoadedProject, graph: FlowGraph, aliases: Collec
     const rel = loaded.rel(file);
     for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
       const member = calleeMember(call);
-      if (member !== 'createIndex' && member !== 'createIndexes') continue;
+      if (member !== 'createIndex' && member !== 'createIndexes' && member !== 'index') continue;
       const receiver = calleeReceiver(call);
-      const collection = receiver && collectionFor(receiver, file, aliases);
+      // `OrderSchema.index({ doctor_id: 1 })`: a Mongoose schema's own index, on its model's collection.
+      const collection =
+        member === 'index'
+          ? schemaCollection(receiver, file, graph)
+          : receiver && collectionFor(receiver, file, aliases);
       if (!collection || !graph.node(ids.collection(collection))) continue;
       const [first, second] = call.getArguments();
       const specs: Array<[Node | undefined, Node | undefined]> =
-        member === 'createIndex'
+        member === 'createIndex' || member === 'index'
           ? [[first, second]]
           : first && Node.isArrayLiteralExpression(first)
             ? first.getElements().map((element) => {
@@ -550,6 +606,31 @@ function declareIndexes(loaded: LoadedProject, graph: FlowGraph, aliases: Collec
     const node = graph.node(ids.collection(collection))!;
     graph.addNode({ ...node, meta: { ...node.meta, indexes } });
   }
+}
+
+/**
+ * The collection a Mongoose schema variable belongs to: `SchemaFactory.createForClass(Order)`
+ * (named the way the Nest pass names the model), or a `new Schema(…)` handed to `model('Order', …)`.
+ */
+function schemaCollection(
+  receiver: string | undefined,
+  file: SourceFile,
+  graph: FlowGraph,
+): string | undefined {
+  if (!receiver || !/^[A-Za-z_$][\w$]*$/.test(receiver)) return undefined;
+  const init = file.getVariableDeclaration(receiver)?.getInitializer()?.getText() ?? '';
+  let model = /createForClass\(\s*([A-Za-z_$][\w$]*)\s*\)/
+    .exec(init)?.[1]
+    ?.replace(/(Schema|Document|Entity)$/, '');
+  if (!model && /\bnew\s+(?:mongoose\.)?Schema\b/.test(init)) {
+    const registered = file
+      .getDescendantsOfKind(SyntaxKind.CallExpression)
+      .find((c) => calleeMember(c) === 'model' && c.getArguments()[1]?.getText() === receiver);
+    const name = registered?.getArguments()[0];
+    model = name && Node.isStringLiteral(name) ? name.getLiteralValue() : undefined;
+  }
+  const collection = model ? graph.node(ids.model(model))?.meta?.['collection'] : undefined;
+  return typeof collection === 'string' ? collection : undefined;
 }
 
 function indexOf(

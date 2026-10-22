@@ -363,7 +363,11 @@ function groupBy<T>(items: readonly T[], key: (item: T) => string): T[][] {
 
 const keyOf = (when: readonly ScenarioCondition[]): string =>
   when
-    .map((c) => `${c.holds ? '' : '!'}${subjectOf(c)}`)
+    // `!(a && b)`, never `!a && b`: the whole condition is what does not hold.
+    .map((c) => {
+      const subject = subjectOf(c);
+      return c.holds ? subject : /[\s&|?]/.test(subject) ? `!(${subject})` : `!${subject}`;
+    })
     .sort()
     .join('&');
 

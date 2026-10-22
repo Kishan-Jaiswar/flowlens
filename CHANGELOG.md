@@ -19,6 +19,26 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that touches it with file and line, and its links both ways — a link the code
   states kept apart from one guessed from a field name. Read from the source
   only: no database connection (`/api/database`, `databaseReport()`).
+- **The Database page works and reads true on a large NestJS + Next.js app.** Built
+  for an 82-collection, 1,100-query backend: no type checker is built to resolve a
+  name (memory 2 GB → 0.7 GB), flows are resolved once per report, and the overview
+  arrives without each write's cases, which load when a collection is opened
+  (`/api/database/collection`; `databaseReport({ scenarios: false, only })`). The map
+  groups collections by the folder their schemas live in, or by database, each row
+  with its links; hovering one draws them with the key each is joined by. Read now:
+  `ref: Model.name`, `Schema.index()`, schema `default` and `timestamps`, imported
+  enums, only registered schemas as collections, a handle's `.collection('x')`, a
+  model picked into a variable or passed in, `new Model(dto)` only when saved, legacy
+  `Model.update()`, a loaded document's own writes, upserts as adding, soft deletes as
+  removing, aggregation `$match`/`$sort` (and a `$lookup` pipeline's `$match` on the
+  joined collection), pipelines and payloads a caller builds, reassigned and copied
+  objects, react-hook-form `register()` inputs with their `<label>`, values picked
+  with buttons, URL-building functions and both sides of a conditional URL, and
+  callbacks passed as any prop. Each query says what runs it — a user, a job, every
+  request, a live connection, an endpoint, a script, or nothing. The owner check
+  covers only what a signed-in user can set off, after no ownership lookup, on
+  collections scoped as a rule; "shown on screen" leaves out handlers, keys, filters
+  and payloads; a close button no longer opens its popup.
 - **The Database page checks the data, draws it, and shows a record.** A health
   check lists what is worth fixing, in words: queries that skip the owner filter
   (the `flowlens findings` tenant check, with its severity and who runs the query),

@@ -64,6 +64,8 @@ import { browserTracerFile, dashboardDir, graphPath, saveGraph, tracePath } from
 import { color } from '../ui.js';
 
 const DATABASE_REPORTS = new WeakMap<FlowGraph, DatabaseReport>();
+/** Collections opened in full, by name, per loaded graph. */
+const DATABASE_COLLECTIONS = new WeakMap<FlowGraph, Map<string, unknown>>();
 
 export interface ServeArgs {
   root: string;
@@ -653,14 +655,58 @@ export function runServe(args: ServeArgs): number {
       if (!report) {
         reader ??= new SourceReader(graph);
         findings ??= projectFindings(graph, { reader });
+        // Without each write's cases: the slowest, largest part, read when a collection is opened.
         report = databaseReport(graph, resolveFlows(graph, { includeLocalOnly: true }), {
           reader,
           findings,
+          scenarios: false,
           ...(args.relations ? { relations: args.relations } : {}),
         });
         DATABASE_REPORTS.set(graph, report);
       }
       sendJson(response, report);
+      return;
+    }
+
+    /** One collection in full, its cases included: what the Database page opens. */
+    if (path === '/api/database/collection') {
+      const name = url.searchParams.get('name') ?? '';
+      const opened = DATABASE_COLLECTIONS.get(graph) ?? new Map<string, unknown>();
+      DATABASE_COLLECTIONS.set(graph, opened);
+      if (!opened.has(name)) {
+        reader ??= new SourceReader(graph);
+        findings ??= projectFindings(graph, { reader });
+        const [collection] = databaseReport(
+          graph,
+          resolveFlows(graph, { includeLocalOnly: true }),
+          {
+            reader,
+            findings,
+            only: name,
+            ...(args.relations ? { relations: args.relations } : {}),
+          },
+        ).collections;
+        // Lookups other collections' `$lookup` pipelines make on this one are read with the
+        // whole report: carried over from the overview, which has them.
+        const overview = DATABASE_REPORTS.get(graph)?.collections.find((c) => c.name === name);
+        if (collection && overview) {
+          const own = new Set(collection.operations.map((op) => op.nodeId));
+          for (const field of overview.fields) {
+            const foreign = field.lookups.filter((lookup) => !own.has(lookup.nodeId));
+            if (!foreign.length) continue;
+            const target = collection.fields.find((f) => f.name === field.name);
+            if (target) target.lookups.push(...foreign);
+            else collection.fields.push({ ...field, lookups: foreign });
+          }
+        }
+        opened.set(name, collection ?? null);
+      }
+      const collection = opened.get(name);
+      if (!collection) {
+        sendJson(response, { error: `no collection named "${name}"` }, 404);
+        return;
+      }
+      sendJson(response, collection);
       return;
     }
 

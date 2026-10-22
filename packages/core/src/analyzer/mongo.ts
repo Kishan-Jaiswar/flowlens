@@ -77,10 +77,13 @@ export const DB_OPERATIONS: Record<string, DbEffect> = {
   findOneAndUpdate: 'update',
   findByIdAndUpdate: 'update',
   findOneAndReplace: 'update',
+  // `Model.update(filter, changes)`: deprecated, still common in older code.
+  update: 'update',
   // deletes
   findOneAndDelete: 'delete',
   findByIdAndDelete: 'delete',
   findByIdAndRemove: 'delete',
+  findOneAndRemove: 'delete',
   deleteOne: 'delete',
   deleteMany: 'delete',
   remove: 'delete',

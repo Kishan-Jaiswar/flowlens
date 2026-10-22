@@ -214,6 +214,334 @@ describe('fields of a raw-driver collection, read from its queries', () => {
   });
 });
 
+describe('a Nest backend: models picked at run time, sub-documents, defaults, named handles', () => {
+  const project = mkdtempSync(join(tmpdir(), 'flowlens-database-'));
+  const write = (file: string, text: string) => {
+    mkdirSync(join(project, file, '..'), { recursive: true });
+    writeFileSync(join(project, file), text);
+  };
+  write(
+    'package.json',
+    JSON.stringify({ dependencies: { '@nestjs/core': '9.0.0', mongoose: '6.0.0' } }),
+  );
+  write(
+    'src/emr/emr.schema.ts',
+    `import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+     @Schema() export class Line { @Prop() text: string; }
+     export const LineSchema = SchemaFactory.createForClass(Line);
+     /** A piece of advice a doctor gives. More words. */
+     @Schema({ timestamps: { createdAt: 'created_at' } })
+     export class Advice { @Prop() advice: string; @Prop({ default: Date.now }) given_at: Date; @Prop() created_at: Date; @Prop({ type: [LineSchema] }) lines: Line[]; }
+     @Schema() export class Symptom { @Prop() name: string; }
+     @Schema() export class Unused { @Prop() name: string; }`,
+  );
+  write(
+    'src/emr/emr.module.ts',
+    `import { MongooseModule } from '@nestjs/mongoose';
+     import { Advice, Symptom } from './emr.schema';
+     export const imports = [MongooseModule.forFeature([{ name: Advice.name, schema: {} }, { name: Symptom.name, schema: {} }])];`,
+  );
+  write(
+    'src/emr/emr.service.ts',
+    `import { Injectable } from '@nestjs/common';
+     import { InjectModel } from '@nestjs/mongoose';
+     import { Advice, Symptom } from './emr.schema';
+     @Injectable()
+     export class EmrService {
+       constructor(
+         @InjectModel(Advice.name) private advice: Model<Advice>,
+         @InjectModel(Symptom.name) private symptoms: Model<Symptom>,
+       ) {}
+       async search(category: string) {
+         let model;
+         if (category === 'advice') model = this.advice;
+         else model = this.symptoms;
+         return model.find({});
+       }
+       async save(data) { return this.findOrCreate(data, this.advice); }
+       async findOrCreate(data, model) { return model.findOne({ name: data.name }); }
+     }`,
+  );
+  write(
+    'scripts/backfill.js',
+    `const mongoose = require('mongoose');
+     async function main() {
+       const collection = mongoose.connection.collection('advices');
+       await collection.updateMany({}, { $set: { advice: '' } });
+     }`,
+  );
+  write(
+    'src/emr/visit.schema.ts',
+    `import { Prop, Schema } from '@nestjs/mongoose';
+     import { Advice } from './emr.schema';
+     import { VisitKinds } from './kinds';
+     @Schema() export class Visit { @Prop({ ref: Advice.name }) advice_ref: string; @Prop() visit_id: string; @Prop({ enum: VisitKinds }) kind: string; @Prop() is_active: boolean; }`,
+  );
+  write('src/emr/kinds.ts', `export enum VisitKinds { first = 'first', follow = 'follow' }`);
+  write(
+    'src/emr/visit.list.service.ts',
+    `import { Injectable } from '@nestjs/common';
+     import { InjectModel } from '@nestjs/mongoose';
+     @Injectable()
+     export class VisitListService {
+       constructor(@InjectModel(Visit.name) private visits: Model<Visit>) {}
+       async run(query) { return this.visits.aggregate(query); }
+       async list() {
+         const stages = [{ $sort: { kind: -1 } }];
+         let query = [{ $match: { visit_id: 'a' } }];
+         query = [...query, ...stages];
+         return this.run(query);
+       }
+       async hide(id) { return this.visits.updateOne({ visit_id: id }, { $set: { is_active: false } }); }
+     }`,
+  );
+  write(
+    'src/emr/visit.module.ts',
+    `export const imports = [MongooseModule.forFeature([{ name: Visit.name, schema: {} }])];`,
+  );
+  write(
+    'src/emr/visit.service.ts',
+    `import { Injectable } from '@nestjs/common';
+     import { InjectModel } from '@nestjs/mongoose';
+     import { Cron } from '@nestjs/schedule';
+     @Injectable()
+     export class VisitService {
+       constructor(@InjectModel(Visit.name) private visits: Model<Visit>, @InjectModel(Advice.name) private advice: Model<Advice>) {}
+       async add(dto) { const visit = new this.visits(dto); visit.visit_id = 'v1'; await visit.save(); }
+       async token(user) { return new this.visits(user); }
+       async counts(id) { return this.visits.find({ advice_ref: new this.visits.base.Types.ObjectId(id) }); }
+       async legacy() { return this.visits.update({ visit_id: 'a' }, { visit_id: 'b' }); }
+       async withAdvice() {
+         return this.advice.aggregate([{ $lookup: { from: 'visits', localField: '_id', foreignField: 'advice_ref', as: 'visits' } }]);
+       }
+       @Cron('0 * * * *') async nightly() { return this.visits.deleteMany({}); }
+       async orphan() { return this.visits.countDocuments({}); }
+     }
+     @Injectable()
+     export class JwtStrategy extends PassportStrategy(Strategy) {
+       constructor(@InjectModel(Visit.name) private visits: Model<Visit>) { super(); }
+       async validate(payload) { return this.visits.findOne({ visit_id: payload.id }); }
+     }`,
+  );
+  const { graph } = scan({ root: project });
+  const report = databaseReport(graph, [], { scenarios: false });
+  const named = (name: string) => report.collections.find((entry) => entry.name === name);
+
+  it('reads a ref written as `Model.name`, and a $lookup from the side that holds the id', () => {
+    const links = named('visits')!.references.map((r) => `${r.field}>${r.to}:${r.via}`);
+    // Stated twice — the schema's ref and the join — and read from the visits side both times.
+    expect(links).toEqual([expect.stringMatching(/^advice_ref>advices:(declared|lookup)$/)]);
+    expect(named('advices')!.references).toEqual([]);
+  });
+
+  it('counts `new Model(dto)` only when it is saved, with what it was built from', () => {
+    const saves = named('visits')!.operations.filter((op) => op.operation === 'save');
+    expect(saves.map((op) => op.method)).toEqual(['VisitService.add']);
+    expect(named('visits')!.operations.map((op) => op.operation)).toContain('update');
+  });
+
+  it('reads an enum from the file it is imported from', () => {
+    expect(named('visits')!.fields.find((f) => f.name === 'kind')!.enumValues).toEqual([
+      'first',
+      'follow',
+    ]);
+  });
+
+  it('reads a pipeline a caller builds, reassignments and spreads included', () => {
+    const kind = named('visits')!.fields.find((f) => f.name === 'kind')!;
+    expect(kind.sorts.map((s) => s.in)).toContain('run');
+    const visitId = named('visits')!.fields.find((f) => f.name === 'visit_id')!;
+    expect(visitId.lookups.map((l) => l.in)).toContain('run');
+  });
+
+  it('calls an update that only hides the record a soft delete', () => {
+    const hide = named('visits')!.operations.find((op) => op.method === 'VisitListService.hide')!;
+    expect(hide.softDelete).toBe(true);
+  });
+
+  it('says what runs a query no user reaches: a timer, every request, or nothing', () => {
+    const runBy = (method: string) =>
+      named('visits')!.operations.find((op) => op.method === method)?.runBy;
+    expect(runBy('VisitService.nightly')).toBe('job');
+    expect(runBy('JwtStrategy.validate')).toBe('request');
+    expect(runBy('VisitService.orphan')).toBe('unused');
+  });
+
+  it('files a query on a model picked into a variable or passed as a parameter on each model it can be', () => {
+    expect(named('advices')!.operations.map((op) => op.method)).toEqual(
+      expect.arrayContaining(['EmrService.search', 'EmrService.findOrCreate']),
+    );
+    expect(named('symptoms')!.operations.map((op) => op.method)).toContain('EmrService.search');
+  });
+
+  it('keeps a schema nothing registers out of the collections: a sub-document, or unused', () => {
+    expect(report.collections.map((entry) => entry.name).sort()).toEqual([
+      'advices',
+      'symptoms',
+      'visits',
+    ]);
+  });
+
+  it('reads the collection a named handle holds, not the variable name', () => {
+    expect(named('collections')).toBeUndefined();
+    expect(named('advices')!.operations.map((op) => op.operation)).toContain('updateMany');
+  });
+
+  it('reads defaults and timestamps, and the schema comment', () => {
+    const field = (name: string) => named('advices')!.fields.find((f) => f.name === name)!;
+    expect(field('given_at').defaultValue).toBe('Date.now');
+    expect(field('created_at').defaultValue).toMatch(/timestamps/);
+    expect(field('created_at').unused).toBeUndefined();
+    expect(named('advices')!.description).toBe('A piece of advice a doctor gives.');
+  });
+});
+
+describe('a value picked with buttons, and a filter only inside $or', () => {
+  const project = mkdtempSync(join(tmpdir(), 'flowlens-database-'));
+  const write = (file: string, text: string) => {
+    mkdirSync(join(project, file, '..'), { recursive: true });
+    writeFileSync(join(project, file), text);
+  };
+  write('package.json', JSON.stringify({ dependencies: { next: '15.0.0', react: '19.0.0' } }));
+  write(
+    'lib/urls.ts',
+    `export const archiveStock = (id) => \`/api/stock/\${id}/archive\`;
+     export const restoreStock = "/api/stock/restore ";`,
+  );
+  write(
+    'app/stock/archive.tsx',
+    `'use client';
+     import { archiveStock, restoreStock } from '../../lib/urls';
+     export function ArchiveButton({ id, undo }) {
+       return <button onClick={() => fetch(undo ? restoreStock : archiveStock(id), { method: 'POST' })}>Archive</button>;
+     }`,
+  );
+  write(
+    'app/stock/page.tsx',
+    `'use client';
+     import { useState } from 'react';
+     const ACTIONS = [{ value: 'increase', label: 'Increase' }, { value: 'decrease', label: 'Decrease' }];
+     export default function StockPage() {
+       const [action, setAction] = useState('increase');
+       const [qty, setQty] = useState('');
+       async function save() {
+         await fetch('/api/stock', { method: 'POST', body: JSON.stringify({ actionType: action, quantity: qty }) });
+       }
+       return (
+         <div>
+           {ACTIONS.map((a) => (<button key={a.value} onClick={() => setAction(a.value)}>{a.label}</button>))}
+           <label>Quantity<input value={qty} onChange={(e) => setQty(e.target.value)} /></label>
+           <button onClick={save}>Save</button>
+         </div>
+       );
+     }`,
+  );
+  write(
+    'app/api/stock/route.ts',
+    `import { record } from '../../../lib/store';
+     export async function POST(request: Request) {
+       const body = await request.json();
+       await record('clinic-1', body);
+       return Response.json({ ok: true });
+     }`,
+  );
+  // A signed-in route runs the backfill: the tenant check only covers what a user can set off.
+  write(
+    'app/api/forms/route.ts',
+    `import { backfill } from '../../../lib/store';
+     import { requireAuth } from '../../../lib/auth';
+     export async function GET(request: Request) {
+       await requireAuth(request);
+       return Response.json(await backfill());
+     }`,
+  );
+  write(
+    'lib/store.ts',
+    `import { db } from './db';
+     const movements = db.collection('movements');
+     const medicines = db.collection('medicines');
+     export async function record(ownerId: string, input: { actionType: string; quantity: number }) {
+       await movements.insertOne({ ownerId, actionType: input.actionType, quantity: input.quantity });
+     }
+     export async function list(ownerId: string) { return movements.find({ ownerId }).toArray(); }
+     export async function count(ownerId: string) { return movements.countDocuments({ ownerId }); }
+     export async function stock(ownerId: string) { return medicines.find({ ownerId }).toArray(); }
+     export async function one(ownerId: string, id: string) { return medicines.findOne({ ownerId, id }); }
+     export async function backfill() {
+       return medicines.find({ $or: [{ form: { $exists: false } }, { form: '' }] }).toArray();
+     }`,
+  );
+  const { graph } = scan({ root: project });
+  const report = databaseReport(graph, resolveFlows(graph, { includeLocalOnly: true }));
+  const named = (name: string) => report.collections.find((entry) => entry.name === name)!;
+
+  it('reads a URL a function builds, one with a stray space, and both sides of a conditional one', () => {
+    const calls = graph.nodesOfKind('api-call').map((node) => node.label);
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        'POST /stock/restore',
+        expect.stringMatching(/^POST \/stock\/:\w+\/archive$/),
+      ]),
+    );
+  });
+
+  it('says a value is picked with buttons, labelled with their words', () => {
+    const action = named('movements').fields.find((field) => field.name === 'actionType')!;
+    expect(action.enteredIn).toContainEqual(
+      expect.objectContaining({
+        kind: 'form',
+        picked: true,
+        label: 'Increase / Decrease',
+        key: 'actionType',
+      }),
+    );
+  });
+
+  it('names the keys a filter matches inside $or, not "no filter at all"', () => {
+    const unscoped = named('medicines').unscoped?.find((q) => q.method === 'backfill');
+    expect(unscoped?.why).toContain('matches only on `form` inside `$or`');
+  });
+});
+
+describe('a filter and a sort built from what the user picks', () => {
+  it('keeps a key searched inside $or apart from the same key matched exactly, and reads a picked sort key', () => {
+    const project = mkdtempSync(join(tmpdir(), 'flowlens-database-'));
+    mkdirSync(join(project, 'lib'), { recursive: true });
+    writeFileSync(
+      join(project, 'lib', 'store.ts'),
+      `import { db } from './db';
+       const items = db.collection('items');
+       type SortField = 'name' | 'price';
+       interface Query { search?: string; form?: string; sortBy?: SortField }
+       function filterOf(query: Query) {
+         const filter: Record<string, unknown> = {};
+         if (query.search) filter.$or = [{ name: { $regex: query.search } }, { form: { $regex: query.search } }];
+         if (query.form) filter.form = query.form;
+         return filter;
+       }
+       export async function list(query: Query) {
+         const sortBy = query.sortBy ?? 'updatedAt';
+         return items.find(filterOf(query)).sort({ [sortBy]: -1 }).toArray();
+       }`,
+    );
+    const items = databaseReport(scan({ root: project }).graph, []).collections.find(
+      (c) => c.name === 'items',
+    )!;
+    const field = (name: string) => items.fields.find((entry) => entry.name === name)!;
+    expect(
+      field('form')
+        .lookups.map((l) => l.match ?? 'equals')
+        .sort(),
+    ).toEqual(['equals', 'search']);
+    expect(
+      items.fields
+        .filter((f) => f.sorts.length)
+        .map((f) => f.name)
+        .sort(),
+    ).toEqual(['name', 'price', 'updatedAt']);
+  });
+});
+
 describe('everything about one field, read the way a reviewer would', () => {
   const project = mkdtempSync(join(tmpdir(), 'flowlens-database-'));
   mkdirSync(join(project, 'src'), { recursive: true });
@@ -395,6 +723,8 @@ describe('a native-driver project: its types, databases, indexes and links', () 
     writeFileSync(join(project, file), text);
   };
   write('package.json', JSON.stringify({ dependencies: { mongodb: '6.0.0', bullmq: '5.0.0' } }));
+  // The database name lives in the env file, next to a credential that must never be read.
+  write('.env', 'MONGODB_URI="mongodb://user:secret@host"\nAPP_DB="app-dev" # the app database\n');
   write(
     'types/index.ts',
     `export type Status = 'active' | 'inactive';
@@ -483,7 +813,10 @@ describe('a native-driver project: its types, databases, indexes and links', () 
   });
 
   it('names the database each collection and each query is in', () => {
-    expect(named('items').databases).toEqual([{ name: 'APP_DB', env: true }]);
+    expect(named('items').databases).toEqual([
+      { name: 'APP_DB', env: true, value: 'app-dev', from: '.env' },
+    ]);
+    expect(JSON.stringify(graph.toJSON())).not.toContain('secret');
     expect(
       named('endpoints')
         .databases?.map((db) => db.name)
