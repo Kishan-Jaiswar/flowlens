@@ -1797,8 +1797,14 @@ describe('the Database page', () => {
     const shown = [...panel.querySelectorAll<HTMLElement>('[data-db-row]')].filter(
       (row) => !row.hidden,
     );
-    expect(shown.map((row) => row.querySelector('button')?.textContent)).toEqual(['customers']);
+    // The map's own rows are what a search narrows: the collection that has it, and its group.
+    expect(shown.map((row) => row.dataset.dbNode)).toEqual(['customers']);
     expect(shown[0]!.querySelector('.db-field-hit')?.textContent).toBe('Has phone');
+    expect(
+      [...panel.querySelectorAll<HTMLElement>('.db-group2')].filter((group) => !group.hidden),
+    ).toHaveLength(1);
+    // No second list of the same collections below the map.
+    expect(panel.querySelector('.db-card')).toBeNull();
     // A form label finds the field it is saved into.
     search.value = 'full name';
     search.dispatchEvent(new Event('input'));
@@ -1856,12 +1862,6 @@ describe('the Database page', () => {
     search.value = 'phone';
     search.dispatchEvent(new Event('input'));
 
-    // A count tile opens its collection on that box, picked out.
-    panel
-      .querySelector<HTMLElement>('[data-db-collection="customers"][data-db-life="create"]')!
-      .click();
-    expect(panel.querySelector('.db-life.effect-create.is-picked [data-goto-flow]')).not.toBeNull();
-    panel.querySelector<HTMLElement>('[data-db-collection=""]')!.click();
     panel.querySelector<HTMLElement>('[data-db-collection="orders"]')!.click();
     const text = panel.textContent ?? '';
     expect(text).toContain('no schema checks it');

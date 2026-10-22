@@ -19,6 +19,10 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that touches it with file and line, and its links both ways — a link the code
   states kept apart from one guessed from a field name. Read from the source
   only: no database connection (`/api/database`, `databaseReport()`).
+- **The Database overview is the map alone.** The per-collection cards below it
+  repeated what opening a collection shows; the search now narrows the map's rows
+  (and hides empty groups), and the hover strip keeps one height so a long link
+  list no longer makes the map jump.
 - **The Database page works and reads true on a large NestJS + Next.js app.** Built
   for an 82-collection, 1,100-query backend: no type checker is built to resolve a
   name (memory 2 GB → 0.7 GB), flows are resolved once per report, and the overview

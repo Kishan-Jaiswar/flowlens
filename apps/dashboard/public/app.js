@@ -3884,7 +3884,7 @@ function renderDatabase() {
     for (const row of panel.querySelectorAll('[data-db-row]')) {
       row.hidden = Boolean(query) && !row.dataset.dbRow.includes(query);
       // Say which field matched, so a search for a key answers "where is it".
-      const entry = db.collections.find((c) => c.name === row.querySelector('button')?.textContent);
+      const entry = db.collections.find((c) => c.name === row.dataset.dbNode);
       const fields = query
         ? (entry?.fields ?? []).filter((field) => fieldSearchText(field).includes(query))
         : [];
@@ -3908,6 +3908,9 @@ function renderDatabase() {
           )}`
         : '';
     }
+    // A group with no matching collection says nothing: it goes too.
+    for (const group of panel.querySelectorAll('.db-group2'))
+      group.hidden = Boolean(query) && !group.querySelector('[data-db-row]:not([hidden])');
   });
   const results = panel.querySelector('[data-db-results]');
   search?.addEventListener('input', () => {
@@ -3952,25 +3955,11 @@ function bindDatabaseLinks(root) {
   const panel = el.panels.database;
   for (const button of root.querySelectorAll('[data-db-collection]')) {
     // The diagram's boxes are SVG groups, not buttons: Enter and Space open them too.
-    if (button.tagName !== 'BUTTON')
-      button.addEventListener('keydown', (event) => {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        event.preventDefault();
-        button.dispatchEvent(new Event('click'));
-      });
     button.addEventListener('click', (event) => {
       event.preventDefault();
       state.dbCollection = button.dataset.dbCollection || null;
       renderDatabase();
       panel.scrollTop = 0;
-      const box = button.dataset.dbLife
-        ? panel.querySelector(`.db-life.effect-${button.dataset.dbLife}`)
-        : null;
-      if (box) {
-        box.querySelector('[data-db-more][aria-expanded="false"]')?.click();
-        box.classList.add('is-picked');
-        box.scrollIntoView?.({ block: 'start' });
-      }
     });
   }
   bindFlowJumps(root);
@@ -4168,10 +4157,6 @@ const databaseLabel = (db) =>
 
 /** The database's own name when the env file gives it (`pharma-dev`), else the variable. */
 const dbName = (db) => db.value ?? db.name;
-
-/** Where the name came from, for a tooltip: `MONGODB_DB in .env`. */
-const dbSource = (db) =>
-  db.env ? `${db.name}${db.from ? ` in ${db.from}` : ' (not set in an env file)'}` : '';
 
 /** `model Customer`, or `type Medicine` when a TypeScript type is the only schema. */
 const modelHtml = (entry) =>
@@ -4590,9 +4575,12 @@ function dbMapHtml(db, links) {
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((entry) => {
           const count = linksOf(entry.name);
-          return `<button class="db-row2" data-db-collection="${escapeHtml(entry.name)}" data-db-node="${escapeHtml(entry.name)}">
+          const key = [entry.name, entry.model ?? '', ...entry.fields.map(fieldSearchText)]
+            .join(' ')
+            .toLowerCase();
+          return `<button class="db-row2" data-db-collection="${escapeHtml(entry.name)}" data-db-node="${escapeHtml(entry.name)}" data-db-row="${escapeHtml(key)}">
             <span class="db-row2-icon" aria-hidden="true">${iconOf(entry.name)}</span>
-            <span class="db-row2-text"><strong>${escapeHtml(entry.name)}</strong><small>${escapeHtml(rowDescription(entry))}</small></span>
+            <span class="db-row2-text"><strong>${escapeHtml(entry.name)}</strong><small>${escapeHtml(rowDescription(entry))}</small><span class="db-field-hit" hidden></span></span>
             ${
               count.out || count.in
                 ? `<span class="db-row2-links" title="Points to ${count.out}, pointed at by ${count.in}">${count.out ? `→${count.out}` : ''}${count.in ? ` ←${count.in}` : ''}</span>`
@@ -4643,6 +4631,12 @@ function dbMapHtml(db, links) {
       </ul></div>
     </div>`;
 }
+
+/** At most a dozen, then how many more: `doctors` has 45, and the strip must not grow. */
+const capped = (items, keep = 12) =>
+  items.length <= keep
+    ? items.join(', ')
+    : `${items.slice(0, keep).join(', ')} and ${items.length - keep} more`;
 
 const MAP_HINT =
   'Hover or focus a collection to see what it is linked to, and by which key — the field that holds the other record’s id.';
@@ -4708,8 +4702,8 @@ function bindDbMap(panel, links) {
         `<strong>${escapeHtml(name)}</strong> ` +
         (out.length || into.length
           ? [
-              out.length && `points to ${out.map((l) => by(l, l.to)).join(', ')}`,
-              into.length && `is pointed at by ${into.map((l) => by(l, l.from)).join(', ')}`,
+              out.length && `points to ${capped(out.map((l) => by(l, l.to)))}`,
+              into.length && `is pointed at by ${capped(into.map((l) => by(l, l.from)))}`,
             ]
               .filter(Boolean)
               .join(' · ')
@@ -4875,92 +4869,7 @@ function databaseOverviewHtml(db) {
           .join('')}</ul></details>`
       : '');
 
-  const card = (entry) => {
-    const key = [entry.name, entry.model ?? '', ...entry.fields.map(fieldSearchText)]
-      .join(' ')
-      .toLowerCase();
-    const { actions, code } = lifecycleOf(entry);
-    // One tile per thing that happens to records: how many actions do it, or who else does.
-    const tiles = LIFECYCLE.map(([effect, icon, title]) => {
-      const count = new Set(actions[effect].map((use) => plainTitle(use.title))).size;
-      const runner = code[effect]?.size ? RUN_WORDS[runnerOf(entry, effect)] : undefined;
-      const auto = effect === 'delete' && ttlIndexes(entry).length > 0;
-      const value = count ? String(count) : runner ? runner[0] : auto ? 'auto' : '—';
-      const tip = count
-        ? `${title} by ${plural(count, 'action')}`
-        : runner
-          ? `${title} only by ${runner[1]}, never by a user action`
-          : auto
-            ? 'Removed automatically by the database when a record expires'
-            : `Never ${title.toLowerCase()} by this app`;
-      const inner = `<span class="db-tile-value">${escapeHtml(value)}</span>
-          <span class="db-tile-label"><span aria-hidden="true">${icon}</span> ${title}</span>`;
-      // A tile with something behind it opens the collection on that box, its list unfolded.
-      return value === '—'
-        ? `<div class="db-tile effect-${effect} is-empty" title="${escapeHtml(tip)}">${inner}</div>`
-        : `<button class="db-tile effect-${effect}" data-db-collection="${escapeHtml(entry.name)}" data-db-life="${effect}" title="${escapeHtml(tip)} — click to see them">${inner}</button>`;
-    }).join('');
-    const linked = [
-      ...new Set([...entry.references.map((r) => r.to), ...entry.referencedBy.map((r) => r.from)]),
-    ];
-    const elsewhere =
-      entry.databases?.length > 1
-        ? `<p class="db-card-note">Also kept in database ${entry.databases
-            .map(
-              (db) => `<code title="${escapeHtml(dbSource(db))}">${escapeHtml(dbName(db))}</code>`,
-            )
-            .join(' and ')} — same name, two places.</p>`
-        : '';
-    return `<div class="db-card" data-db-row="${escapeHtml(key)}">
-        <div class="db-card-head">
-          <button class="link db-card-name" data-db-collection="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</button>
-          <span class="muted">${plural(entry.fields.length, 'field')}</span>
-        </div>
-        <div class="db-tiles">${tiles}</div>
-        <p class="db-card-links">${
-          linked.length
-            ? `Linked with ${linked.map((n) => `<strong>${escapeHtml(n)}</strong>`).join(', ')}`
-            : '<span class="muted">Not linked to other collections</span>'
-        }</p>
-        ${elsewhere}
-        <span class="db-field-hit" hidden></span>
-      </div>`;
-  };
-
-  // One group per database, when the code names them; a name in two databases has its own group.
-  const groups = new Map();
-  for (const entry of db.collections) {
-    const label = entry.databases?.length
-      ? entry.databases.map((db) => `\`${dbName(db)}\``).join(' and ')
-      : '';
-    groups.set(label, [...(groups.get(label) ?? []), entry]);
-  }
-  const cards = [...groups]
-    .map(
-      ([label, entries]) =>
-        (groups.size > 1 || label
-          ? `<h4 class="db-group-title">${
-              label
-                ? `${label.includes(' and ') ? 'In both databases' : 'Database'} ${richText(label)}`
-                : 'Database not named in the code'
-            }</h4>`
-          : '') + `<div class="db-cards">${entries.map(card).join('')}</div>`,
-    )
-    .join('');
-
-  return (
-    intro +
-    summary +
-    search +
-    `<div data-db-results></div>` +
-    healthHtml(db) +
-    connections +
-    heading(
-      'Collections',
-      'Each box is one collection. The numbers count the user actions that add, change, remove and read its records — open it to see which ones, and every field.',
-    ) +
-    cards
-  );
+  return intro + summary + search + `<div data-db-results></div>` + healthHtml(db) + connections;
 }
 
 let foldIds = 0;
