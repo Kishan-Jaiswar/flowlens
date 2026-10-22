@@ -1,5 +1,5 @@
 import { Node, type SourceFile } from 'ts-morph';
-import { readString } from './ast.js';
+import { readPathLike, readString } from './ast.js';
 import type { LoadedProject } from './project.js';
 
 /**
@@ -80,7 +80,8 @@ function stringConstantsIn(file: SourceFile): Array<[string, string]> {
 
   for (const declaration of declarations) {
     const initializer = declaration.getInitializer();
-    const value = readString(initializer);
+    // `"/staff/create-staff "`: the stray space is not part of the route.
+    const value = readString(initializer)?.trim();
     if (value === undefined) continue;
     if (value.length > MAX_LENGTH || !PATH_LIKE.test(value)) continue;
     const name = declaration.getName();
@@ -108,6 +109,17 @@ function stringConstantsIn(file: SourceFile): Array<[string, string]> {
     if (!resolvable || text.length > MAX_LENGTH || !PATH_LIKE.test(text)) continue;
     local.set(name, text);
     found.push([name, text]);
+  }
+
+  // `const archivePatient = (id) => `/patients/${id}/archive``: a URL built from its
+  // arguments, kept as `archivePatient()` with a placeholder for each.
+  for (const declaration of declarations) {
+    const initializer = declaration.getInitializer();
+    if (!initializer || !Node.isArrowFunction(initializer)) continue;
+    const body = initializer.getBody();
+    const text = readPathLike(body, (name) => local.get(name))?.trim();
+    if (!text || text.length > MAX_LENGTH || !PATH_LIKE.test(text)) continue;
+    found.push([`${declaration.getName()}()`, text]);
   }
 
   return found;

@@ -84,7 +84,7 @@ const SEVERITY_ORDER: Record<FindingSeverity, number> = { high: 0, medium: 1, lo
 /** Every finding in the scanned project, most severe first. */
 export function projectFindings(graph: FlowGraph, options: FindingsOptions = {}): ProjectFindings {
   const reader = options.reader ?? new SourceReader(graph);
-  const ctx: Ctx = { graph, reader, findings: [], notes: [], queries: [] };
+  const ctx: Ctx = { graph, reader, findings: [], notes: [], queries: [], signedIn: new Set() };
 
   readQueries(ctx);
   const tenantKey = chooseTenantKey(ctx);
@@ -145,6 +145,8 @@ interface FilterKeys {
   values: Map<string, string>;
   /** False when part of the filter was built somewhere unreadable. */
   complete: boolean;
+  /** Keys only inside `$or`/`$nor`: they narrow the match but scope nothing. Said, never counted. */
+  either?: Set<string>;
 }
 
 interface Ctx {
@@ -153,6 +155,8 @@ interface Ctx {
   findings: Finding[];
   notes: string[];
   queries: QueryFacts[];
+  /** Routes a signed-in user calls: guarded, and not public on purpose. */
+  signedIn: Set<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +312,7 @@ function filterKeys(ctx: Ctx, node: Node, fn: Node, depth: number): FilterKeys {
   const result: FilterKeys = { keys: new Set(), values: new Map(), complete: true };
   const merge = (other: FilterKeys): void => {
     for (const key of other.keys) result.keys.add(key);
+    for (const key of other.either ?? []) (result.either ??= new Set()).add(key);
     for (const [key, value] of other.values) result.values.set(key, value);
     if (!other.complete) result.complete = false;
   };
@@ -332,6 +337,16 @@ function filterKeys(ctx: Ctx, node: Node, fn: Node, depth: number): FilterKeys {
         const init = property.getInitializer();
         if (key === '$and' && init && Node.isArrayLiteralExpression(init)) {
           for (const clause of init.getElements()) merge(filterKeys(ctx, clause, fn, depth + 1));
+        } else if (
+          (key === '$or' || key === '$nor') &&
+          init &&
+          Node.isArrayLiteralExpression(init)
+        ) {
+          for (const clause of init.getElements()) {
+            const inner = filterKeys(ctx, clause, fn, depth + 1);
+            for (const name of [...inner.keys, ...(inner.either ?? [])])
+              (result.either ??= new Set()).add(name);
+          }
         } else if (key !== '$or' && key !== '$nor') {
           result.keys.add(key);
           if (init) result.values.set(key, condense(init.getText(), 80));
@@ -468,7 +483,7 @@ function chooseTenantKey(ctx: Ctx): string | undefined {
 
 /** Paths that are public by design: signing in cannot require being signed in. */
 const PUBLIC_PATH =
-  /(^|[/_-])(auth|login|logout|signin|sign-in|signup|sign-up|register|otp|refresh|forgot|reset|verify|verification|health|healthz|status|ping|webhooks?|callback|public|metrics|docs|swagger)($|[/_-])/i;
+  /(^|[/_-])(auth|login|logout|signin|sign-in|signup|sign-up|register|otp|refresh|forgot|reset|verify|verification|health|healthz|status|ping|webhooks?|callback|public|metrics|docs|swagger|shorten|short|redirect|share|open)($|[/_-])/i;
 
 /**
  * A call in a handler that checks who is asking. Deliberately narrow: a
@@ -493,6 +508,9 @@ function checkRoutes(ctx: Ctx, tenantKey: string | undefined): void {
     const guards = ctx.graph.successors(route.id, ['guarded-by']);
     const inHandler = handler ? authCallsIn(handler, ctx.reader) : [];
     const guarded = guards.length > 0 || inHandler.length > 0 || globalAuth;
+    // `@All('/hip/…/discover')`: any method, an outside system's callback — not a signed-in user.
+    if (guarded && !PUBLIC_PATH.test(path) && route.meta?.['anyMethod'] !== true)
+      ctx.signedIn.add(route.id);
     const at = handler ? point(ctx, handler) : (route.source ?? { file: '', line: 1 });
 
     if (!guarded && !PUBLIC_PATH.test(path) && at.file) {
@@ -726,16 +744,47 @@ const UNSCOPED_OK = new Set([
 
 function checkTenantScope(ctx: Ctx, tenantKey: string | undefined): void {
   if (!tenantKey) return;
-  // Collections the project does scope somewhere: the rest may be global by design.
+  /**
+   * Collections the project scopes as a rule: a third of their filtered queries
+   * or more use the key. One that rarely does is shared on purpose — a catalog,
+   * global config, a lookup table — and a missing key there is not a leak.
+   */
   const scoped = new Map<string, QueryFacts>();
-  for (const query of ctx.queries)
-    if (query.filter?.keys.has(tenantKey) && !scoped.has(query.collection))
-      scoped.set(query.collection, query);
+  const share = new Map<string, { with: number; all: number }>();
+  for (const query of ctx.queries) {
+    if (!query.filter?.complete || query.filter.keys.size === 0) continue;
+    const entry = share.get(query.collection) ?? { with: 0, all: 0 };
+    entry.all += 1;
+    if (query.filter.keys.has(tenantKey)) {
+      entry.with += 1;
+      if (!scoped.has(query.collection)) scoped.set(query.collection, query);
+    }
+    share.set(query.collection, entry);
+  }
+  for (const [collection, { with: used, all }] of share)
+    if (used / all < 0.3) scoped.delete(collection);
 
   for (const query of ctx.queries) {
     const example = scoped.get(query.collection);
     if (!example || UNSCOPED_OK.has(query.operation)) continue;
     if (!query.filter || !query.filter.complete || query.filter.keys.has(tenantKey)) continue;
+    // Only what a signed-in user can set off: a script, a job, a webhook or a public
+    // route is no tenant's request (and an unguarded route is its own finding).
+    if (!reachedBySignedIn(ctx, query.node.id)) continue;
+    // The function checked ownership first (`findOne({ staff_id, doctor_id })`), or is the check.
+    const own = fnName(query.fn).split('.').pop() ?? '';
+    if (/^(assert|ensure|check|verify|can|has)\w*(access|owner|permission|belong)/i.test(own))
+      continue;
+    if (
+      ctx.queries.some(
+        (other) =>
+          other !== query &&
+          other.fn === query.fn &&
+          other.at.line < query.at.line &&
+          other.filter?.keys.has(tenantKey),
+      )
+    )
+      continue;
     const writes = query.effect !== 'read';
     const byId =
       BY_ID.has(query.operation) || query.filter.keys.has('_id') || query.filter.keys.has('id');
@@ -744,9 +793,12 @@ function checkTenantScope(ctx: Ctx, tenantKey: string | undefined): void {
     // High only when a client is shown to be able to aim it; unknown stays medium.
     const severity: FindingSeverity =
       origin === 'server' ? 'low' : origin === 'request' ? 'high' : 'medium';
+    const either = [...(query.filter.either ?? [])].map((key) => `\`${key}\``).join(', ');
     const matched = query.filter.keys.size
       ? ` — it matches on ${[...query.filter.keys].map((key) => `\`${key}\``).join(', ')} alone`
-      : ' — it has no filter at all';
+      : either
+        ? ` — it matches only on ${either} inside \`$or\``
+        : ' — it has no filter at all';
     push(ctx, {
       kind: 'tenant-scope',
       severity,
@@ -1200,4 +1252,20 @@ function namesDeclaredBy(statement: Node): string[] {
       ? [binding.getText()]
       : binding.getDescendantsOfKind(SyntaxKind.BindingElement).map((element) => element.getName());
   });
+}
+
+/** Whether a route a signed-in user calls runs this node, walking back through its callers. */
+function reachedBySignedIn(ctx: Ctx, nodeId: string): boolean {
+  const seen = new Set([nodeId]);
+  const queue = [nodeId];
+  while (queue.length && seen.size < 4000) {
+    const id = queue.shift()!;
+    for (const edge of ctx.graph.edgesTo(id)) {
+      if (ctx.signedIn.has(edge.from)) return true;
+      if (seen.has(edge.from)) continue;
+      seen.add(edge.from);
+      queue.push(edge.from);
+    }
+  }
+  return false;
 }

@@ -1,7 +1,9 @@
 import {
   Node,
   SyntaxKind,
+  type ArrayLiteralExpression,
   type CallExpression,
+  type NewExpression,
   type ObjectLiteralExpression,
   type PropertyAccessExpression,
   type SourceFile,
@@ -50,6 +52,10 @@ export interface DatabaseField {
   type?: string;
   required?: boolean;
   unique?: boolean;
+  /** What the schema fills it with when the code leaves it out: `Date.now`. */
+  defaultValue?: string;
+  /** The only values the schema allows (`enum`): `['male', 'female']`. */
+  enumValues?: string[];
   /** `index: true`, implied by `unique`, or the first key of a driver `createIndex`. */
   indexed?: boolean;
   /** A TTL index on it: the record is deleted this many seconds after the date it holds. */
@@ -212,8 +218,13 @@ export interface FieldEntry {
   code?: string;
   /** The words on screen: `MRP / unit (₹)`. */
   label?: string;
+  /** Picked with buttons (`Increase / Decrease`), not typed. */
+  picked?: true;
+  /** The first action that reaches it; `actions` holds every one. */
   flowId: string;
   title: string;
+  /** Every user action that leads to this input and saves it the same way. */
+  actions: Array<{ flowId: string; title: string }>;
   source?: SourceRef;
   /** The request the form sends: `POST /medicines`. */
   endpoint?: string;
@@ -310,10 +321,18 @@ export interface DatabaseOperation {
   databaseName?: DatabaseName;
   /** An update with `upsert: true`: it creates the record when none matches. */
   upsert?: boolean;
+  /** An update that hides the record instead of erasing it: `is_active: false`, `deleted_at`. */
+  softDelete?: true;
+  /** Other collections an aggregate pulls in with `$lookup`. */
+  joins?: string[];
   /** The graph node, for matching it to the fields its filter and writes name. */
   nodeId: string;
-  /** What runs it: a user action, a background job, an endpoint no screen calls, or a script. */
-  runBy: 'user' | 'job' | 'endpoint' | 'script';
+  /**
+   * What runs it: a user action, a background job (timer, queue, event), a check
+   * on every request (login, guard, middleware), a live connection, an endpoint
+   * no screen calls, a script run by hand, or nothing in the project (`unused`).
+   */
+  runBy: 'user' | 'job' | 'request' | 'socket' | 'endpoint' | 'script' | 'unused';
   /** Measured by runtime tracing, when the app has run with it. */
   timing?: { count: number; avgMs: number; maxMs: number };
 }
@@ -349,6 +368,8 @@ export interface DatabaseCollection {
   /** Indexes the code creates (`createIndex`), in the order written. */
   indexes?: CollectionIndex[];
   model?: string;
+  /** The first sentence of the doc comment on its schema or type, when it has one. */
+  description?: string;
   source?: SourceRef;
   fields: DatabaseField[];
   operations: DatabaseOperation[];
@@ -364,6 +385,8 @@ export interface DatabaseCollection {
   lookupKeys: string[];
   /** Every case that writes it, read from the code's branches: each field says what happens to it in each. */
   scenarios: Scenario[];
+  /** True when `scenarios` and `outcomes` were not worked out (`scenarios: false`). */
+  casesLeftOut?: true;
   /** Queries that leave out the field the rest use to keep each owner's records apart. */
   unscoped?: UnscopedQuery[];
   /** What deleting a record does to the records in other collections that hold its id. */
@@ -424,6 +447,14 @@ export interface DatabaseReportOptions {
   relations?: DeclaredRelation[];
   /** `projectFindings()` already worked out, for its tenant check; read again when absent. */
   findings?: ProjectFindings;
+  /**
+   * `false` leaves out each write's cases (`scenarios`, every field's `outcomes`):
+   * the slowest and largest part, needed only once a collection is opened.
+   * The collection then says `casesLeftOut: true`.
+   */
+  scenarios?: boolean;
+  /** Only this collection, in full: the page a user opened. */
+  only?: string;
 }
 
 /** `{ "from": "medicines", "field": "ownerId", "to": "clinics" }` */
@@ -441,7 +472,13 @@ export function databaseReport(
 ): DatabaseReport {
   const reader = options.reader ?? new SourceReader(graph);
   READ_FROM.clear();
+  JOINED.length = 0;
   READER.current = reader;
+  READER.graph = graph;
+  CALLERS.methods = undefined;
+  CALLERS.functions.clear();
+  CALLERS.calls = new WeakMap();
+  CALLERS.keys = new WeakMap();
   const frontend = new Frontend(graph, flows, reader);
   const project = new ProjectCode(graph, reader);
   const actionsOf = new Map<string, Array<{ flowId: string; title: string }>>();
@@ -485,12 +522,24 @@ export function databaseReport(
     });
   }
 
+  const cases = options.scenarios !== false;
   const collections = graph
     .nodesOfKind('collection')
+    .filter((node) => options.only === undefined || node.label === options.only)
     .map((node) =>
-      collectionOf(graph, node, flows, relations, reader, actionsOf, frontend, project),
+      collectionOf(graph, node, flows, relations, reader, actionsOf, frontend, project, cases),
     )
     .sort((a, b) => a.name.localeCompare(b.name));
+  for (const { collection, name, lookup } of JOINED) {
+    const target = collections.find((entry) => entry.name === collection);
+    if (!target) continue;
+    let field = target.fields.find((entry) => entry.name === name);
+    if (!field) {
+      field = { name, origin: 'queried', ...emptyUses() };
+      target.fields.push(field);
+    }
+    field.lookups.push(lookup);
+  }
   const findings = options.findings ?? projectFindings(graph, { reader });
   addDatabaseChecks(collections, flows, findings, (file) => reader.file(file)?.getFullText() ?? '');
   const tenantKey = findings.tenantKey;
@@ -516,6 +565,7 @@ function collectionOf(
   actionsOf: ReadonlyMap<string, Array<{ flowId: string; title: string }>>,
   frontend: Frontend,
   project: ProjectCode,
+  cases = true,
 ): DatabaseCollection {
   const name = node.label;
   const models = graph.predecessors(node.id, ['defines']).filter((n) => n.kind === 'model');
@@ -538,6 +588,12 @@ function collectionOf(
           ...(meta['required'] === true ? { required: true } : {}),
           ...(meta['unique'] === true ? { unique: true } : {}),
           ...(meta['indexed'] === true || meta['unique'] === true ? { indexed: true } : {}),
+          ...(Array.isArray(meta['enumValues'])
+            ? { enumValues: meta['enumValues'] as string[] }
+            : {}),
+          ...(typeof meta['defaultValue'] === 'string'
+            ? { defaultValue: meta['defaultValue'] }
+            : {}),
           ...(ref ? { ref } : {}),
           ...(field.source ? { source: field.source } : {}),
         };
@@ -576,6 +632,7 @@ function collectionOf(
           ? { databaseName: op.meta['databaseName'] as DatabaseName }
           : {}),
         ...(op.meta?.['upsert'] === true ? { upsert: true } : {}),
+        ...(Array.isArray(op.meta?.['joins']) ? { joins: op.meta['joins'] as string[] } : {}),
         nodeId: op.id,
         runBy: actionsOf.get(op.id)?.length ? 'user' : runnerOf(graph, op.id),
         ...(op.timing
@@ -669,6 +726,19 @@ function collectionOf(
       });
     }
     for (const sort of uses.sorts) fieldNamed(sort.name).sorts.push({ ...site, value: sort.value });
+    // A `$lookup` pipeline's `$match` finds records of the collection it joins: credited there.
+    for (const join of uses.joined ?? [])
+      for (const key of join.lookups)
+        JOINED.push({
+          collection: join.collection,
+          name: key.name,
+          lookup: {
+            ...site,
+            value: key.value,
+            ...(key.match ? { match: key.match } : {}),
+            alsoIn: [],
+          },
+        });
     for (const read of uses.projected)
       fieldNamed(read.name).projected.push({ ...site, value: read.value });
   }
@@ -695,6 +765,14 @@ function collectionOf(
         .map((step) => step.file!),
     ),
   ];
+  // Names on both the record and its items (`expiryDate` on a medicine and on each batch) say nothing about which one a receiver is.
+  const topLeaves = new Set(fields.filter((f) => !f.name.includes('[]')).map((f) => f.name));
+  const both = new Set(
+    fields
+      .filter((f) => f.name.includes('[]'))
+      .map((f) => leafOf(f.name))
+      .filter((leaf) => topLeaves.has(leaf)),
+  );
   for (const field of fields) {
     // An item field is shown beside its siblings (`b.mrp`, `b.quantity`); a top-level one beside the others.
     const parent = field.name.includes('[]') ? field.name.split('[]')[0] : undefined;
@@ -704,7 +782,8 @@ function collectionOf(
         (name) =>
           name !== field.name && (parent ? name.startsWith(`${parent}[].`) : !name.includes('[]')),
       )
-      .map(leafOf);
+      .map(leafOf)
+      .filter((leaf) => !both.has(leaf));
     field.shownIn = frontend.shown(screens, leafOf(field.name), siblings, name);
   }
   // Reads that hand records back: `find*` always, an aggregate only when its pipeline names the field.
@@ -768,27 +847,51 @@ function collectionOf(
     .filter((op) => op.meta?.['access'] === 'write' && op.meta?.['collection'] !== name);
   let scenarios: Scenario[] = [];
   try {
-    scenarios = scenariosOf(graph, reader, writeOps, otherWrites, (endpoint) =>
-      frontend.flowsCalling(endpoint).map((flow) => ({ flowId: flow.id, title: flow.title })),
-    );
+    if (cases)
+      scenarios = scenariosOf(graph, reader, writeOps, otherWrites, (endpoint) =>
+        frontend.flowsCalling(endpoint).map((flow) => ({ flowId: flow.id, title: flow.title })),
+      );
   } catch {
     // Unreadable branches: the field cards keep everything else.
   }
   const keyedWrites = new Set(fields.flatMap((field) => field.writes.map((write) => write.nodeId)));
-  for (const field of fields) field.outcomes = outcomesOf(field, scenarios, keyedWrites, fields);
+  for (const field of fields)
+    field.outcomes = cases ? outcomesOf(field, scenarios, keyedWrites, fields) : [];
   const lookupKeys = fields
     .filter((field) => field.lookups.length > 0)
     .sort((a, b) => b.lookups.length - a.lookups.length || a.name.localeCompare(b.name))
     .map((field) => field.name);
 
+  // An upsert creates the record when none matches: an action that reaches one adds records too.
+  const upserts = new Set(operations.filter((op) => op.upsert).map((op) => op.nodeId));
+  /**
+   * An update that only hides the record — `is_active: false`, `is_deleted: true`,
+   * `deleted_at: new Date()` — removes it for every reader: it counts as removing.
+   */
+  const softDeletes = new Set(
+    fields.flatMap((field) =>
+      field.writes
+        .filter((write) => isSoftDelete(field.name, write.value))
+        .map((write) => write.nodeId),
+    ),
+  );
+  for (const op of operations)
+    if (op.effect === 'update' && softDeletes.has(op.nodeId)) op.softDelete = true;
   const usedBy = flows.flatMap((flow): DatabaseUse[] => {
     const access = flow.collections.filter((entry) => entry.collection === name);
     if (access.length === 0) return [];
+    const adds = flow.steps.some((step) => upserts.has(step.nodeId));
+    const hides = flow.steps.some((step) => softDeletes.has(step.nodeId));
+    const effects: DbEffect[] = [
+      ...access.map((entry) => entry.effect),
+      ...(adds ? (['create'] as DbEffect[]) : []),
+      ...(hides ? (['delete'] as DbEffect[]) : []),
+    ];
     return [
       {
         flowId: flow.id,
         title: flow.title,
-        effects: [...new Set(access.map((entry) => entry.effect))].sort(
+        effects: [...new Set(effects)].sort(
           (a, b) => DB_EFFECT_ORDER.indexOf(a) - DB_EFFECT_ORDER.indexOf(b),
         ),
         operations: [...new Set(access.flatMap((entry) => entry.operations))],
@@ -811,7 +914,7 @@ function collectionOf(
   const databases = node.meta?.['databases'] as DatabaseName[] | undefined;
   if (databases && databases.length > 1)
     notes.push(
-      `A collection of this name is opened in ${databases.length} databases: ${databases.map((db) => db.name).join(', ')}. Each query says which.`,
+      `A collection of this name is opened in ${databases.length} databases: ${databases.map((db) => db.value ?? db.name).join(', ')}. Each query says which.`,
     );
   const indexes = node.meta?.['indexes'] as CollectionIndex[] | undefined;
   for (const index of indexes ?? []) {
@@ -840,6 +943,7 @@ function collectionOf(
     ...(model ? { model: model.label } : {}),
     ...(model?.meta?.['typed'] === true ? { typed: true } : {}),
     ...(model?.source ? { source: model.source } : {}),
+    ...descriptionOf(reader, model?.source),
     fields,
     operations,
     usedBy,
@@ -848,6 +952,7 @@ function collectionOf(
     notes,
     lookupKeys,
     scenarios,
+    ...(cases ? {} : { casesLeftOut: true as const }),
   };
 }
 
@@ -861,6 +966,8 @@ interface QueryFieldUses {
   lookups: KeyValue[];
   sorts: KeyValue[];
   projected: KeyValue[];
+  /** `$match` inside a `$lookup`'s own pipeline: lookups on the collection it joins. */
+  joined?: Array<{ collection: string; lookups: KeyValue[] }>;
 }
 
 interface KeyValue {
@@ -889,6 +996,8 @@ interface KeyValue {
   takes?: true;
   /** When only some runs of the write set it: `addQty > 0`, the stored dosage form is empty. */
   when?: Literal[];
+  /** A condition inside `$or`/`$and`/`$nor`: one of several on the key, never replaced by a later one. */
+  branch?: true;
 }
 
 /** Operators whose keys are field names: `{ $set: { status } }`. */
@@ -904,7 +1013,9 @@ const UPDATE_OPERATORS =
  */
 function fieldUsesOf(reader: SourceReader, op: FlowNode): QueryFieldUses | undefined {
   const operation = String(op.meta?.['operation'] ?? '');
-  const call = locateQueryCall(reader, op.source?.file, op.source?.line, operation);
+  const call =
+    locateQueryCall(reader, op.source?.file, op.source?.line, operation) ??
+    (operation === 'save' ? saveOfNew(reader, op.source?.file, op.source?.line) : undefined);
   const fn = call && nearestFunction(call);
   if (!call || !fn) return undefined;
   const uses: QueryFieldUses = {
@@ -926,7 +1037,7 @@ function fieldUsesOf(reader: SourceReader, op: FlowNode): QueryFieldUses | undef
     )
       break;
     const sortArg = next.getArguments()[0];
-    if (access.getName() === 'sort' && sortArg) uses.sorts.push(...keysOf(sortArg, fn, 0));
+    if (access.getName() === 'sort' && sortArg) uses.sorts.push(...sortKeys(sortArg, fn));
     if (access.getName() === 'project' && sortArg)
       uses.projected.push(...projectedKeys(sortArg, fn));
     outer = next;
@@ -935,11 +1046,17 @@ function fieldUsesOf(reader: SourceReader, op: FlowNode): QueryFieldUses | undef
     if (!Node.isPropertyAssignment(option)) continue;
     const value = option.getInitializer();
     if (!value) continue;
-    if (option.getName() === 'sort') uses.sorts.push(...keysOf(value, fn, 0));
+    if (option.getName() === 'sort') uses.sorts.push(...sortKeys(value, fn));
     if (option.getName() === 'projection') uses.projected.push(...projectedKeys(value, fn));
   }
-  const lookup = (node: Node, within: Node = fn) =>
-    uses.lookups.push(...keysOf(node, within, 0).filter((key) => !key.name.startsWith('$')));
+  const lookup = (node: Node, within: Node = fn) => {
+    CALLERS.reading = true;
+    try {
+      uses.lookups.push(...keysOf(node, within, 0).filter((key) => !key.name.startsWith('$')));
+    } finally {
+      CALLERS.reading = false;
+    }
+  };
   // The conditions the query itself runs under: a key's own conditions are the ones beyond these.
   const around = new Set(conditionsAround(call, fn).map((c) => `${c.holds}|${c.code}`));
   const conditionsOf = (key: Pick<KeyValue, 'node' | 'scope' | 'when'>): Literal[] => {
@@ -996,10 +1113,74 @@ function fieldUsesOf(reader: SourceReader, op: FlowNode): QueryFieldUses | undef
 
   // `patient.uuid = uuid; await patient.save()`: what was set on the document before it.
   if (operation === 'save') {
+    // `new this.model(dto).save()`, or `const doc = new this.model(dto); …; doc.save()`:
+    // the record is what it was built from, plus what is set on it before the save.
     const callee = call.getExpression();
-    const doc = Node.isPropertyAccessExpression(callee) ? callee.getExpression() : undefined;
-    if (doc && Node.isIdentifier(doc))
-      for (const key of savedKeys(doc.getText(), call, fn)) push(key, key.name, '$set');
+    let doc: Node | undefined = Node.isPropertyAccessExpression(callee)
+      ? callee.getExpression()
+      : undefined;
+    while (doc && (Node.isParenthesizedExpression(doc) || Node.isAwaitExpression(doc)))
+      doc = doc.getExpression();
+    let built: NewExpression | undefined = doc && Node.isNewExpression(doc) ? doc : undefined;
+    if (doc && Node.isIdentifier(doc)) {
+      const declaration = localVariable(fn, doc.getText());
+      const init =
+        declaration && Node.isVariableDeclaration(declaration)
+          ? declaration.getInitializer()
+          : undefined;
+      if (init && Node.isNewExpression(init)) built = init;
+      for (const key of savedKeys(doc.getText(), call, fn))
+        push(key, key.name, built ? 'insert' : '$set');
+    }
+    const source = built?.getArguments()[0];
+    if (source) write(source, 'insert');
+    return uses;
+  }
+
+  // `aggregate([{ $match }, { $sort }, { $lookup: { from, pipeline: [{ $match }] } }])`.
+  const readPipeline = (node: Node, within: Node, depth: number, into?: KeyValue[]): void => {
+    // `aggregation(query) { return this.model.aggregate(query) }`: the pipeline its callers build.
+    if (
+      Node.isIdentifier(node) &&
+      depth < 2 &&
+      parametersOf(within).some((p) => p.getName() === node.getText())
+    ) {
+      for (const { arg, fn: callerFn } of callerArguments(within, node.getText()))
+        readPipeline(arg, callerFn, depth + 1, into);
+      return;
+    }
+    for (const stage of arrayElements(node, within)) {
+      for (const property of objectOf(stage, within)?.getProperties() ?? []) {
+        if (!Node.isPropertyAssignment(property)) continue;
+        const value = property.getInitializer();
+        if (!value) continue;
+        const name = property.getName().replace(/^['"`]|['"`]$/g, '');
+        if (name === '$match') {
+          const keys = keysOf(value, within, 0).filter((key) => !key.name.startsWith('$'));
+          if (into) into.push(...keys);
+          else uses.lookups.push(...keys);
+        } else if (name === '$sort' && !into) uses.sorts.push(...sortKeys(value, within));
+        else if (name === '$lookup' && depth < 2) {
+          const body = objectOf(value, within);
+          const from = body?.getProperty('from');
+          const sub = body?.getProperty('pipeline');
+          const collection =
+            from && Node.isPropertyAssignment(from)
+              ? readStringValue(from.getInitializer())
+              : undefined;
+          const inner = sub && Node.isPropertyAssignment(sub) ? sub.getInitializer() : undefined;
+          if (!collection || !inner) continue;
+          const joined: KeyValue[] = [];
+          readPipeline(inner, within, depth + 1, joined);
+          if (joined.length) (uses.joined ??= []).push({ collection, lookups: joined });
+        }
+      }
+    }
+  };
+
+  // `doc.update({ transaction_id })` on a loaded document: the argument is the change.
+  if (op.meta?.['onDocument'] === true && operation !== 'save') {
+    if (args[0]) update(args[0], fn);
     return uses;
   }
 
@@ -1007,6 +1188,7 @@ function fieldUsesOf(reader: SourceReader, op: FlowNode): QueryFieldUses | undef
     const arg = args[index];
     if (!arg) return;
     if (role === 'filter') lookup(arg);
+    else if (role === 'pipeline') readPipeline(arg, fn, 0);
     else if (role === 'document') write(arg, operation === 'replaceOne' ? 'replace' : 'insert');
     else if (role === 'documents') {
       const list = Node.isArrayLiteralExpression(arg) ? arg.getElements() : [];
@@ -1037,6 +1219,11 @@ function fieldUsesOf(reader: SourceReader, op: FlowNode): QueryFieldUses | undef
 
   /** An update: `{ $set: { … } }`, a conditional between two, or Mongoose's implicit `$set`. */
   function update(node: Node, within: Node): void {
+    // `findByIdAndUpdate(id, obj)` where `obj = classToPlain(x)` and then `obj.is_complete = true`.
+    if (objectsOf(node, within).length === 0) {
+      write(node, '$set', within);
+      return;
+    }
     for (const object of objectsOf(node, within)) {
       const operators = object
         .getProperties()
@@ -1119,11 +1306,30 @@ function keysOf(node: Node, fn: Node, depth: number): KeyValue[] {
     if (Node.isIdentifier(node)) keys.push(...assignedKeys(node.getText(), fn, depth));
     return keys;
   }
+  // `plainToClass(UpdateClinicDto, clinicDto)`, `structuredClone(dto)`: a copy holds what it copies.
+  if (call && !helper && COPIES.test(call.getExpression().getText())) {
+    const args = call.getArguments();
+    const source = /plainTo(Class|Instance)$/.test(call.getExpression().getText())
+      ? args.at(-1)
+      : args[0];
+    const copied = [
+      ...(source ? keysOf(source, fn, depth + 1) : []),
+      ...(/assign$/.test(call.getExpression().getText())
+        ? args.slice(1).flatMap((arg) => keysOf(arg, fn, depth + 1))
+        : []),
+    ];
+    if (Node.isIdentifier(node)) copied.push(...assignedKeys(node.getText(), fn, depth));
+    return copied;
+  }
   const object = objectOf(node, fn);
   if (!object) {
     // `create(createPatientDto)` after `createPatientDto.created_by = 'staff'`: its type's fields and those.
-    if (Node.isIdentifier(node))
-      return [...parameterKeys(fn, node.getText()), ...assignedKeys(node.getText(), fn, depth)];
+    if (Node.isIdentifier(node)) {
+      const typed = parameterKeys(fn, node.getText());
+      // An untyped parameter (`updatePatient(id, setData)`): what the callers pass in.
+      const passed = typed.length ? [] : callerKeys(fn, node.getText(), depth);
+      return [...typed, ...passed, ...assignedKeys(node.getText(), fn, depth)];
+    }
     return [];
   }
   const keys: KeyValue[] = [];
@@ -1137,7 +1343,7 @@ function keysOf(node: Node, fn: Node, depth: number): KeyValue[] {
       // `$or: [{ a }, { b }]` in a filter: the fields are inside.
       if (/^\$(or|and|nor)$/.test(name)) {
         for (const element of arrayElements(value, fn))
-          keys.push(...keysOf(element, fn, depth + 1));
+          keys.push(...keysOf(element, fn, depth + 1).map(asBranch));
         continue;
       }
       keys.push(keyValue(name, value, fn));
@@ -1157,6 +1363,10 @@ function keysOf(node: Node, fn: Node, depth: number): KeyValue[] {
   if (Node.isIdentifier(node)) keys.push(...assignedKeys(node.getText(), fn, depth));
   return keys;
 }
+
+/** Library calls that copy or convert a record without changing its keys. */
+const COPIES =
+  /(^|\.)(plainToClass|plainToInstance|classToPlain|instanceToPlain|structuredClone|cloneDeep|clone|toObject|toJSON|assign)$/;
 
 /** The call a value is, or a local variable holds: `await syncFromBatches({ … })`. */
 function callBehind(node: Node, fn: Node): CallExpression | undefined {
@@ -1350,7 +1560,78 @@ function namesRead(node: Node, depth: number): string[] {
 }
 
 function uniqueKeys(keys: KeyValue[]): KeyValue[] {
-  return [...new Map(keys.map((key) => [key.name, key])).values()];
+  // A later `x.name = …` replaces the key; a condition inside `$or` sits beside it.
+  return [
+    ...new Map(
+      keys.map((key) => [key.branch ? `${key.name}\u0000${key.value}` : key.name, key]),
+    ).values(),
+  ];
+}
+
+const asBranch = (key: KeyValue): KeyValue => ({ ...key, branch: true });
+
+/**
+ * A sort's keys, a key the user picks included: `{ [sortBy]: dir }` where
+ * `sortBy = query.sortBy ?? "updatedAt"` and `sortBy?: "name" | "currentStock"`
+ * is every name it can hold — the literals it falls back to, and the union its
+ * type declares.
+ */
+function sortKeys(node: Node, fn: Node): KeyValue[] {
+  const keys = keysOf(node, fn, 0);
+  for (const property of objectOf(node, fn)?.getProperties() ?? []) {
+    if (!Node.isPropertyAssignment(property)) continue;
+    const nameNode = property.getNameNode();
+    const value = property.getInitializer();
+    if (!Node.isComputedPropertyName(nameNode) || !value) continue;
+    let picked: Node = nameNode.getExpression();
+    if (Node.isIdentifier(picked)) {
+      const declaration = localVariable(fn, picked.getText());
+      const init =
+        declaration && Node.isVariableDeclaration(declaration)
+          ? declaration.getInitializer()
+          : undefined;
+      if (init) picked = init;
+    }
+    const names = new Set<string>();
+    for (const part of [picked, ...picked.getDescendants()]) {
+      if (Node.isStringLiteral(part)) names.add(part.getLiteralValue());
+      // `query.sortBy`, `query` a parameter typed `MedicineQuery`: the property's union.
+      if (!Node.isPropertyAccessExpression(part)) continue;
+      const parameter = parametersOf(fn).find(
+        (p) => p.getName() === part.getExpression().getText(),
+      );
+      const owner = parameter?.getTypeNode();
+      const declared =
+        owner && Node.isTypeReference(owner)
+          ? READER.current?.declaration(owner.getTypeName().getText(), owner.getSourceFile())
+          : undefined;
+      const member = (
+        declared as unknown as { getProperty?: (name: string) => Node | undefined }
+      )?.getProperty?.(part.getName());
+      for (const name of literalUnion(
+        member && Node.isPropertySignature(member) ? member.getTypeNode() : undefined,
+      ))
+        names.add(name);
+    }
+    for (const name of names) keys.push({ name, value: value.getText(), from: 'input' });
+  }
+  return keys;
+}
+
+/** `"a" | "b"`, directly or through a type alias: the strings it allows. */
+function literalUnion(type: Node | undefined, depth = 0): string[] {
+  if (!type || depth > 3) return [];
+  if (Node.isTypeReference(type)) {
+    const alias = READER.current?.declaration(type.getTypeName().getText(), type.getSourceFile());
+    return alias && Node.isTypeAliasDeclaration(alias)
+      ? literalUnion(alias.getTypeNode(), depth + 1)
+      : [];
+  }
+  const parts = Node.isUnionTypeNode(type) ? type.getTypeNodes() : [type];
+  return parts.flatMap((part) => {
+    const literal = Node.isLiteralTypeNode(part) ? part.getLiteral() : undefined;
+    return literal && Node.isStringLiteral(literal) ? [literal.getLiteralValue()] : [];
+  });
 }
 
 /** `projection: { name: 1, clinic_id: 1 }`: the fields a read asks for. */
@@ -1438,8 +1719,16 @@ function arrayItems(value: Node, fn: Node, depth = 0): ArrayItem[] {
 }
 
 /** The items of an array: written inline, or a variable filled with `.push(…)`. */
-function arrayElements(value: Node, fn: Node): Node[] {
-  if (Node.isArrayLiteralExpression(value)) return value.getElements();
+function arrayElements(value: Node, fn: Node, depth = 0): Node[] {
+  // `[...windowStages, { $limit: 10 }]`: a spread array's items are this one's.
+  if (Node.isArrayLiteralExpression(value))
+    return value
+      .getElements()
+      .flatMap((element) =>
+        Node.isSpreadElement(element) && depth < 3
+          ? arrayElements(element.getExpression(), fn, depth + 1)
+          : [element],
+      );
   if (!Node.isIdentifier(value)) return [];
   const name = value.getText();
   const declaration = localVariable(fn, name);
@@ -1447,12 +1736,52 @@ function arrayElements(value: Node, fn: Node): Node[] {
   const pushed = fn
     .getDescendantsOfKind(SyntaxKind.CallExpression)
     .filter((call) => call.getExpression().getText() === `${name}.push`)
-    .flatMap((call) => call.getArguments());
-  return [...(init && Node.isArrayLiteralExpression(init) ? init.getElements() : []), ...pushed];
+    // `pipeline.push(...windowStages)`: the spread array's stages.
+    .flatMap((call) =>
+      call
+        .getArguments()
+        .flatMap((arg) =>
+          Node.isSpreadElement(arg) && depth < 3
+            ? arrayElements(arg.getExpression(), fn, depth + 1)
+            : [arg],
+        ),
+    );
+  // `aggQuery = [...filters, ...aggQuery]`: what it is reassigned to, without reading itself again.
+  const reassigned = fn
+    .getDescendantsOfKind(SyntaxKind.BinaryExpression)
+    .filter(
+      (node) =>
+        node.getOperatorToken().getKind() === SyntaxKind.EqualsToken &&
+        node.getLeft().getText() === name &&
+        Node.isArrayLiteralExpression(node.getRight()),
+    )
+    .flatMap((node) =>
+      (node.getRight() as ArrayLiteralExpression)
+        .getElements()
+        .flatMap((element) =>
+          Node.isSpreadElement(element) && element.getExpression().getText() !== name && depth < 3
+            ? arrayElements(element.getExpression(), fn, depth + 1)
+            : Node.isSpreadElement(element)
+              ? []
+              : [element],
+        ),
+    );
+  return [
+    ...(init && Node.isArrayLiteralExpression(init) ? arrayElements(init, fn, depth + 1) : []),
+    ...reassigned,
+    ...pushed,
+  ];
 }
 
 /** The code each field's writes and lookups were read from, so mentions do not repeat it. */
 const READ_FROM = new Map<string, Node[]>();
+
+/**
+ * Lookups a query on one collection makes on another, inside a `$lookup` pipeline:
+ * credited once every collection is read. A collection read alone (`only`) does not
+ * see them; the dashboard carries them over from the whole report.
+ */
+const JOINED: Array<{ collection: string; name: string; lookup: FieldLookup }> = [];
 
 /** The key itself: `mrp` for `batches[].mrp`, `mobile_number` for `pharmacy_contacts.mobile_number`. */
 const leafOf = (name: string): string => name.split(/[.\]]/).pop()!.replace(/\[$/, '');
@@ -1492,7 +1821,119 @@ function resolveDerivations(
 }
 
 /** The report's source reader, for opening a helper in another file. */
-const READER: { current?: SourceReader } = {};
+const READER: { current?: SourceReader; graph?: FlowGraph } = {};
+
+/**
+ * The keys callers hand an untyped parameter, one call away: the graph knows who
+ * calls the function, the source what each passes in that position.
+ */
+function callerKeys(fn: Node, name: string, depth: number): KeyValue[] {
+  const { current: reader, graph } = READER;
+  // A filter's untyped parameter is an id or a query: its callers add nothing but time.
+  if (!reader || !graph || depth > 2 || CALLERS.reading) return [];
+  const position = parametersOf(fn).findIndex((p) => p.getName() === name);
+  const method = nameOf(fn)?.split('.').pop();
+  if (position < 0 || !method) return [];
+  // Once per function and parameter; set empty first, so a call cycle ends.
+  const byName = CALLERS.keys.get(fn) ?? new Map<string, KeyValue[]>();
+  CALLERS.keys.set(fn, byName);
+  const cached = byName.get(name);
+  if (cached) return cached;
+  byName.set(name, []);
+  CALLERS.methods ??= new Map(
+    graph
+      .nodesOfKind('method')
+      .filter((node) => node.source)
+      .map((node) => [`${node.source!.file}:${node.source!.line}`, node]),
+  );
+  const self = CALLERS.methods.get(
+    `${reader.relative(fn.getSourceFile())}:${fn.getStartLineNumber()}`,
+  );
+  if (!self) return [];
+  const keys = callerArguments(fn, name).flatMap(({ arg, fn: callerFn }) =>
+    keysOf(arg, callerFn, depth + 1),
+  );
+  byName.set(name, keys);
+  return keys;
+}
+
+/** What each caller passes for a parameter, with the function it is passed from. */
+function callerArguments(fn: Node, name: string): Array<{ arg: Node; fn: Node }> {
+  const { current: reader, graph } = READER;
+  if (!reader || !graph) return [];
+  const position = parametersOf(fn).findIndex((p) => p.getName() === name);
+  const method = nameOf(fn)?.split('.').pop();
+  if (position < 0 || !method) return [];
+  CALLERS.methods ??= new Map(
+    graph
+      .nodesOfKind('method')
+      .filter((node) => node.source)
+      .map((node) => [`${node.source!.file}:${node.source!.line}`, node]),
+  );
+  const self = CALLERS.methods.get(
+    `${reader.relative(fn.getSourceFile())}:${fn.getStartLineNumber()}`,
+  );
+  if (!self) return [];
+  const found: Array<{ arg: Node; fn: Node }> = [];
+  for (const caller of graph.predecessors(self.id, ['calls'])) {
+    const callerFn = caller.source
+      ? functionAt(reader, caller.source.file, caller.source.line)
+      : undefined;
+    if (!callerFn) continue;
+    for (const call of callsOf(callerFn)) {
+      if (call.getExpression().getText().split('.').pop() !== method) continue;
+      const arg = call.getArguments()[position];
+      if (arg) found.push({ arg, fn: callerFn });
+    }
+  }
+  return found;
+}
+
+/** Per report: method nodes by where they start, functions by position, calls by function. */
+const CALLERS: {
+  methods?: Map<string, FlowNode>;
+  functions: Map<string, Map<number, Node>>;
+  calls: WeakMap<Node, CallExpression[]>;
+  keys: WeakMap<Node, Map<string, KeyValue[]>>;
+  /** Set while a filter is read: its parameters are not followed to callers. */
+  reading: boolean;
+} = { functions: new Map(), calls: new WeakMap(), keys: new WeakMap(), reading: false };
+
+/** A function's calls, listed once. */
+function callsOf(fn: Node): CallExpression[] {
+  let calls = CALLERS.calls.get(fn);
+  if (!calls) {
+    calls = fn.getDescendantsOfKind(SyntaxKind.CallExpression);
+    CALLERS.calls.set(fn, calls);
+  }
+  return calls;
+}
+
+/** The function starting on `line` in `file`: each file's functions indexed by line, once. */
+function functionAt(reader: SourceReader, file: string, line: number): Node | undefined {
+  let byLine = CALLERS.functions.get(file);
+  if (!byLine) {
+    byLine = new Map();
+    const source = reader.file(file);
+    const functions = source
+      ? [
+          ...source.getDescendantsOfKind(SyntaxKind.MethodDeclaration),
+          ...source.getDescendantsOfKind(SyntaxKind.FunctionDeclaration),
+          ...source.getDescendantsOfKind(SyntaxKind.ArrowFunction),
+        ]
+      : [];
+    // The compiler's own line map: one binary search per function, not a count from the top.
+    const lines = source?.compilerNode;
+    for (const fn of functions) {
+      const at = lines
+        ? lines.getLineAndCharacterOfPosition(fn.getStart()).line + 1
+        : fn.getStartLineNumber();
+      if (!byLine.has(at)) byLine.set(at, fn);
+    }
+    CALLERS.functions.set(file, byLine);
+  }
+  return byLine.get(line);
+}
 
 function keyValue(name: string, value: Node, fn: Node): KeyValue {
   const list = READ_FROM.get(name) ?? [];
@@ -1614,11 +2055,17 @@ function assignedKeys(name: string, fn: Node, depth: number): KeyValue[] {
   for (const node of fn.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
     if (node.getOperatorToken().getKind() !== SyntaxKind.EqualsToken) continue;
     const left = node.getLeft();
+    // `x = { ...dto, template_id }` later in the function: what it can hold then, too.
+    if (Node.isIdentifier(left) && left.getText() === name && depth < 3) {
+      keys.push(...keysOf(node.getRight(), fn, depth + 1));
+      continue;
+    }
     if (!Node.isPropertyAccessExpression(left) || left.getExpression().getText() !== name) continue;
     const key = left.getName();
     const value = node.getRight();
     if (/^\$(or|and|nor)$/.test(key)) {
-      for (const element of arrayElements(value, fn)) keys.push(...keysOf(element, fn, depth + 1));
+      for (const element of arrayElements(value, fn))
+        keys.push(...keysOf(element, fn, depth + 1).map(asBranch));
     } else keys.push(keyValue(key, value, fn));
   }
   return keys;
@@ -2061,10 +2508,20 @@ function entriesOf(graph: FlowGraph, field: DatabaseField, frontend: Frontend): 
       const route = graph.nodesOfKind('route').find((node) => node.label === endpoint);
       const queued = route ? pathHops(graph, route, write.nodeId, new Set()).queued : undefined;
       // Keyed with the endpoint and the writer: one form used to add and to edit is two paths.
-      found.set(`${input.at.file}:${input.at.line}:${endpoint ?? ''}:${write.in ?? ''}`, {
+      const id = `${input.at.file}:${input.at.line}:${endpoint ?? ''}:${write.in ?? ''}`;
+      // One dialog opened from several places is one path, reached by every one of them.
+      const seen = found.get(id);
+      if (seen) {
+        if (!seen.actions.some((a) => a.flowId === action.flowId))
+          seen.actions.push({ flowId: action.flowId, title: action.title });
+        continue;
+      }
+      found.set(id, {
+        actions: [{ flowId: action.flowId, title: action.title }],
         kind: 'form',
         key: input.key,
         ...(input.label ? { label: input.label } : {}),
+        ...(input.picked ? { picked: true as const } : {}),
         flowId: action.flowId,
         title: action.title,
         source: input.at,
@@ -2116,13 +2573,14 @@ function codeEntriesOf(
         ).map((r) => r.label),
       );
       for (const route of routesRunning(graph, write.nodeId)) {
-        const flow = frontend
+        const reaching = frontend
           .flowsCalling(route.label)
-          .find(
+          .filter(
             (candidate) =>
               !formFlows.has(candidate.id) &&
-              frontend.flowFiles(candidate).includes(mention.source.file),
+              frontend.flowFiles(candidate, { components: false }).includes(mention.source.file),
           );
+        const flow = reaching[0];
         if (!flow) continue;
         // Reached only through another writer: name it.
         const via = direct.has(route.label)
@@ -2132,6 +2590,7 @@ function codeEntriesOf(
         const key = `${mention.source.file}:${mention.source.line}:${route.label}`;
         if (found.has(key)) continue;
         found.set(key, {
+          actions: reaching.map((candidate) => ({ flowId: candidate.id, title: candidate.title })),
           kind: 'code',
           key: field.name,
           code: mention.code,
@@ -2185,7 +2644,7 @@ class Frontend {
 
   constructor(
     private readonly graph: FlowGraph,
-    flows: readonly FeatureFlow[],
+    private readonly flows: readonly FeatureFlow[],
     private readonly reader: SourceReader,
   ) {
     this.flowById = new Map(flows.map((flow) => [flow.id, flow]));
@@ -2211,13 +2670,19 @@ class Frontend {
   }
 
   /** One action's frontend files, and the files they import. */
-  flowFiles(flow: FeatureFlow): string[] {
+  /**
+   * The browser files an action runs through, and what they import. With
+   * `components: false`, an imported component is left out: a dialog the page
+   * renders runs its own actions, not this one.
+   */
+  flowFiles(flow: FeatureFlow, { components = true } = {}): string[] {
     const imports = this.graph.meta.imports ?? {};
     const files = new Set<string>();
     for (const step of flow.steps)
       if (FRONT_KINDS.has(step.kind) && step.file) {
         files.add(step.file);
-        for (const imported of imports[step.file] ?? []) files.add(imported);
+        for (const imported of imports[step.file] ?? [])
+          if (components || !/\.[jt]sx$/.test(imported)) files.add(imported);
       }
     return [...files];
   }
@@ -2227,7 +2692,7 @@ class Frontend {
     if (!found) {
       const flow = this.flowById.get(flowId);
       try {
-        found = flow ? formFieldsOf(this.graph, flow, this.reader) : [];
+        found = flow ? formFieldsOf(this.graph, flow, this.reader, this.flows) : [];
       } catch {
         found = [];
       }
@@ -2267,6 +2732,8 @@ class Frontend {
       for (const node of reads.get(field) ?? []) {
         if (Node.isPropertyAccessExpression(node) && !records.has(node.getExpression().getText()))
           continue;
+        // Every read tells which variables hold a record; only some put the value on screen.
+        if (!rendered(node)) continue;
         const label = labelNear(node);
         shown.push({
           code: condense(displayExpression(node).getText(), 90),
@@ -2297,7 +2764,8 @@ class Frontend {
         parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken
       )
         continue;
-      if (NOT_RECORDS.test(access.getExpression().getText())) continue;
+      // By its last name: `r.raw.mrp` reads an uploaded row as given, not a stored record.
+      if (NOT_RECORDS.test(access.getExpression().getText().split('.').pop() ?? '')) continue;
       const list = found.get(access.getName()) ?? [];
       list.push(access);
       found.set(access.getName(), list);
@@ -2331,7 +2799,7 @@ const COMMON_KEYS = new Set([
 
 /** Receivers that hold something other than a loaded record: a file, an event, the form being edited. */
 const NOT_RECORDS =
-  /^(file|files|event|e|err|error|window|document|process|router|values|form|draft|props|params)\??$/;
+  /^(file|files|event|e|err|error|window|document|process|router|values|form|draft|props|params|raw)\??$/;
 
 /** The expression a read sits in: `formatCurrency(m.sellingPrice)`, not just `m.sellingPrice`. */
 function displayExpression(node: Node): Node {
@@ -2766,12 +3234,27 @@ function savedKeys(name: string, call: Node, fn: Node): KeyValue[] {
  * Walked back from the query through the code that calls it, so a helper two
  * calls below a worker still counts as the job's.
  */
-function runnerOf(graph: FlowGraph, opId: string): 'job' | 'endpoint' | 'script' {
+function runnerOf(graph: FlowGraph, opId: string): Exclude<DatabaseOperation['runBy'], 'user'> {
   const seen = new Set<string>([opId]);
   const queue = [opId];
   let endpoint = false;
+  let request = false;
+  let socket = false;
+  let script = false;
   while (queue.length && seen.size < 5000) {
     const id = queue.shift()!;
+    const node = graph.node(id);
+    const trigger = node?.meta?.['trigger'];
+    if (trigger === 'job') return 'job';
+    if (trigger === 'request') request = true;
+    if (trigger === 'socket') socket = true;
+    // `main()` in `scripts/backfill.js`: run by hand.
+    if (
+      node?.source &&
+      (/(^|\/)(scripts?|bin|migrations?|seeds?|seeders?)\//.test(node.source.file) ||
+        node.label === 'main')
+    )
+      script = true;
     for (const edge of graph.edgesTo(id)) {
       if (edge.meta?.['background'] === true) return 'job';
       const from = graph.node(edge.from);
@@ -2781,5 +3264,113 @@ function runnerOf(graph: FlowGraph, opId: string): 'job' | 'endpoint' | 'script'
       queue.push(edge.from);
     }
   }
-  return endpoint ? 'endpoint' : 'script';
+  return endpoint
+    ? 'endpoint'
+    : request
+      ? 'request'
+      : socket
+        ? 'socket'
+        : script
+          ? 'script'
+          : 'unused';
+}
+
+/** `/** A doctor's profile. *\/` above `class Doctor` or `interface Medicine`: its first sentence. */
+function descriptionOf(
+  reader: SourceReader,
+  source: SourceRef | undefined,
+): { description?: string } {
+  if (!source) return {};
+  try {
+    const declaration = reader
+      .file(source.file)
+      ?.getStatements()
+      .find((statement) => statement.getStartLineNumber() === source.line);
+    const docs = (
+      declaration as unknown as { getJsDocs?: () => Array<{ getDescription(): string }> }
+    )?.getJsDocs?.();
+    const text = docs?.at(-1)?.getDescription().replace(/\s+/g, ' ').trim();
+    // A sentence ends where the next one starts with a capital: `(e.g. the …)` is not an end.
+    const first = text?.split(/(?<=[.!?])\s+(?=[A-Z])/)[0];
+    return first ? { description: first.length > 90 ? `${first.slice(0, 87)}…` : first } : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * The `doc.save()` a `const doc = new this.model(dto)` on this line ends in: the
+ * query is recorded where the document is built, the save may be lines below.
+ */
+function saveOfNew(
+  reader: SourceReader,
+  file: string | undefined,
+  line: number | undefined,
+): CallExpression | undefined {
+  const created = reader
+    .file(file)
+    ?.getDescendantsOfKind(SyntaxKind.NewExpression)
+    .find((node) => node.getStartLineNumber() === line);
+  const holder = created?.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
+  const fn = created && nearestFunction(created);
+  if (!holder || !fn) return undefined;
+  return fn
+    .getDescendantsOfKind(SyntaxKind.CallExpression)
+    .find(
+      (call) => call.getExpression().getText().replace(/\s+/g, '') === `${holder.getName()}.save`,
+    );
+}
+
+/** Attributes whose value is never on screen: handlers, list keys, styling, refs. */
+const UNSHOWN_ATTRIBUTE = /^(on[A-Z]\w*|key|ref|className|class|style|id|htmlFor|disabled|hidden)$/;
+
+/** Calls whose first argument sends or stores a value rather than shows it: a request, a mutation, a state copy, a route. */
+const SENDS =
+  /(^|\.)(mutate\w*|post|put|patch|delete|fetch|axios|request\w*|submit\w*|useState|set[A-Z]\w*|push|replace)$/;
+/** Array methods whose callback only filters, finds or orders — the list itself is still shown. */
+const PICKS = /\.(filter|find|findIndex|findLast|some|every|sort|includes|indexOf)$/;
+
+/**
+ * A read that can put the value on screen. Left out: event handlers, list keys
+ * and styling, what a filter or sort callback compares, navigation, request
+ * payloads and state copies. A detail row built beside the JSX (`{ value: m.mrp }`),
+ * an edit form's prefill, a toast and a label picked by a comparison all count.
+ */
+function rendered(access: Node): boolean {
+  for (
+    let child: Node = access, node = access.getParent();
+    node;
+    child = node, node = node.getParent()
+  ) {
+    if (Node.isJsxAttribute(node) && UNSHOWN_ATTRIBUTE.test(node.getNameNode().getText()))
+      return false;
+    if (Node.isCallExpression(node)) {
+      const callee = node.getExpression().getText();
+      const [first] = node.getArguments();
+      if (first === child && SENDS.test(callee)) return false;
+      if (PICKS.test(callee) && node.getArguments().includes(child as never)) return false;
+    }
+    if (Node.isFunctionDeclaration(node) || Node.isMethodDeclaration(node))
+      return !/^(handle|on)[A-Z]/.test(node.getName() ?? '');
+    if (Node.isVariableDeclaration(node) && /^(handle|on)[A-Z]/.test(node.getName())) return false;
+    if (Node.isJsxElement(node) || Node.isJsxSelfClosingElement(node)) return true;
+  }
+  return true;
+}
+
+/** A string literal's value, or undefined. */
+function readStringValue(node: Node | undefined): string | undefined {
+  return node && (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node))
+    ? node.getLiteralValue()
+    : undefined;
+}
+
+/** A write that marks the record gone without erasing it. */
+function isSoftDelete(field: string, value: string): boolean {
+  const v = value.trim();
+  if (/^(is_?)?(deleted|archived|removed|trashed)$/i.test(field)) return /^(true|1)$/.test(v);
+  if (/^(deleted|archived|removed)_?(at|on|date)$/i.test(field))
+    return !/^(null|undefined)$/.test(v);
+  if (/^(is_?)?active$/i.test(field)) return /^(false|0)$/.test(v);
+  return false;
 }

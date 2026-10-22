@@ -210,6 +210,12 @@ export function collectionFor(
   const declaration = findDeclaration(file, head);
   const initializer = declaration?.getInitializer()?.getText() ?? '';
 
+  // const col = mongoose.connection.collection('reminders') — the literal, never the variable's name.
+  const held = /\.collection\s*(?:<[^>]*>)?\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/.exec(initializer);
+  if (held?.[1]) return held[1];
+  // `db.collection(name)`: which one is decided at run time — a guess from the variable would be wrong.
+  if (/\.collection\s*(?:<[^>]*>)?\s*\(/.test(initializer)) return undefined;
+
   // const Note = mongoose.model('Note', schema)
   const named = /\bmodel(?:s)?\s*(?:<[^>]*>)?\s*\(\s*['"]([^'"]+)['"]/.exec(initializer);
   if (named?.[1]) return collectionNameOf(named[1]);

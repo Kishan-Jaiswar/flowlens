@@ -201,8 +201,12 @@ export interface FlowApis {
 }
 
 /** Every request this feature makes, in full. */
-export function flowApis(graph: FlowGraph, flow: FeatureFlow): FlowApis {
-  const flows = resolveFlows(graph, { includeLocalOnly: true });
+export function flowApis(
+  graph: FlowGraph,
+  flow: FeatureFlow,
+  /** Every flow, when the caller already has them: resolving them per call is quadratic. */
+  flows: readonly FeatureFlow[] = resolveFlows(graph, { includeLocalOnly: true }),
+): FlowApis {
   const contract = checkFlowContract(graph, flow);
   const calls: ApiCallDetail[] = [];
 

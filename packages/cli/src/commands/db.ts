@@ -84,7 +84,7 @@ export function renderDatabase(report: DatabaseReport): string {
       report.collections.map((entry) => [
         entry.name,
         entry.model ?? '',
-        (entry.databases ?? []).map((db) => db.name).join(', '),
+        (entry.databases ?? []).map((db) => db.value ?? db.name).join(', '),
         String(entry.fields.length),
         String(entry.operations.filter((op) => op.effect === 'read').length),
         String(entry.operations.filter((op) => op.effect !== 'read').length),
@@ -107,7 +107,7 @@ export function renderCollection(entry: DatabaseCollection): string {
         [
           entry.model && ` ${entry.typed ? 'type' : 'model'} ${entry.model}`,
           entry.databases?.length &&
-            ` in ${entry.databases.map((db) => `${db.name}${db.env ? ' (env)' : ''}`).join(', ')}`,
+            ` in ${entry.databases.map((db) => db.value ?? `${db.name}${db.env ? ' (env)' : ''}`).join(', ')}`,
           entry.source && ` ${entry.source.file}:${entry.source.line}`,
         ]
           .filter(Boolean)
@@ -198,9 +198,11 @@ export function renderCollection(entry: DatabaseCollection): string {
       r.many ? 'many' : 'one',
       r.via === 'query'
         ? 'a query looks it up'
-        : relationIsDeclared(r.via)
-          ? r.via
-          : color.yellow('guessed from the name'),
+        : r.via === 'config'
+          ? 'declared in flowlens.config.json'
+          : relationIsDeclared(r.via)
+            ? r.via
+            : color.yellow('guessed from the name'),
     ]);
   const checks = checksOf(entry);
   if (checks.length) {
@@ -303,7 +305,7 @@ export function renderDatabaseMarkdown(report: DatabaseReport): string {
     out.push(
       `## ${c.name}`,
       '',
-      `${c.fields.length} fields${c.databases?.length ? ` · database ${c.databases.map((db) => `\`${db.name}\``).join(', ')}` : ''}${
+      `${c.fields.length} fields${c.databases?.length ? ` · database ${c.databases.map((db) => `\`${db.value ?? db.name}\``).join(', ')}` : ''}${
         c.model ? ` · ${c.typed ? 'type' : 'model'} \`${c.model}\`` : ''
       }`,
       '',

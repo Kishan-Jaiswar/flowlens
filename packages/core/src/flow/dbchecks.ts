@@ -70,7 +70,15 @@ export function addDatabaseChecks(
       }
     }
 
-    markUnused(collection, textOf);
+    // A query on another collection that `$lookup`s this one reads its fields too.
+    const joiners = collections.flatMap((other) =>
+      other.operations.filter((op) => op.joins?.includes(collection.name) && op.source),
+    );
+    markUnused(
+      collection,
+      textOf,
+      joiners.map((op) => op.source!.file),
+    );
   }
 }
 
@@ -153,7 +161,11 @@ function slowQueries(
 }
 
 /** A field nothing in the app fills, or one it saves but never reads back. Cleanup candidates. */
-function markUnused(collection: DatabaseCollection, textOf: (file: string) => string): void {
+function markUnused(
+  collection: DatabaseCollection,
+  textOf: (file: string) => string,
+  joinedIn: string[] = [],
+): void {
   /**
    * The files that load this collection's records: a record read in a helper
    * (`template.sms_content` after a `findOne`) is read, whatever the field
@@ -161,11 +173,12 @@ function markUnused(collection: DatabaseCollection, textOf: (file: string) => st
    * deleted by somebody; one wrongly called used only goes unmentioned.
    */
   const readers = [
-    ...new Set(
-      collection.operations
+    ...new Set([
+      ...collection.operations
         .filter((op) => op.effect === 'read' && op.source)
         .map((op) => op.source!.file),
-    ),
+      ...joinedIn,
+    ]),
   ]
     .map(textOf)
     .join('\n');
@@ -176,6 +189,7 @@ function markUnused(collection: DatabaseCollection, textOf: (file: string) => st
     // An item inside a list or an object is written with its parent; `_id` by the database.
     if (field.name === '_id' || /[.[]/.test(field.name)) continue;
     const filled =
+      field.defaultValue !== undefined ||
       field.writes.some((write) => write.how !== '$unset') ||
       field.enteredIn.length > 0 ||
       field.mentions.some((mention) => mention.kind === 'sets') ||
@@ -265,8 +279,15 @@ function schemaOf(graph: FlowGraph) {
   return { collections, fields, indexes, links };
 }
 
-/** `record.key`, `record?.key` or `record["key"]` somewhere in `text`. */
+/**
+ * `record.key`, `record?.key`, `record["key"]`, or the key named in a string —
+ * `populate('permission_id')`, `localField: 'role_id'`, `'$disease_category'` —
+ * somewhere in `text`.
+ */
 function readsKey(text: string, key: string): boolean {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`\\.${escaped}\\b|\\[\\s*['"\`]${escaped}['"\`]\\s*\\]`).test(text);
+  // A quoted path may carry an alias in front: `'rolePermissions.permission_id'`, `'$material.name'`.
+  return new RegExp(
+    `\\.${escaped}\\b|['"\`]\\$?(?:[\\w$]+\\.)*${escaped}(?:\\.[\\w.]+)?['"\`]`,
+  ).test(text);
 }

@@ -57,7 +57,22 @@ export function readPathLike(
     return readPathLike(expression.getExpression(), resolve);
   }
   if (Node.isIdentifier(expression) && resolve) {
-    return resolve(expression.getText());
+    return resolve(expression.getText())?.trim();
+  }
+  // `archivePatientEndpoint(id)`: a URL-building function from the constants table.
+  if (
+    Node.isCallExpression(expression) &&
+    Node.isIdentifier(expression.getExpression()) &&
+    resolve
+  ) {
+    return resolve(`${expression.getExpression().getText()}()`);
+  }
+  // `a ? urlA : urlB`: the first readable side; the request reader adds the other as its own call.
+  if (Node.isConditionalExpression(expression)) {
+    return (
+      readPathLike(expression.getWhenTrue(), resolve) ??
+      readPathLike(expression.getWhenFalse(), resolve)
+    );
   }
   return undefined;
 }
@@ -165,6 +180,28 @@ export function propertyValue(
 
 export function stripQuotes(value: string): string {
   return value.replace(/^['"`]|['"`]$/g, '');
+}
+
+/**
+ * The variable or parameter an identifier names, found by name in the scopes
+ * around it — innermost first. Not `getSymbol()`: that builds the type checker
+ * for the whole project, seconds and gigabytes on a large one, to answer what
+ * the enclosing scopes already say.
+ */
+export function declarationOf(identifier: Node): Node | undefined {
+  const name = identifier.getText();
+  for (let scope = enclosingFunction(identifier); ; scope = scope && enclosingFunction(scope)) {
+    const within: Node = scope ?? identifier.getSourceFile();
+    if (scope) {
+      const parameter = scope.getParameters().find((p) => p.getName() === name);
+      if (parameter) return parameter;
+    }
+    const variable = within
+      .getDescendantsOfKind(SyntaxKind.VariableDeclaration)
+      .find((candidate) => candidate.getName() === name && enclosingFunction(candidate) === scope);
+    if (variable) return variable;
+    if (!scope) return undefined;
+  }
 }
 
 /** The nearest enclosing function-like node, if any. */

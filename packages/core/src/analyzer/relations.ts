@@ -25,6 +25,7 @@
 
 import {
   Node,
+  SyntaxKind,
   type CallExpression,
   type PropertyAccessExpression,
   type SourceFile,
@@ -32,7 +33,7 @@ import {
 import type { FlowGraph } from '../graph/graph.js';
 import type { FlowEdge, FlowNode } from '../graph/types.js';
 import { ids } from '../graph/ids.js';
-import { callsIn, calleeMember, lineOf } from './ast.js';
+import { callsIn, calleeMember, declarationOf, enclosingFunction, lineOf } from './ast.js';
 import { collectionNameOf } from './mongo.js';
 import type { PrismaSchema } from './prisma.js';
 import type { LoadedProject } from './project.js';
@@ -228,8 +229,8 @@ function inferredFromNames(
 
     for (const field of graph.successors(model.id, ['defines'])) {
       if (field.kind !== 'field') continue;
-      // A declared ref already said it, and said it better.
-      if (typeof field.meta?.['ref'] === 'string') continue;
+      // A declared ref already said it, and said it better — unless it names no model (`ref: 'Patinet'`).
+      if (graph.successors(field.id, ['references']).length > 0) continue;
 
       const source = field.source
         ? { source: { file: field.source.file, line: field.source.line } }
@@ -237,13 +238,16 @@ function inferredFromNames(
 
       // `batches[].supplierId`: the key's own name, a list when any step is one.
       const guess = referenceTargetOf(field.label.split('.').at(-1)!, collections);
-      if (guess) {
+      // `orders.order_id` is the order's own business id, not a link back to orders.
+      if (guess && guess.collection !== from) {
+        const type = String(field.meta?.['type'] ?? '');
         record(graph, field.id, {
           from,
           field: field.label,
           to: guess.collection,
           via: 'naming',
-          many: guess.many || field.label.includes('[]'),
+          many:
+            guess.many || field.label.includes('[]') || /\[\s*\]\s*$|^(Readonly)?Array</.test(type),
           followed: false,
           ...source,
         });
@@ -364,7 +368,8 @@ function queryJoins(loaded: LoadedProject, graph: FlowGraph, collections: Set<st
   for (const file of loaded.sourceFiles) {
     const mine = wanted.get(loaded.rel(file));
     if (!mine) continue;
-    for (const [id, text, call] of statementsFor(file, mine)) statements.set(id, { text, call });
+    for (const [id, text, call] of statementsFor(file, mine))
+      statements.set(id, { text: text + callerPipelines(loaded, graph, call), call });
   }
   /** Queries by where they are, for "this record came from that query". */
   const opAt = new Map<string, FlowNode>();
@@ -410,13 +415,11 @@ function queryJoins(loaded: LoadedProject, graph: FlowGraph, collections: Set<st
     for (const lookup of lookupsIn(text)) {
       if (!collections.has(lookup.from)) continue;
       joins.add(lookup.from);
-      if (!lookup.localField) continue;
-      follows.add(lookup.localField);
-      const fieldId = fieldNodeFor(graph, collection, lookup.localField);
-      record(graph, fieldId, {
-        from: collection,
-        field: lookup.localField,
-        to: lookup.from,
+      const link = lookupLink(lookup, collection, aliasesIn(text));
+      if (!link) continue;
+      if (link.from === collection) follows.add(link.field);
+      record(graph, fieldNodeFor(graph, link.from, link.field), {
+        ...link,
         via: 'lookup',
         many: false,
         followed: true,
@@ -555,7 +558,10 @@ function statementsFor(
     const statement = call.getFirstAncestor(
       (node) => Node.isStatement(node) || Node.isVariableStatement(node),
     );
-    found.push([match.id, (statement ?? call).getText(), call]);
+    // An aggregate's stages are often built in variables first (`const lookup = { $lookup: … }`):
+    // its whole function is read, so a join declared a few lines up still counts.
+    const scope = member === 'aggregate' ? enclosingFunction(call) : undefined;
+    found.push([match.id, (scope ?? statement ?? call).getText(), call]);
   }
   return found;
 }
@@ -597,7 +603,7 @@ function idFollowsIn(call: CallExpression): Array<{ field: string; loadedAt: num
     }
     if (!holder || !field || !Node.isIdentifier(holder) || NOT_REFERENCES.has(field.toLowerCase()))
       continue;
-    const declaration = holder.getSymbol()?.getDeclarations()[0];
+    const declaration = declarationOf(holder);
     const init =
       declaration && Node.isVariableDeclaration(declaration)
         ? declaration.getInitializer()
@@ -608,22 +614,87 @@ function idFollowsIn(call: CallExpression): Array<{ field: string; loadedAt: num
   return found;
 }
 
+/** Names a pipeline makes itself: `as: 'staffClinics'`, `$addFields: { allClinics: … }`. */
+function aliasesIn(text: string): Set<string> {
+  const found = new Set<string>();
+  for (const match of text.matchAll(/\bas\s*:\s*['"`]([\w$]+)['"`]/g)) found.add(match[1]!);
+  for (const match of text.matchAll(/\$(?:addFields|set)\s*:\s*\{\s*['"`]?([\w$]+)/g))
+    found.add(match[1]!);
+  return found;
+}
+
+/**
+ * The code of the functions that hand an aggregate its pipeline: `aggregation(query)`
+ * runs what `getList` built, `$lookup` stages included. One call away, through the graph.
+ */
+function callerPipelines(loaded: LoadedProject, graph: FlowGraph, call: CallExpression): string {
+  if (calleeMember(call) !== 'aggregate') return '';
+  const fn = enclosingFunction(call);
+  const arg = call.getArguments()[0];
+  if (!fn || !arg || !Node.isIdentifier(arg)) return '';
+  if (!fn.getParameters().some((p) => p.getName() === arg.getText())) return '';
+  const rel = loaded.rel(fn.getSourceFile());
+  const line = lineOf(fn);
+  const self = graph
+    .nodesOfKind('method')
+    .find((node) => node.source?.file === rel && node.source.line === line);
+  if (!self) return '';
+  const texts: string[] = [];
+  for (const caller of graph.predecessors(self.id, ['calls'])) {
+    if (!caller.source) continue;
+    const file = loaded.sourceFiles.find((f) => loaded.rel(f) === caller.source!.file);
+    const callerFn = file
+      ?.getDescendantsOfKind(SyntaxKind.MethodDeclaration)
+      .find((m) => lineOf(m) === caller.source!.line);
+    if (callerFn) texts.push(callerFn.getText());
+  }
+  return texts.length ? `\n${texts.join('\n')}` : '';
+}
+
 /** A link's identity, for matching a recorded edge without searching for it. */
 function linkKey(from: unknown, field: unknown, to: unknown): string {
   return `${String(from)}\u0000${String(field)}\u0000${String(to)}`;
 }
 
-/** `$lookup: { from: 'customers', localField: 'customerId', ... }` */
-function lookupsIn(text: string): Array<{ from: string; localField?: string }> {
-  const found: Array<{ from: string; localField?: string }> = [];
+/** `$lookup: { from: 'customers', localField: 'customerId', foreignField: '_id', ... }` */
+function lookupsIn(
+  text: string,
+): Array<{ from: string; localField?: string; foreignField?: string }> {
+  const found: Array<{ from: string; localField?: string; foreignField?: string }> = [];
   for (const match of text.matchAll(/\$lookup\s*:\s*\{([^}]*)\}/g)) {
     const body = match[1] ?? '';
     const from = /\bfrom\s*:\s*['"`]([^'"`]+)['"`]/.exec(body)?.[1];
     if (!from) continue;
     const localField = /\blocalField\s*:\s*['"`]([^'"`]+)['"`]/.exec(body)?.[1];
-    found.push({ from, ...(localField ? { localField } : {}) });
+    const foreignField = /\bforeignField\s*:\s*['"`]([^'"`]+)['"`]/.exec(body)?.[1];
+    found.push({
+      from,
+      ...(localField ? { localField } : {}),
+      ...(foreignField ? { foreignField } : {}),
+    });
   }
   return found;
+}
+
+/**
+ * Which side of a `$lookup` holds the id, as a link: `localField: 'customerId',
+ * foreignField: '_id'` is this collection's `customerId` → there; `localField:
+ * '_id', foreignField: 'orderId'` is there's `orderId` → here. Two non-id fields
+ * (`staff_id` ↔ `staff_id`) join siblings, not a record and its owner; a local
+ * field an earlier stage of the pipeline made (`as: 'staffClinics'`) is not stored.
+ */
+function lookupLink(
+  lookup: { from: string; localField?: string; foreignField?: string },
+  collection: string,
+  aliases: ReadonlySet<string>,
+): { from: string; field: string; to: string } | undefined {
+  const { localField, foreignField = '_id' } = lookup;
+  if (!localField) return undefined;
+  if (localField === '_id' && foreignField !== '_id')
+    return { from: lookup.from, field: foreignField, to: collection };
+  if (foreignField !== '_id' || localField === '_id') return undefined;
+  if (aliases.has(localField.split('.')[0]!)) return undefined;
+  return { from: collection, field: localField, to: lookup.from };
 }
 
 /**

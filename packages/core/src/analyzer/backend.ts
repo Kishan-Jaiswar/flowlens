@@ -1,3 +1,4 @@
+import { dirname, join } from 'node:path';
 import {
   Node,
   SyntaxKind,
@@ -88,6 +89,11 @@ export interface BackendIndex {
   classes: Map<string, ClassInfo>;
   /** Model name -> collection name. */
   collections: Map<string, string>;
+  /**
+   * Model names the project registers (`forFeature`, `@InjectModel`, `model('X')`).
+   * Empty when it registers none: then every `@Schema()` class counts.
+   */
+  registered?: Set<string>;
 }
 
 export interface BackendConfig {
@@ -145,6 +151,7 @@ export function analyzeBackend(
     serverFiles.push({ file, rel });
   }
 
+  index.registered = registeredModels(serverFiles.map(({ file }) => file));
   for (const { file, rel } of serverFiles) {
     safely(rel, () => {
       declareClasses(file, rel, graph, index);
@@ -217,13 +224,19 @@ function declareClasses(
           kind: 'method',
           label: `${name}.${methodName}`,
           source: { file: rel, line: lineOf(method) },
-          meta: { class: name, method: methodName, layer: role },
+          meta: {
+            class: name,
+            method: methodName,
+            layer: role,
+            ...(triggerOf(declaration, method) ? { trigger: triggerOf(declaration, method) } : {}),
+          },
         });
         graph.addEdge({ from: nodeId, to: methodId, kind: 'defines' });
       }
     }
 
-    if (role === 'model') {
+    // A schema nothing registers is a sub-document's shape (`[PatientFormFieldSchema]`), not a collection.
+    if (role === 'model' && (!index.registered?.size || index.registered.has(name))) {
       declareSchemaClass(declaration, name, rel, graph, index);
     }
 
@@ -233,6 +246,67 @@ function declareClasses(
 
     index.classes.set(name, info);
   }
+}
+
+/**
+ * The models a Nest/Mongoose project turns into collections:
+ * `MongooseModule.forFeature([{ name: Patient.name, schema }])`, `@InjectModel(Patient.name)`,
+ * `mongoose.model('Patient', schema)`. Read as text, once, across the server files.
+ */
+function registeredModels(files: SourceFile[]): Set<string> {
+  const found = new Set<string>();
+  const patterns = [
+    /\bname\s*:\s*([A-Za-z_$][\w$]*)\.name\b/g,
+    /@InjectModel\(\s*([A-Za-z_$][\w$]*)\.name\b/g,
+    /@InjectModel\(\s*['"`]([^'"`]+)['"`]/g,
+    // `ref: 'Product'` names a model Mongoose has to know to populate it.
+    /\bref\s*:\s*['"`]([^'"`]+)['"`]/g,
+    /\bref\s*:\s*([A-Za-z_$][\w$]*)\.name\b/g,
+    /\bmodel\s*(?:<[^>]*>)?\(\s*['"`]([^'"`]+)['"`]/g,
+  ];
+  for (const file of files) {
+    const text = file.getFullText();
+    if (!/forFeature|InjectModel|\bmodel\s*[<(]|\bref\s*:/.test(text)) continue;
+    // `name: X.name` counts only inside a `forFeature` registration.
+    for (const block of text.matchAll(/forFeature(?:Async)?\s*\(([\s\S]*?)\)\s*[,\]]/g))
+      for (const match of (block[1] ?? '').matchAll(patterns[0]!)) found.add(match[1]!);
+    for (const pattern of patterns.slice(1))
+      for (const match of text.matchAll(pattern)) found.add(match[1]!);
+  }
+  return found;
+}
+
+/**
+ * What runs a method when no code calls it: a timer or a queue (`job`), every
+ * request (`request`: a login strategy, a guard, a middleware), or a live
+ * connection (`socket`). Read from the framework's own decorators and shapes.
+ */
+function triggerOf(
+  declaration: ClassDeclaration,
+  method: MethodDeclaration,
+): 'job' | 'request' | 'socket' | undefined {
+  const on = method.getDecorators().map((d) => d.getName());
+  const classOn = declaration.getDecorators().map((d) => d.getName());
+  const name = method.getName();
+  if (
+    on.some((d) =>
+      /^(Cron|Interval|Timeout|Process|OnQueue\w*|OnEvent|EventPattern|MessagePattern)$/.test(d),
+    )
+  )
+    return 'job';
+  if (classOn.includes('Processor') && name === 'process') return 'job';
+  if (on.includes('SubscribeMessage')) return 'socket';
+  if (
+    classOn.includes('WebSocketGateway') &&
+    /^handle(Connection|Disconnect)$|^afterInit$/.test(name)
+  )
+    return 'socket';
+  const heritage = declaration.getText().slice(0, declaration.getText().indexOf('{'));
+  if (/\bPassportStrategy\b/.test(heritage) && name === 'validate') return 'request';
+  if (/\bimplements\b[^{]*\bCanActivate\b/.test(heritage) && name === 'canActivate')
+    return 'request';
+  if (/\bimplements\b[^{]*\bNestMiddleware\b/.test(heritage) && name === 'use') return 'request';
+  return undefined;
 }
 
 function classRole(declaration: ClassDeclaration, name: string): ClassRole {
@@ -274,14 +348,21 @@ function declareSchemaClass(
   index: BackendIndex,
 ): void {
   const modelName = name.replace(/(Schema|Document|Entity)$/, '') || name;
+  const schemaOptions = asObjectLiteral(getDecorator(declaration, 'Schema')?.getArguments()[0]);
   const collection =
-    readString(
-      (() => {
-        const schemaDecorator = getDecorator(declaration, 'Schema');
-        const options = asObjectLiteral(schemaDecorator?.getArguments()[0]);
-        return options ? propertyValue(options, 'collection') : undefined;
-      })(),
-    ) ?? collectionNameOf(modelName);
+    readString(schemaOptions ? propertyValue(schemaOptions, 'collection') : undefined) ??
+    collectionNameOf(modelName);
+  // `@Schema({ timestamps: true })` or `{ createdAt: 'created_at' }`: Mongoose fills these itself.
+  const timestamps = schemaOptions
+    ? propertyValue(schemaOptions, 'timestamps')?.getText()
+    : undefined;
+  const stamped = new Set<string>();
+  if (timestamps && timestamps !== 'false') {
+    const named = [...timestamps.matchAll(/(createdAt|updatedAt)\s*:\s*['"`]([^'"`]+)['"`]/g)];
+    for (const key of ['createdAt', 'updatedAt'])
+      if (!new RegExp(`${key}\\s*:\\s*false`).test(timestamps))
+        stamped.add(named.find((m) => m[1] === key)?.[2] ?? key);
+  }
 
   registerModel(graph, index, modelName, collection, { file: rel, line: lineOf(declaration) });
 
@@ -306,6 +387,7 @@ function declareSchemaClass(
          */
         ...schemaRefOf(asObjectLiteral(prop.getArguments()[0]), declaredType),
         ...fieldRulesOf(asObjectLiteral(prop.getArguments()[0])),
+        ...(stamped.has(fieldName) ? { defaultValue: 'the time (Mongoose timestamps)' } : {}),
       },
     });
     graph.addEdge({ from: modelId, to: fieldId, kind: 'defines' });
@@ -331,14 +413,17 @@ function schemaRefOf(
 ): { ref?: string; refMany?: boolean } {
   if (!options) return {};
 
-  const direct = readString(propertyValue(options, 'ref'));
+  // `ref: 'Doctor'`, or `ref: Doctor.name` — the class's name is the model's.
+  const refName = (node: Node | undefined) =>
+    readString(node) ?? /^([A-Za-z_$][\w$]*)\.name$/.exec(node?.getText() ?? '')?.[1];
+  const direct = refName(propertyValue(options, 'ref'));
   const typeValue = propertyValue(options, 'type');
   // `type: [{ type: ObjectId, ref: 'X' }]` and `type: { ref: 'X' }`.
   const nestedElement =
     typeValue && Node.isArrayLiteralExpression(typeValue)
       ? asObjectLiteral(typeValue.getElements()[0])
       : asObjectLiteral(typeValue);
-  const nested = nestedElement ? readString(propertyValue(nestedElement, 'ref')) : undefined;
+  const nested = nestedElement ? refName(propertyValue(nestedElement, 'ref')) : undefined;
 
   const ref = direct ?? nested;
   if (!ref) return {};
@@ -373,14 +458,23 @@ function fieldRulesOf(options: ObjectLiteralExpression | undefined): {
   required?: true;
   unique?: true;
   indexed?: true;
+  defaultValue?: string;
+  enumValues?: string[];
 } {
   if (!options) return {};
   const on = (key: string) =>
     /^(true|\[\s*true\b)/.test(propertyValue(options, key)?.getText() ?? '');
+  // `default: Date.now`: the database layer fills it when the code leaves it out.
+  const fallback = propertyValue(options, 'default')?.getText().replace(/\s+/g, ' ');
+  const choices = enumValuesOf(propertyValue(options, 'enum'));
   return {
+    ...(choices.length ? { enumValues: choices } : {}),
     ...(on('required') ? { required: true } : {}),
     ...(on('unique') ? { unique: true } : {}),
     ...(on('index') ? { indexed: true } : {}),
+    ...(fallback
+      ? { defaultValue: fallback.length > 60 ? `${fallback.slice(0, 57)}…` : fallback }
+      : {}),
   };
 }
 
@@ -606,6 +700,8 @@ function resolveRoutes(info: ClassInfo, graph: FlowGraph, config: BackendConfig)
             controller: info.name,
             handler: methodName,
             framework: 'nestjs',
+            // `@All()`: answers any method — an outside system's callback, not a screen's request.
+            ...(verb === 'ALL' ? { anyMethod: true } : {}),
           },
         });
         graph.addEdge({ from: routeId, to: methodId, kind: 'calls' });
@@ -681,26 +777,29 @@ function resolveMethodBodies(
         continue;
       }
 
-      // 1. Database access: this.customerModel.find(...)
-      const modelName = resolveModelReceiver(receiver, info);
-      if (modelName) {
+      // 1. Database access: this.customerModel.find(...), or a `model` that holds one of them.
+      const direct = resolveModelReceiver(receiver, info);
+      const modelNames = direct ? [direct] : modelsBehind(receiver, method, methodName, info);
+      if (modelNames.length) {
         const effect = dbEffectOf(member);
         if (!effect) continue;
-        recordDbOp(graph, index, {
-          methodId,
-          modelName,
-          operation: member,
-          file: info.file,
-          line: lineOf(call),
-          site: `${info.name}.${methodName}`,
-          upsert: upsertsIn(call),
-          effect,
-        });
+        for (const modelName of modelNames)
+          recordDbOp(graph, index, {
+            methodId,
+            modelName,
+            operation: member,
+            file: info.file,
+            line: lineOf(call),
+            site: `${info.name}.${methodName}`,
+            upsert: upsertsIn(call),
+            effect,
+          });
         continue;
       }
 
       // 1b. A loaded document saved back: `patient.uuid = uuid; await patient.save()`.
-      if (member === 'save' && /^[A-Za-z_$][\w$]*$/.test(receiver)) {
+      // A loaded document written back: `doc.save()`, `doc.update({ … })`, `doc.deleteOne()`.
+      if (DOCUMENT_WRITES[member] && /^[A-Za-z_$][\w$]*$/.test(receiver)) {
         const load = loadedFrom(receiver, call);
         const loadReceiver = load ? calleeReceiver(load) : undefined;
         const loadedModel = loadReceiver ? resolveModelReceiver(loadReceiver, info) : undefined;
@@ -708,11 +807,12 @@ function resolveMethodBodies(
           recordDbOp(graph, index, {
             methodId,
             modelName: loadedModel,
-            operation: 'save',
+            operation: member,
             file: info.file,
             line: lineOf(call),
             site: `${info.name}.${methodName}`,
-            effect: 'update',
+            effect: DOCUMENT_WRITES[member],
+            onDocument: true,
           });
           continue;
         }
@@ -757,8 +857,9 @@ function resolveMethodBodies(
     // `new this.customerModel(dto).save()` — the document-style write.
     for (const expression of method.getDescendantsOfKind(SyntaxKind.NewExpression)) {
       const target = expression.getExpression().getText().replace(/\s+/g, '');
-      const modelName = resolveModelReceiver(target, info);
-      if (!modelName) continue;
+      // The model itself — `new this.model.base.Types.ObjectId(id)` builds an id, not a document.
+      const modelName = info.models.get(target);
+      if (!modelName || !isSaved(expression, method)) continue;
       recordDbOp(graph, index, {
         methodId,
         modelName,
@@ -775,6 +876,92 @@ function resolveMethodBodies(
 }
 
 /**
+ * The values `enum:` allows: `['male', 'female']`, or an `enum Gender {…}` /
+ * `const GENDERS = [...]` / `Object.values(Gender)` declared in the same file.
+ */
+function enumValuesOf(value: Node | undefined, depth = 0): string[] {
+  if (!value || depth > 2) return [];
+  if (Node.isArrayLiteralExpression(value))
+    return value
+      .getElements()
+      .flatMap((element) =>
+        Node.isStringLiteral(element) || Node.isNumericLiteral(element)
+          ? [String(element.getLiteralValue())]
+          : [],
+      );
+  const name = Node.isIdentifier(value)
+    ? value.getText()
+    : Node.isCallExpression(value) && /^Object\.values$/.test(value.getExpression().getText())
+      ? value.getArguments()[0]?.getText()
+      : undefined;
+  if (!name) return [];
+  // Declared here, or in the file it is imported from (`import { GenderTypes } from './enums'`).
+  const here = value.getSourceFile();
+  const specifier = here
+    .getImportDeclarations()
+    .find((declaration) =>
+      declaration
+        .getNamedImports()
+        .some((named) => (named.getAliasNode() ?? named.getNameNode()).getText() === name),
+    )
+    ?.getModuleSpecifierValue();
+  const from = specifier ? importedFile(here, specifier) : undefined;
+  for (const file of [here, from]) {
+    if (!file) continue;
+    const declared = file.getEnum(name);
+    if (declared)
+      return declared.getMembers().map((member) => String(member.getValue() ?? member.getName()));
+    let init = file.getVariableDeclaration(name)?.getInitializer();
+    // `[...] as const` is still the array.
+    if (init && Node.isAsExpression(init)) init = init.getExpression();
+    if (init) return enumValuesOf(init, depth + 1);
+  }
+  return [];
+}
+
+/** A relative import's file among the scanned ones: `'../entities/patient.entity'`. */
+function importedFile(from: SourceFile, specifier: string): SourceFile | undefined {
+  if (!specifier.startsWith('.')) return undefined;
+  const base = join(dirname(from.getFilePath()), specifier);
+  for (const candidate of [
+    base,
+    ...['.ts', '.tsx', '.js', '.jsx', '/index.ts', '/index.js'].map((ext) => base + ext),
+  ]) {
+    const found = from.getProject().getSourceFile(candidate);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** What a loaded document's own write methods do to its record. */
+const DOCUMENT_WRITES: Record<string, DbEffect> = {
+  save: 'update',
+  update: 'update',
+  updateOne: 'update',
+  set: 'update',
+  deleteOne: 'delete',
+  remove: 'delete',
+};
+
+/**
+ * Whether a `new Model(dto)` is written: `.save()` on it, or on the variable that
+ * holds it. One that only fills a token or a response is never stored.
+ */
+function isSaved(expression: Node, method: MethodDeclaration): boolean {
+  let outer: Node = expression;
+  while (
+    Node.isParenthesizedExpression(outer.getParent() ?? outer) ||
+    Node.isAwaitExpression(outer.getParent() ?? outer)
+  )
+    outer = outer.getParent()!;
+  const access = outer.getParent();
+  if (access && Node.isPropertyAccessExpression(access) && access.getName() === 'save') return true;
+  const holder = outer.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
+  if (!holder || holder.getInitializer() !== outer) return false;
+  return new RegExp(`\\b${holder.getName()}\\s*\\.\\s*save\\s*\\(`).test(method.getText());
+}
+
+/**
  * Mongoose lets you chain (`this.model.find().sort().lean()`), so the receiver
  * of a call may be an expression rather than the model itself. Match on the
  * declared receiver prefix.
@@ -787,6 +974,43 @@ function resolveModelReceiver(receiver: string, info: ClassInfo): string | undef
       return modelName;
   }
   return undefined;
+}
+
+/**
+ * The models a plain variable can hold, when the method picks one:
+ *
+ *   if (category === 'advice') model = this.emrAdvice; else if (…) model = this.emrSymptoms;
+ *   await model.find(…)
+ *
+ * or is handed one by the class's own calls (`this.findOrCreate(data, this.emrAdvice)`).
+ * The query reaches each of them, depending on the input; nothing else is guessed.
+ */
+function modelsBehind(
+  receiver: string,
+  method: MethodDeclaration,
+  methodName: string,
+  info: ClassInfo,
+): string[] {
+  if (!/^[A-Za-z_$][\w$]*$/.test(receiver)) return [];
+  const found = new Set<string>();
+  const add = (value: Node | undefined) => {
+    const model = value && resolveModelReceiver(value.getText(), info);
+    if (model) found.add(model);
+  };
+  for (const assignment of method.getDescendantsOfKind(SyntaxKind.BinaryExpression))
+    if (
+      assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken &&
+      assignment.getLeft().getText() === receiver
+    )
+      add(assignment.getRight());
+  for (const declaration of method.getDescendantsOfKind(SyntaxKind.VariableDeclaration))
+    if (declaration.getName() === receiver) add(declaration.getInitializer());
+  const position = method.getParameters().findIndex((p) => p.getName() === receiver);
+  if (position >= 0)
+    for (const call of method.getParentOrThrow().getDescendantsOfKind(SyntaxKind.CallExpression))
+      if (call.getExpression().getText() === `this.${methodName}`)
+        add(call.getArguments()[position]);
+  return [...found];
 }
 
 function recordDbOp(
@@ -812,6 +1036,8 @@ function recordDbOp(
     database?: string;
     /** `updateOne(filter, change, { upsert: true })`: inserts when nothing matches. */
     upsert?: boolean;
+    /** Called on a loaded document (`doc.update(change)`): its first argument is the change, not a filter. */
+    onDocument?: boolean;
   },
 ): void {
   const collection =
@@ -834,6 +1060,7 @@ function recordDbOp(
       model: input.modelName,
       ...(input.database ? { database: input.database } : {}),
       ...(input.upsert ? { upsert: true } : {}),
+      ...(input.onDocument ? { onDocument: true } : {}),
     },
   });
   graph.addEdge({ from: input.methodId, to: opId, kind: 'queries' });
