@@ -856,10 +856,11 @@ collection the code declares or queries, the same as `flowlens db`, in words a
 non-developer can follow. It opens on a search (a label on screen or a key in the
 database), a **health check** (queries that skip the owner filter — the same check
 as `flowlens findings` — deletes that leave linked records behind, lookups no
-index serves, fields nothing fills or reads), a **diagram** of how the
-collections link, and one card per collection counting the actions that add,
-change, remove and read its records (a click opens the list). A collection shows
-an example record, those four lists, what a delete does to linked records, its
+index serves, fields nothing fills or reads), and a **map** of every collection,
+grouped by the folder its schema lives in (or by database), where hovering one
+draws its links with the key each is joined by and a search narrows it to the
+collections that hold the field. Opening a collection shows an example record,
+who adds, changes, removes and reads its records, what a delete does to linked records, its
 links, indexes and queries, and runtime timings when spans were recorded; every
 field says what it holds, what it is called on screen, where the user types it
 and what changes it. The native MongoDB driver is read too: `db.collection<T>()`

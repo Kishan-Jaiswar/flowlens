@@ -4553,80 +4553,10 @@ code.code-link .file-link {
   font-size: 14px;
   line-height: 1.6;
 }
-.db-group-title {
-  margin: 18px 0 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-muted);
-}
 .db-links {
   margin: 0 0 8px;
   padding-left: 20px;
   line-height: 1.9;
-}
-.db-card-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-.db-tiles {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 6px;
-  margin-top: 10px;
-}
-.db-tile {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 6px 4px;
-  border: 1px solid var(--border);
-  border-top-width: 3px;
-  border-radius: 6px;
-  background: var(--bg);
-}
-.db-tile.effect-create {
-  border-top-color: var(--ok);
-}
-.db-tile.effect-update {
-  border-top-color: var(--warning);
-}
-.db-tile.effect-delete {
-  border-top-color: var(--danger);
-}
-.db-tile.effect-read {
-  border-top-color: var(--network);
-}
-button.db-tile {
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-}
-button.db-tile:hover,
-button.db-tile:focus-visible {
-  outline: none;
-  background: var(--surface);
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--ui) 35%, transparent);
-}
-.db-life.is-picked {
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--ui) 45%, transparent);
-}
-.db-tile.is-empty {
-  opacity: 0.45;
-}
-.db-tile-value {
-  font-size: 18px;
-  font-weight: 600;
-  line-height: 1.2;
-}
-.db-tile-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-.db-card-links {
-  color: var(--text) !important;
 }
 /* Added / Changed / Removed / Read: one box each, coloured by effect and named in words. */
 .db-life-grid {
@@ -4791,10 +4721,18 @@ button.db-tile:focus-visible {
 .db-map2-lines .is-config text {
   fill: var(--ok);
 }
+/*
+ * One fixed height, whatever it says: a strip that grew with a long list pushed the
+ * map down, moved the row out from under the pointer, ended the hover and shrank back
+ * — a loop that flickered. Longer text scrolls inside it instead.
+ */
 .db-map2-info {
   position: sticky;
   top: -20px;
   z-index: 3;
+  box-sizing: border-box;
+  height: calc(3 * 1.6em + 18px);
+  overflow-y: auto;
   margin: 0 0 10px;
   padding: 8px 12px;
   border: 1px solid var(--border);
@@ -4803,13 +4741,14 @@ button.db-tile:focus-visible {
   font-size: 13px;
   line-height: 1.6;
 }
+/* A gallery: cards stack straight down each column, no gap left under a short one. */
 .db-groups {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 14px;
-  align-items: start;
+  column-width: 260px;
+  column-gap: 14px;
 }
 .db-group2 {
+  break-inside: avoid;
+  margin: 0 0 14px;
   padding: 10px;
   border: 1px solid hsl(var(--hue) 60% 50% / 0.45);
   border-radius: 12px;
@@ -4822,6 +4761,16 @@ button.db-tile:focus-visible {
 }
 .db-group2-num {
   font-weight: 700;
+}
+/* A search hides the collections and groups with no matching field. */
+.db-row2[hidden],
+.db-group2[hidden] {
+  display: none;
+}
+.db-row2 .db-field-hit {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text);
 }
 .db-row2 {
   display: flex;
@@ -4932,33 +4881,6 @@ button.db-tile:focus-visible {
 .db-title {
   margin: 12px 0 10px;
   font-size: 18px;
-}
-.db-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
-}
-.db-card {
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
-}
-.db-card[hidden] {
-  display: none;
-}
-.db-card p {
-  margin: 6px 0 0;
-  font-size: 13px;
-  color: var(--text-muted);
-}
-.db-card-name {
-  font-size: 15px;
-  font-weight: 600;
-  margin-right: 6px;
-}
-.db-card-note {
-  color: var(--warning) !important;
 }
 .db-field-hit {
   display: block;
