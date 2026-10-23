@@ -2585,7 +2585,7 @@ function codeEntriesOf(
         // Reached only through another writer: name it.
         const via = direct.has(route.label)
           ? undefined
-          : routesVia(graph, write.nodeId, route.id, writerFns, own);
+          : routesVia(graph, route.id, writerFns, own);
         const { queued } = pathHops(graph, route, write.nodeId, writerFns);
         const key = `${mention.source.file}:${mention.source.line}:${route.label}`;
         if (found.has(key)) continue;
@@ -2616,7 +2616,6 @@ function codeEntriesOf(
 /** The other writer a route passes through on its way to a db-op. */
 function routesVia(
   graph: FlowGraph,
-  nodeId: string,
   routeId: string,
   writerFns: ReadonlySet<string>,
   own: ReadonlySet<string>,

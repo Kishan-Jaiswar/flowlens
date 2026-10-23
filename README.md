@@ -6,15 +6,16 @@ A free, local, open-source CLI and dashboard for full-stack JavaScript and
 TypeScript: it maps every button, form and page load in a **React / Next.js**
 app through its API calls to the **NestJS / Express / Next.js route** that
 answers, the services it calls, and the **Mongoose, MongoDB or Prisma** queries
-it runs — then flowcharts every decision on the way, tells you what an edit
-breaks before you commit it, and finds the code nothing uses.
+it runs — then flowcharts every decision on the way, explains the database
+schema and who reads and writes each collection, tells you what an edit breaks
+before you commit it, and finds the code nothing uses.
 
 [![CI](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml/badge.svg)](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@flowslens/cli?label=npm)](https://www.npmjs.com/package/@flowslens/cli)
 [![npm downloads](https://img.shields.io/npm/dm/@flowslens/cli?label=downloads)](https://www.npmjs.com/package/@flowslens/cli)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-872%20passing-brightgreen)](tests)
+[![Tests](https://img.shields.io/badge/tests-930%20passing-brightgreen)](tests)
 
 > Flowslens helps developers understand and safely modify unfamiliar applications
 > by tracing a feature from the user's UI action through frontend state and
@@ -39,7 +40,7 @@ codebase:
 | Operating systems      | Windows, macOS and Linux: unit suite, every CLI command, and a from-scratch launcher run, all three in CI                                                                                                                                                                                    |
 | Runtime tracing        | **Proven live for HTTP and method spans**: a real server, real sockets, a real trace file, merged into a real scan and asserted `confirmed`. Next.js App Router + the native MongoDB driver traced against a real app (Next 16, MongoDB Atlas). The Mongoose plugin is still driven by fakes |
 | Stacks read            | React/Next, NestJS/Express, Mongoose, the MongoDB driver and Prisma. Vue, Svelte, TypeORM, GraphQL and raw SQL are not read yet, and `flowlens stack` tells you so before you spend the afternoon                                                                                            |
-| Test suite             | 872 tests across 49 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                                                                                                                    |
+| Test suite             | 930 tests across 50 files, plus a smoke run of every CLI command and a pack-and-install test, on Linux, macOS and Windows                                                                                                                                                                    |
 
 `docs/ROADMAP.md` leads with what is missing rather than what is planned.
 
@@ -1283,7 +1284,7 @@ The MVP targets one stack properly rather than five badly:
 | Backend  | NestJS (decorators, DI, global prefixes), Express/Fastify routers        |
 | Routes   | Next.js `pages/api` and App Router `route.ts`, Nuxt `server/api`         |
 | Database | MongoDB via Mongoose (`@Schema`/`@Prop`, `new Schema()`, `@InjectModel`) |
-|          | The native MongoDB driver (`db.collection('x')`, typed or not)           |
+|          | The native MongoDB driver (`db.collection<T>('x')`, `createIndex`)       |
 |          | Prisma (`schema.prisma`, `@@map`, `@relation`, client operations)        |
 
 Adapters are separate modules, so adding TypeORM, raw SQL, or Vue is additive
@@ -1333,7 +1334,7 @@ node --version       # expect the version in .nvmrc
 ```bash
 npm install          # also builds, via the prepare script
 npm run build        # compile all three packages
-npm test             # build, then run the suite — 872 tests, ~20s
+npm test             # build, then run the suite — 930 tests, ~50s
 npm run test:watch
 npm run smoke        # run every CLI command for real, on this OS
 npm run test:package # pack, install into a throwaway project, drive over HTTP

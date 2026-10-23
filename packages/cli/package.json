@@ -1,7 +1,7 @@
 {
   "name": "@flowslens/cli",
   "version": "1.4.0",
-  "description": "Trace any user action from the UI to the database. Maps every click through React/Next.js, NestJS/Express, Prisma and Mongoose, flowcharts its decisions, shows what a change breaks, finds dead code, and serves a local dashboard.",
+  "description": "Trace any user action from the UI to the database. Maps every click through React/Next.js, NestJS/Express, Prisma, Mongoose and the MongoDB driver, flowcharts its decisions, explains the database schema in plain words, shows what a change breaks, finds dead code, and serves a local dashboard.",
   "type": "module",
   "bin": {
     "flowlens": "bin/flowlens.mjs"
@@ -26,14 +26,7 @@
   },
   "license": "MIT",
   "author": "Kishan Jaiswar",
-  "homepage": "https://github.com/Kishan-Jaiswar/flowlens/tree/main/packages/cli#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
-    "directory": "packages/cli"
-  },
   "bugs": {
-    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues",
     "email": "jaiswarkishan78@gmail.com"
   },
   "keywords": [
@@ -86,7 +79,16 @@
     "prisma",
     "typescript",
     "javascript",
-    "nodejs"
+    "nodejs",
+    "database-explorer",
+    "database-schema",
+    "schema-visualization",
+    "er-diagram",
+    "database-documentation",
+    "mongodb-schema",
+    "mermaid",
+    "code-to-database",
+    "onboarding"
   ],
   "publishConfig": {
     "access": "public"

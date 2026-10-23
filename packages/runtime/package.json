@@ -23,14 +23,7 @@
   },
   "license": "MIT",
   "author": "Kishan Jaiswar",
-  "homepage": "https://github.com/Kishan-Jaiswar/flowlens/tree/main/packages/runtime#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
-    "directory": "packages/runtime"
-  },
   "bugs": {
-    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues",
     "email": "jaiswarkishan78@gmail.com"
   },
   "keywords": [
@@ -66,7 +59,12 @@
     "prisma",
     "typescript",
     "javascript",
-    "nodejs"
+    "nodejs",
+    "query-profiling",
+    "mongodb-tracing",
+    "database-timings",
+    "request-timeline",
+    "local-tracing"
   ],
   "publishConfig": {
     "access": "public"

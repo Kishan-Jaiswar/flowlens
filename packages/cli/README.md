@@ -4,18 +4,32 @@
 
 [![npm version](https://img.shields.io/npm/v/@flowslens/cli)](https://www.npmjs.com/package/@flowslens/cli)
 [![npm downloads](https://img.shields.io/npm/dm/@flowslens/cli)](https://www.npmjs.com/package/@flowslens/cli)
-[![CI](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml/badge.svg)](https://github.com/Kishan-Jaiswar/flowlens/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/Kishan-Jaiswar/flowlens/blob/main/LICENSE)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 A free, local code-flow explorer for full-stack JavaScript and TypeScript. Point
 it at a **React / Next.js** frontend and a **NestJS, Express, Fastify or
 Next.js API** backend, and it shows every user action end to end — the click,
 the handler, the HTTP request, the route, the service, and the **Mongoose,
 MongoDB or Prisma** query — as a tree, a flowchart of every decision, and a
-local dashboard. It also tells you **what an edit breaks** before you commit
-it, finds **unused code**, and answers questions for your AI assistant over
-**MCP**.
+local dashboard. A **Database page** explains every MongoDB collection and
+Prisma model in plain words: its fields, its links, and the user actions that
+add, change, remove and read its records. It also tells you **what an edit
+breaks** before you commit it, finds **unused code**, and answers questions for
+your AI assistant over **MCP**.
+
+Use it to:
+
+- **onboard onto an unfamiliar codebase**: see what a button actually does,
+  from the React component down to the database query
+- **visualize a MongoDB or Prisma schema** as an ER-style diagram, with no
+  database connection
+- **run impact analysis before a refactor**: the blast radius of a change and
+  every feature it reaches
+- **find dead code**: unused files, exports, dependencies and API endpoints
+- **document features and the database** as Markdown with Mermaid diagrams
+- **review pull requests**: what a branch changes about the app, the database
+  included, as a PR comment
 
 You join a project. You need to change one screen. So you start clicking through
 files: which handler runs, which endpoint it calls, which service answers, which
@@ -257,6 +271,42 @@ told apart rather than lumped together:
 Every `file:line` in every tab opens your editor (`?editor=vscode`, `cursor`,
 `idea`, `zed`, …).
 
+### 4. See the database
+
+The navbar at the top of the dashboard switches between **Feature flows** and
+**Database**. The Database page lists every collection the code declares or
+queries, in words a non-developer can follow:
+
+- one **search** box: a label on screen or a key in the database
+- a **health check**: queries that skip the owner (tenant) filter, deletes that
+  leave linked records behind, lookups no index serves, fields nothing fills or
+  reads
+- a **map** of every collection, grouped by the folder its schema lives in or
+  by database; hover one to see its links and the key each is joined by
+
+Opening a collection shows an example record, who adds, changes, removes and
+reads its records (named by user action), what a delete does to linked
+records, its indexes and queries, and runtime timings when spans were recorded.
+Every field says what it holds, what it is called on screen, where the user
+types it and what changes it.
+
+It reads Mongoose schemas (`@Schema`/`@Prop`, `new Schema()`), Prisma
+(`schema.prisma`), and the **native MongoDB driver**: a `db.collection<T>()`
+type becomes the schema, and `createIndex` calls become its indexes. The same
+report is in the terminal:
+
+```bash
+flowlens db                     # every collection
+flowlens db customers           # one collection, in full
+flowlens db --markdown --out docs/database.md   # a document with a Mermaid diagram
+```
+
+Links the code cannot show can be declared in `flowlens.config.json`:
+
+```jsonc
+{ "relations": [{ "from": "orders", "field": "ownerId", "to": "users" }] }
+```
+
 **That is the whole workflow.** Everything below is for when you want more.
 
 ---
@@ -282,7 +332,11 @@ flowlens findings --fail-on high
 # "What does nothing use?" — files, exports, dependencies, endpoints
 flowlens unused
 
-# "What does this branch change about the app?" — markdown for a PR comment
+# "What is in the database, and who writes it?" — collections, fields, links
+flowlens db orders
+
+# "What does this branch change about the app?" — markdown for a PR comment,
+# database changes (collections, fields, indexes, links) included
 flowlens diff --base main
 ```
 
@@ -345,6 +399,7 @@ prefix. `/api` is stripped from both sides by default; change it with
 | `flowlens doctor [project]`     | Broken API calls, dead endpoints, shared writes.    |
 | `flowlens findings [project]`   | Bugs the code shows, each with the line to open.    |
 | `flowlens unused [project]`     | Files, folders, exports and deps nothing uses.      |
+| `flowlens db [collection]`      | Collections, fields, links and who uses each one.   |
 | `flowlens diff --base main`     | What this branch changes about the app — for a PR.  |
 | `flowlens serve [project]`      | The dashboard.                                      |
 | `flowlens mcp [project]`        | The graph as tools for an AI assistant (MCP).       |
@@ -441,13 +496,13 @@ took. Entirely optional; the CLI works without it. On a Next.js App Router app,
 
 ## Documentation
 
-This page covers everything you need to use the CLI. The full README,
-architecture notes, roadmap and changelog are on GitHub:
-**[github.com/Kishan-Jaiswar/flowlens](https://github.com/Kishan-Jaiswar/flowlens)**.
+This page covers everything you need to use the CLI. The engine and the tracer
+document themselves on their own npm pages:
+[`@flowslens/core`](https://www.npmjs.com/package/@flowslens/core) and
+[`@flowslens/runtime`](https://www.npmjs.com/package/@flowslens/runtime). Run
+`flowlens --help` for every command and option.
 
-Bug reports and feature requests:
-[GitHub issues](https://github.com/Kishan-Jaiswar/flowlens/issues), or
-**jaiswarkishan78@gmail.com**.
+Bug reports and feature requests: **jaiswarkishan78@gmail.com**.
 
 ## Licence
 

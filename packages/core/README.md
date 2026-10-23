@@ -3,14 +3,17 @@
 [![npm version](https://img.shields.io/npm/v/@flowslens/core)](https://www.npmjs.com/package/@flowslens/core)
 [![npm downloads](https://img.shields.io/npm/dm/@flowslens/core)](https://www.npmjs.com/package/@flowslens/core)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/Kishan-Jaiswar/flowlens/blob/main/LICENSE)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 The graph engine behind [Flowslens](https://www.npmjs.com/package/@flowslens/cli):
 a static analyzer for full-stack TypeScript and JavaScript that maps every
 user action in a **React / Next.js** app to the **NestJS, Express, Fastify or
 Next.js** route that answers it, the services it calls and the **Mongoose,
 MongoDB or Prisma** queries it runs — with decision flowcharts, field-level
-data lineage, impact analysis and type-checked breaking-change detection.
+data lineage, impact analysis and type-checked breaking-change detection. It
+also reads the **database schema from source**: Mongoose schemas, Prisma models
+and native MongoDB driver types, with the links between collections and the
+user actions that read and write each one.
 
 ## Do you want this package?
 
@@ -305,6 +308,31 @@ The CLI does the same with `flowlens findings --fail-on high`, and
 
 ---
 
+## The database, as the code sees it
+
+`databaseReport` is what the CLI's Database page and `flowlens db` show: every
+collection the code declares or queries, its fields, indexes and links, and the
+user actions that reach it. It reads source only, with no database connection.
+
+```js
+import { databaseReport, resolveFlows, scan } from '@flowslens/core';
+
+const { graph } = scan({ root: '.' });
+const report = databaseReport(graph, resolveFlows(graph));
+
+for (const c of report.collections) {
+  console.log(c.name, c.fields.length, 'fields', c.references.length, 'links');
+}
+```
+
+Pass `{ only: 'orders' }` for one collection in full, `{ scenarios: false }` to
+leave out each write's cases on a large project, and `{ relations }` for links
+the code cannot show. `databaseChanges(baseGraph, headGraph)` lists the
+collections, fields, indexes and links a branch adds or removes, and
+`hasDatabaseChanges` says whether there are any.
+
+---
+
 ## What the graph contains
 
 Typed nodes — `ui-action`, `component`, `handler`, `state`, `hook`, `api-call`,
@@ -339,38 +367,40 @@ scanned graph, which is what turns `static` into `confirmed`.
 
 ## Main exports
 
-| Export                                                     | Purpose                                                               |
-| ---------------------------------------------------------- | --------------------------------------------------------------------- |
-| `scan(options)`                                            | Read a project and build the graph.                                   |
-| `FlowGraph`                                                | The graph, with traversal helpers.                                    |
-| `resolveFlows` / `resolveFlow`                             | One user action, end to end.                                          |
-| `whereIs`                                                  | Features running through a `file:line`.                               |
-| `findNodes`                                                | Look a symbol up as graph nodes.                                      |
-| `analyzeImpact`                                            | "If I change this, what breaks?"                                      |
-| `analyzeFlowImpact`                                        | The same question asked of a whole feature.                           |
-| `analyzeChanged`                                           | Which features a set of changed files reaches.                        |
-| `flowApis`                                                 | Every request one action makes, in sequence, with what happens after. |
-| `flowTiming`                                               | Where the time went, per step, from spans.                            |
-| `checkFlowContract`                                        | Payload keys against the DTO the route declares.                      |
-| `indexTests` / `testsForFlow`                              | Which tests cover a feature, and which files nothing covers.          |
-| `detectStack` / `stackSummary`                             | Frameworks and versions, from the manifests.                          |
-| `loadPrismaSchema`                                         | Prisma models and their table names.                                  |
-| `findBrokenCalls`, `findSharedWrites`, `findDeadEndpoints` | Findings.                                                             |
-| `projectFindings`                                          | Bugs the code shows: no auth, tenant leaks, mass assignment, N+1.     |
-| `projectUnused`                                            | Files, exports, dependencies and endpoints nothing uses.              |
-| `diffGraphs` / `introducesAtLeast`                         | What a branch changes about the app, and whether it adds an issue.    |
-| `explainAction` / `renderActionDocument`                   | One action, stage by stage — the dashboard's Docs tab.                |
-| `actionDecisions` / `renderDecisionTree`                   | Every branch an action can take — the Decisions tab.                  |
-| `analyzeBreakage`                                          | What an edit breaks, type-checked before and after.                   |
-| `flowPages`                                                | Which page each action is met on.                                     |
-| `explainScreen` / `renderScreenDocument`                   | A whole screen in plain English.                                      |
-| `actionQueries`                                            | Every database query one action runs, with its code and timing.       |
-| `planTests`                                                | The test cases to write for an action.                                |
-| `collectionRelations`                                      | Which collections link to which, and how that is known.               |
-| `linkDataLineage`                                          | `state → payload → DTO → collection`.                                 |
-| `renderFlowTree`, `renderFeatureDocument`                  | Text and markdown output.                                             |
-| `mergeRuntimeTrace`                                        | Fold recorded spans into a scanned graph.                             |
-| `loadConfig`                                               | Read a `flowlens.config.json`.                                        |
+| Export                                                     | Purpose                                                                |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `scan(options)`                                            | Read a project and build the graph.                                    |
+| `FlowGraph`                                                | The graph, with traversal helpers.                                     |
+| `resolveFlows` / `resolveFlow`                             | One user action, end to end.                                           |
+| `whereIs`                                                  | Features running through a `file:line`.                                |
+| `findNodes`                                                | Look a symbol up as graph nodes.                                       |
+| `analyzeImpact`                                            | "If I change this, what breaks?"                                       |
+| `analyzeFlowImpact`                                        | The same question asked of a whole feature.                            |
+| `analyzeChanged`                                           | Which features a set of changed files reaches.                         |
+| `flowApis`                                                 | Every request one action makes, in sequence, with what happens after.  |
+| `flowTiming`                                               | Where the time went, per step, from spans.                             |
+| `checkFlowContract`                                        | Payload keys against the DTO the route declares.                       |
+| `indexTests` / `testsForFlow`                              | Which tests cover a feature, and which files nothing covers.           |
+| `detectStack` / `stackSummary`                             | Frameworks and versions, from the manifests.                           |
+| `loadPrismaSchema`                                         | Prisma models and their table names.                                   |
+| `findBrokenCalls`, `findSharedWrites`, `findDeadEndpoints` | Findings.                                                              |
+| `projectFindings`                                          | Bugs the code shows: no auth, tenant leaks, mass assignment, N+1.      |
+| `projectUnused`                                            | Files, exports, dependencies and endpoints nothing uses.               |
+| `diffGraphs` / `introducesAtLeast`                         | What a branch changes about the app, and whether it adds an issue.     |
+| `explainAction` / `renderActionDocument`                   | One action, stage by stage — the dashboard's Docs tab.                 |
+| `actionDecisions` / `renderDecisionTree`                   | Every branch an action can take — the Decisions tab.                   |
+| `analyzeBreakage`                                          | What an edit breaks, type-checked before and after.                    |
+| `flowPages`                                                | Which page each action is met on.                                      |
+| `explainScreen` / `renderScreenDocument`                   | A whole screen in plain English.                                       |
+| `actionQueries`                                            | Every database query one action runs, with its code and timing.        |
+| `planTests`                                                | The test cases to write for an action.                                 |
+| `collectionRelations`                                      | Which collections link to which, and how that is known.                |
+| `databaseReport`                                           | Every collection: fields, indexes, links, and who reads and writes it. |
+| `databaseChanges` / `hasDatabaseChanges`                   | Collections, fields, indexes and links a branch adds or removes.       |
+| `linkDataLineage`                                          | `state → payload → DTO → collection`.                                  |
+| `renderFlowTree`, `renderFeatureDocument`                  | Text and markdown output.                                              |
+| `mergeRuntimeTrace`                                        | Fold recorded spans into a scanned graph.                              |
+| `loadConfig`                                               | Read a `flowlens.config.json`.                                         |
 
 Ships its own TypeScript types — no `@types` package needed.
 
@@ -388,11 +418,10 @@ Ships its own TypeScript types — no `@types` package needed.
 
 This page is the reference for the package. The CLI that wraps it —
 [`@flowslens/cli`](https://www.npmjs.com/package/@flowslens/cli) — documents the
-commands, the dashboard and the runtime tracer. Source, architecture notes and
-changelog: **[github.com/Kishan-Jaiswar/flowlens](https://github.com/Kishan-Jaiswar/flowlens)**.
+commands, the dashboard and the runtime tracer. Every export ships with its
+TypeScript types and doc comments, so your editor shows the details.
 
-Bug reports: [GitHub issues](https://github.com/Kishan-Jaiswar/flowlens/issues),
-or **jaiswarkishan78@gmail.com**.
+Bug reports: **jaiswarkishan78@gmail.com**.
 
 ## Licence
 
