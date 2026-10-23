@@ -7,6 +7,8 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-23
+
 ### Added
 
 - **A Database page in a new navbar, and `flowlens db [collection]`.** The
@@ -195,11 +197,6 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an `if` is a "nothing written" case where that `if` was false (an unchanged
   import row). A value built from what was sent — a template, a sum — is
   computed, not input.
-
-## [1.4.0] - 2026-10-15
-
-### Added
-
 - **A card that only shows data has its six tabs too.** "97% Stock health" is
   followed back through what the code says: `pct` is worked out from `inStock`
   and `total`, those from `data.lowStockCount` and two other fields, `data` is
@@ -275,6 +272,11 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Package pages document the Database page.** The three npm READMEs cover
+  `flowlens db`, the dashboard's Database page and `databaseReport()`, with
+  search-friendly descriptions and keywords. The packages no longer link to the
+  source repository (`homepage` and `repository` removed from `package.json`);
+  bug reports go to the email address in `bugs`.
 - **The sidebar opens folded.** Every page, menu entry and shared group starts
   closed, so the list reads as an outline of the app; "Expand all" opens them.
   Reloading keeps the selection in the address (`#flow=…`, `#entry=…`) but

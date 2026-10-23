@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/@flowslens/runtime)](https://www.npmjs.com/package/@flowslens/runtime)
 [![npm downloads](https://img.shields.io/npm/dm/@flowslens/runtime)](https://www.npmjs.com/package/@flowslens/runtime)
 [![Node](https://img.shields.io/badge/node-%3E%3D18.18-brightgreen)](https://nodejs.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/Kishan-Jaiswar/flowlens/blob/main/LICENSE)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 Zero-dependency, development-only request tracer for **Node.js, Next.js,
 Express, NestJS, Mongoose and the native MongoDB driver**. Optional companion to
@@ -13,6 +13,10 @@ than assumed.
 
 Static analysis proves a path **can** run. A trace proves it **did** — and tells
 you how long each step took.
+
+Use it to profile slow MongoDB and Mongoose queries in development, see which
+API calls a React click caused, and get a per-request timeline for Express,
+NestJS and Next.js without setting up an APM or OpenTelemetry.
 
 > **Not for production.** A development aid, not an APM. It appends spans to a
 > local file and is meant to sit behind a `NODE_ENV` check.
@@ -217,7 +221,8 @@ flowlens trace .
 ```
 
 Steps the trace confirms are marked `confirmed`, and each carries inclusive and
-exclusive timings.
+exclusive timings. The dashboard's **Performance** tab shows them per action, and
+the **Database** page shows each collection's query timings.
 
 ---
 
@@ -333,11 +338,9 @@ leave in place.
 [`@flowslens/cli`](https://www.npmjs.com/package/@flowslens/cli) documents the
 commands that read what this package records, and
 [`@flowslens/core`](https://www.npmjs.com/package/@flowslens/core) documents the
-graph the spans are merged into. Source and changelog:
-**[github.com/Kishan-Jaiswar/flowlens](https://github.com/Kishan-Jaiswar/flowlens)**.
+graph the spans are merged into.
 
-Bug reports: [GitHub issues](https://github.com/Kishan-Jaiswar/flowlens/issues),
-or **jaiswarkishan78@gmail.com**.
+Bug reports: **jaiswarkishan78@gmail.com**.
 
 ## Licence
 

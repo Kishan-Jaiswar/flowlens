@@ -1,7 +1,7 @@
 {
   "name": "@flowslens/core",
   "version": "1.4.0",
-  "description": "Static analysis engine for full-stack TypeScript and JavaScript: maps each UI action to its API route, service and database query, with decision flowcharts, field-level data lineage, impact and breaking-change analysis.",
+  "description": "Static analysis engine for full-stack TypeScript and JavaScript: maps each UI action to its API route, service and database query, reads Mongoose, Prisma and MongoDB driver schemas, with decision flowcharts, field-level data lineage, impact and breaking-change analysis.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -22,14 +22,7 @@
   },
   "license": "MIT",
   "author": "Kishan Jaiswar",
-  "homepage": "https://github.com/Kishan-Jaiswar/flowlens/tree/main/packages/core#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
-    "directory": "packages/core"
-  },
   "bugs": {
-    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues",
     "email": "jaiswarkishan78@gmail.com"
   },
   "keywords": [
@@ -71,7 +64,14 @@
     "prisma",
     "typescript",
     "javascript",
-    "nodejs"
+    "nodejs",
+    "database-explorer",
+    "database-schema",
+    "schema-extraction",
+    "er-diagram",
+    "mongodb-schema",
+    "mongodb-driver",
+    "collection-relations"
   ],
   "publishConfig": {
     "access": "public"
