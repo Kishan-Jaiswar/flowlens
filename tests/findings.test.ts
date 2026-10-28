@@ -72,6 +72,20 @@ write(
      await jobs.insertOne(record);
      return record;
    }
+   export async function findByNames(ownerId, names) {
+     const { items } = await getCollections();
+     const lookups = [];
+     for (const values of chunk(names, 500)) lookups.push({ name: { $in: values } });
+     const found = [];
+     for (const clause of lookups) found.push(...(await items.find({ ownerId, ...clause }).toArray()));
+     return found;
+   }
+   export async function relabel(ownerId, updates) {
+     const { items } = await getCollections();
+     for (let i = 0; i < updates.length; i += 500) {
+       await items.bulkWrite(updates.slice(i, i + 500).map((u) => ({ updateOne: { filter: { ownerId, id: u.id }, update: { $set: { label: u.label } } } })));
+     }
+   }
    export async function summary(ownerId) {
      const { items } = await getCollections();
      const total = await items.countDocuments({ ownerId });

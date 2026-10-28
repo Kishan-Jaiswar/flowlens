@@ -23,7 +23,14 @@
   },
   "license": "MIT",
   "author": "Kishan Jaiswar",
+  "homepage": "https://github.com/Kishan-Jaiswar/flowlens#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
+    "directory": "packages/runtime"
+  },
   "bugs": {
+    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues",
     "email": "jaiswarkishan78@gmail.com"
   },
   "keywords": [

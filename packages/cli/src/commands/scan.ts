@@ -1,5 +1,12 @@
 import { relative } from 'node:path';
-import { findBrokenCalls, findDeadEndpoints, resolveFlows, scan } from '@flowslens/core';
+import {
+  callBase,
+  findBrokenCalls,
+  findDeadEndpoints,
+  findExternalCalls,
+  resolveFlows,
+  scan,
+} from '@flowslens/core';
 import { artifactPaths, existingConfigFiles, guardArtifacts } from '../gitignore.js';
 import { graphPath, saveGraph, tracePath } from '../paths.js';
 import { color, glyph, heading, table } from '../ui.js';
@@ -73,6 +80,7 @@ export function runScan(args: ScanArgs): number {
 
   const flows = resolveFlows(result.graph);
   const broken = findBrokenCalls(result.graph);
+  const external = findExternalCalls(result.graph);
   const dead = findDeadEndpoints(result.graph);
 
   if (args.json) {
@@ -153,6 +161,12 @@ export function runScan(args: ScanArgs): number {
       process.stdout.write(`  ${color.yellow(glyph.warn)} ${call.label}${hint}\n`);
     }
     if (broken.length > 8) process.stdout.write(color.gray(`  … ${broken.length - 8} more\n`));
+  }
+  if (external.length > 0) {
+    const bases = [...new Set(external.map(callBase))].map((base) => base.replace(/^\w+:/, ''));
+    process.stdout.write(
+      `${color.gray(String(external.length))} API calls go to another service ${color.gray(`(through ${bases.join(', ')})`)}\n`,
+    );
   }
   if (dead.length > 0) {
     process.stdout.write(

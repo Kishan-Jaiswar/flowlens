@@ -32,6 +32,7 @@ import {
   type SourceFile,
 } from 'ts-morph';
 import type { Functionish } from '../analyzer/ast.js';
+import { readableUrl } from '../analyzer/http.js';
 import { DB_EFFECT_LABEL, type DbEffect } from '../analyzer/mongo.js';
 import type { FlowGraph } from '../graph/graph.js';
 import type { Evidence } from '../graph/types.js';
@@ -420,6 +421,21 @@ export function locateAction(
   };
 }
 
+const ALL_FLOWS = new WeakMap<FlowGraph, { size: string; flows: FeatureFlow[] }>();
+
+/**
+ * Every flow in the project, resolved once per graph: a page of documents asks for
+ * it once per action, and two thousand actions each resolving all two thousand is
+ * most of the wait. Read again when the graph grows (a trace adds what ran).
+ */
+function allFlows(graph: FlowGraph): FeatureFlow[] {
+  const size = `${graph.nodeCount}:${graph.edgeCount}`;
+  const cached = ALL_FLOWS.get(graph);
+  if (cached?.size === size) return cached.flows;
+  const flows = resolveFlows(graph, { includeLocalOnly: true });
+  ALL_FLOWS.set(graph, { size, flows });
+  return flows;
+}
 function locatedContext(
   graph: FlowGraph,
   flow: FeatureFlow,
@@ -429,7 +445,7 @@ function locatedContext(
   // Every flow in the project, resolved once and only when needed: the form readers call
   // this once per action, and resolving all of them each time is quadratic.
   let flows: FeatureFlow[] | undefined = given ? [...given] : undefined;
-  const all = () => (flows ??= resolveFlows(graph, { includeLocalOnly: true }));
+  const all = () => (flows ??= [...allFlows(graph)]);
   const ctx: Ctx = {
     graph,
     flow,
@@ -3709,7 +3725,9 @@ function stageRequest(ctx: Ctx): StageBody {
     const client = context.call ? clientFacts(ctx, context.call) : undefined;
     const raw = detail.rawPath ?? detail.path;
     const url =
-      client?.baseURL && !/^https?:/.test(raw) ? `${client.baseURL.replace(/\/$/, '')}${raw}` : raw;
+      client?.baseURL && !/^(https?:|<)/.test(raw)
+        ? `${client.baseURL.replace(/\/$/, '')}${raw}`
+        : readableUrl(raw);
     const query = [
       ...new Set([
         ...detail.queryKeys,
@@ -3819,7 +3837,7 @@ function stageRoute(ctx: Ctx): StageBody {
         `${code(`${detail.route.method} ${detail.route.path}`)} — ${framework}` +
         (detail.route.controller ? ` ${code(detail.route.controller)}` : '') +
         (detail.rawPath && detail.rawPath !== detail.route.path
-          ? ` _(the frontend calls ${code(detail.rawPath)}; the prefix is stripped)_`
+          ? ` _(the frontend calls ${code(readableUrl(detail.rawPath))}; the prefix is stripped)_`
           : ''),
       ...(detail.route.file
         ? { at: { file: detail.route.file, line: detail.route.line ?? 1 } }

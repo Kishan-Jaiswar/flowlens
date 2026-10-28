@@ -3269,13 +3269,22 @@ function isProp(call: CallExpression, name: string): boolean {
   return component ? propNames(component as Functionish).includes(name) : false;
 }
 
+const EFFECTS = new WeakMap<FlowGraph, { size: string; index: Map<string, FlowNode[]> }>();
+/** `effectsAt` for each call, kept with the index it read: helpers are walked by every action. */
+const EFFECTS_AT = new WeakMap<Map<string, FlowNode[]>, WeakMap<CallExpression, FlowNode[]>>();
+
+/** The graph's queries and effects by `file:line`, built once per graph and size. */
 function effectsIndex(graph: FlowGraph): Map<string, FlowNode[]> {
+  const size = `${graph.nodeCount}:${graph.edgeCount}`;
+  const cached = EFFECTS.get(graph);
+  if (cached?.size === size) return cached.index;
   const index = new Map<string, FlowNode[]>();
   for (const node of [...graph.nodesOfKind('db-op'), ...graph.nodesOfKind('external-effect')]) {
     if (!node.source) continue;
     const key = `${node.source.file}:${node.source.line}`;
     index.set(key, [...(index.get(key) ?? []), node]);
   }
+  EFFECTS.set(graph, { size, index });
   return index;
 }
 
@@ -3393,6 +3402,16 @@ function isLocalStore(call: CallExpression): boolean {
 
 /** The db-ops and effects the graph found at this call — the call itself, not one beside it. */
 function effectsAt(walk: Walk, call: CallExpression): FlowNode[] {
+  let known = EFFECTS_AT.get(walk.effects);
+  if (!known) EFFECTS_AT.set(walk.effects, (known = new WeakMap()));
+  const hit = known.get(call);
+  if (hit) return hit;
+  const found = readEffectsAt(walk, call);
+  known.set(call, found);
+  return found;
+}
+
+function readEffectsAt(walk: Walk, call: CallExpression): FlowNode[] {
   const point = walk.reader.point(call);
   const lines = new Set([point.line, call.getExpression().getEndLineNumber()]);
   const member = calleeText(call).split('.').pop() ?? '';

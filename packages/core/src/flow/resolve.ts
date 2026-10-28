@@ -1,4 +1,5 @@
 import { DB_EFFECT_ORDER, type DbEffect } from '../analyzer/mongo.js';
+import type { CallGuard, PopupPresets } from '../analyzer/frontend.js';
 import type { FlowGraph } from '../graph/graph.js';
 import { ids, slug } from '../graph/ids.js';
 import { humanizeName, isGenericComponentName } from '../analyzer/screens.js';
@@ -6,6 +7,8 @@ import {
   LAYER_OF,
   type EdgeKind,
   type Evidence,
+  type FlowEdge,
+  type FlowNode,
   type Layer,
   type NodeKind,
 } from '../graph/types.js';
@@ -178,7 +181,32 @@ export function resolveFlows(graph: FlowGraph, options: ResolveOptions = {}): Fe
   const flows: FeatureFlow[] = [];
   const usedIds = new Map<string, number>();
 
-  for (const action of graph.nodesOfKind('ui-action')) {
+  const actions = graph.nodesOfKind('ui-action');
+  /**
+   * `<Select onChange={…}>` written in MedicinesView is already its own action there —
+   * "Category", "Supplier" — so the option click inside Select, named by its role
+   * alone and only calling that `onChange`, says nothing more: one copy merged across
+   * every Select on the page. A form's own "Save item" button still names it better.
+   */
+  const usedAt = new Set(
+    actions.map(
+      (action) => `${action.meta?.['component']}|${action.meta?.['tag']}|${action.meta?.['event']}`,
+    ),
+  );
+  const repeatsItsSite = (action: FlowNode): boolean => {
+    const props = action.meta?.['callsProps'] as string[] | undefined;
+    const site = action.meta?.['site'];
+    if (action.meta?.['namedByRole'] !== true || !props?.length) return false;
+    // Relayed: the page's action it calls through is recorded on it.
+    if ((action.meta?.['relayedBy'] as string[] | undefined)?.length) return true;
+    return (
+      typeof site === 'string' &&
+      props.every((prop) => usedAt.has(`${site}|${action.meta?.['component']}|${prop}`))
+    );
+  };
+
+  for (const action of actions) {
+    if (repeatsItsSite(action)) continue;
     const flow = resolveFlow(graph, action.id);
     if (!flow) continue;
     if (!flow.hitsBackend && !options.includeLocalOnly) continue;
@@ -292,11 +320,45 @@ function withoutRuntimeEchoes(graph: FlowGraph, flows: FeatureFlow[]): FeatureFl
 }
 
 /** Resolve a single flow from a UI action (or any other entry node). */
+/**
+ * What one action runs, as `graph.reachable` finds it — less the calls a popup's
+ * opener rules out. Opened with `data.reschedule` set to true, the popup's
+ * `reschedule ? rescheduleApp() : createAppointment()` runs only `rescheduleApp`.
+ */
+function reachableFrom(graph: FlowGraph, entryNodeId: string): Map<string, number> {
+  const depths = new Map<string, number>();
+  if (!graph.hasNode(entryNodeId)) return depths;
+  depths.set(entryNodeId, 0);
+  const queue: Array<[string, number, PopupPresets[]]> = [[entryNodeId, 0, []]];
+  while (queue.length > 0) {
+    const [id, depth, presets] = queue.shift()!;
+    for (const edge of graph.edgesFrom(id, EXECUTION_EDGES)) {
+      if (ruledOut(graph, edge, presets) || depths.has(edge.to)) continue;
+      depths.set(edge.to, depth + 1);
+      const handed = edge.meta?.['presets'] as PopupPresets | undefined;
+      queue.push([edge.to, depth + 1, handed ? [...presets, handed] : presets]);
+    }
+  }
+  return depths;
+}
+
+function ruledOut(graph: FlowGraph, edge: FlowEdge, presets: readonly PopupPresets[]): boolean {
+  const guard = edge.meta?.['guard'] as CallGuard | undefined;
+  if (!guard || presets.length === 0) return false;
+  const component = graph.node(edge.from)?.meta?.['component'];
+  return presets.some(
+    (handed) =>
+      handed.component === component &&
+      guard.path in handed.values &&
+      Boolean(handed.values[guard.path]) !== guard.truthy,
+  );
+}
+
 export function resolveFlow(graph: FlowGraph, entryNodeId: string): FeatureFlow | undefined {
   const entry = graph.node(entryNodeId);
   if (!entry) return undefined;
 
-  const depths = graph.reachable(entryNodeId, { kinds: EXECUTION_EDGES });
+  const depths = reachableFrom(graph, entryNodeId);
   const steps: FlowStep[] = [];
 
   for (const [nodeId, depth] of depths) {

@@ -315,6 +315,27 @@ function typeText(node: TypeNode, types: Map<string, TypeDeclaration>): string {
   if (Node.isTypeLiteral(node)) return 'object';
   if (Node.isArrayTypeNode(node) && Node.isTypeLiteral(node.getElementTypeNode()))
     return 'object[]';
+  // `User["role"]`: the type that property is declared with.
+  if (Node.isIndexedAccessTypeNode(node)) {
+    const owner = node.getObjectTypeNode();
+    const declaration = Node.isTypeReference(owner)
+      ? types.get(owner.getTypeName().getText())
+      : undefined;
+    const body =
+      declaration && Node.isTypeAliasDeclaration(declaration)
+        ? declaration.getTypeNode()
+        : declaration;
+    const key = node
+      .getIndexTypeNode()
+      .getText()
+      .replace(/^['"`]|['"`]$/g, '');
+    const member =
+      body && (Node.isInterfaceDeclaration(body) || Node.isTypeLiteral(body))
+        ? body.getProperty(key)
+        : undefined;
+    const declared = member && Node.isPropertySignature(member) ? member.getTypeNode() : undefined;
+    if (declared) return typeText(declared, types);
+  }
   const text = node.getText().replace(/\s+/g, ' ');
   if (!Node.isTypeReference(node)) return text;
   const alias = types.get(node.getTypeName().getText());
@@ -478,7 +499,10 @@ const ENV_FILES = [
  * The value one variable has in the project's env files. Only that variable is
  * read and kept: the same files hold credentials, which must never reach the graph.
  */
-function envValue(roots: string[], name: string): { value: string; from: string } | undefined {
+export function envValue(
+  roots: string[],
+  name: string,
+): { value: string; from: string } | undefined {
   if (!/^[A-Za-z_]\w*$/.test(name)) return undefined;
   const line = new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=\\s*(.*)$`, 'm');
   for (const root of roots)

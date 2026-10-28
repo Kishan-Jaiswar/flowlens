@@ -7,6 +7,48 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+Found by running 1.4.0 against a Next.js + MongoDB app and a Next.js + NestJS pair.
+
+- **URLs built from environment variables match their routes.** `${process.env.X}/logout`,
+  and constants read from `process.env`, take the path their value holds in the
+  project's `.env` files (only the path: never the host, a credential or a query
+  string). An axios instance's `baseURL` goes in front of the calls made through it
+  and through the wrappers around it.
+- **Calls to another service are no longer reported as wrong URLs.** A call whose
+  base (an environment variable, a host, or a client) never reaches a route in the
+  scanned code is listed apart, by `scan`, `doctor` and the dashboard.
+- **A popup opened with a value set follows only its branch.** "Reschedule" handing
+  a popup `reschedule: true` no longer shows the popup's create-appointment requests.
+- **`$lookup` links.** A join built in variables, or written with `let` and
+  `pipeline`, is read for its own aggregate only: no more self-links such as
+  `billings.appointment_id → billings`. A collection another pipeline joins counts as
+  read, and as reached by the actions that run that join.
+- **A field links by what the code stores in it.** `settings.userId` filled with
+  `ctx.clinicId` at every call links to `clinics`, not `users`. A link `flowlens.config.json`
+  states shows as stated even when a name or a value guessed it too.
+- **N+1 findings skip batched loops**: chunked `$in` lookups and `bulkWrite` per chunk.
+- **Smaller fixes.** A dropdown's role-named "Pick an option" no longer repeats the
+  page's own action; `invalidateQueries()` with no key lists every query it fetches
+  again; `User["role"]` reads as its union; a field the code only `$unset`s says so;
+  a script's `main()` is named with its file.
+- **Naming one root of a configured pair reads the pair.** `flowlens serve ./web`
+  beside a `flowlens.config.json` whose `roots` list `./web` and `./api` scans both,
+  instead of half the app (and replacing the full graph with that half).
+- **Faster on large apps.** On a 1,000-file app: the scan in 56s (was 110s), the first
+  Decisions chart in seconds (was over 7 minutes: it is drawn in full first, with
+  shared helpers named once they are read), the flow list in about 1s, a
+  feature document in under a second (was up to 18s), and the Database page in
+  about 26s (was up to 58s).
+
+### Changed
+
+- **Docs and package metadata.** The npm packages now link to the GitHub
+  repository and issue tracker. The READMEs gain a use-case list and a FAQ, and
+  no longer say job queues are not modelled: BullMQ, Bull and Bee-Queue jobs are
+  followed into their workers.
+
 ## [1.4.0] - 2026-10-23
 
 ### Added

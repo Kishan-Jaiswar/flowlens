@@ -14,6 +14,7 @@
  * clicks.
  */
 
+import { ALL_QUERIES } from '../analyzer/aftermath.js';
 import type { FlowGraph } from '../graph/graph.js';
 import type { EdgeKind, FlowNode } from '../graph/types.js';
 import { checkFlowContract, type ContractCheck } from './contract.js';
@@ -659,6 +660,15 @@ function aftermathFor(
         .map((node) => node.label),
     }));
   const invalidates = [...keys].map((key) => {
+    // Every query the app keeps: each one showing on screen is fetched again.
+    if (key === ALL_QUERIES) {
+      const refetches = graph
+        .nodesOfKind('hook')
+        .flatMap((hook) => graph.successors(hook.id, ['requests']))
+        .filter((node) => node.kind === 'api-call' && node.meta?.['httpMethod'] === 'GET')
+        .map((node) => node.label);
+      return { key, refetches: [...new Set(refetches)].sort() };
+    }
     /**
      * By key, as React Query matches: invalidating `["medicines"]` refetches
      * every query whose key starts with it — and nothing keyed `"imports"`,

@@ -125,7 +125,12 @@ export function linkCollectionRelations(
   let linked = 0;
   linked += declaredRefs(graph, collectionOfModel, collections);
   linked += prismaRelations(graph, prisma, collections);
-  linked += inferredFromNames(graph, collectionOfModel, collections);
+  linked += inferredFromNames(
+    graph,
+    collectionOfModel,
+    collections,
+    new ValueReader(loaded, graph),
+  );
   // Last: it marks the links the first three recorded as actually followed.
   linked += queryJoins(loaded, graph, collections);
   return linked;
@@ -220,6 +225,7 @@ function inferredFromNames(
   graph: FlowGraph,
   collectionOfModel: Map<string, string>,
   collections: Set<string>,
+  values: ValueReader,
 ): number {
   let linked = 0;
 
@@ -237,7 +243,19 @@ function inferredFromNames(
         : {};
 
       // `batches[].supplierId`: the key's own name, a list when any step is one.
-      const guess = referenceTargetOf(field.label.split('.').at(-1)!, collections);
+      const key = field.label.split('.').at(-1)!;
+      const named = referenceTargetOf(key, collections);
+      /**
+       * What the code stores there outranks what the field is called: `settings.userId`
+       * filled with `ctx.clinicId` at every call holds a clinic. Only top-level keys,
+       * only when every place that sets it agrees, and only on a collection that exists.
+       */
+      const fed: string | undefined = field.label.includes('.')
+        ? undefined
+        : values.targetOf(from, key, collections);
+      const guess: { collection: string; many: boolean } | undefined = fed
+        ? { collection: fed, many: named?.many ?? false }
+        : named;
       // `orders.order_id` is the order's own business id, not a link back to orders.
       if (guess && guess.collection !== from) {
         const type = String(field.meta?.['type'] ?? '');
@@ -558,12 +576,66 @@ function statementsFor(
     const statement = call.getFirstAncestor(
       (node) => Node.isStatement(node) || Node.isVariableStatement(node),
     );
-    // An aggregate's stages are often built in variables first (`const lookup = { $lookup: … }`):
-    // its whole function is read, so a join declared a few lines up still counts.
-    const scope = member === 'aggregate' ? enclosingFunction(call) : undefined;
-    found.push([match.id, (scope ?? statement ?? call).getText(), call]);
+    found.push([
+      match.id,
+      member === 'aggregate' ? pipelineText(call) : (statement ?? call).getText(),
+      call,
+    ]);
   }
   return found;
+}
+
+/**
+ * An aggregate's pipeline with the variables it is built from written in:
+ * `aggregate([match, lookup])`, or `aggregate(stages)` after `stages.push(lookup)`.
+ *
+ * Only what this aggregate runs. Reading the whole function instead hands it the
+ * `$lookup`s of every other aggregate written there, and a join from another
+ * collection's pipeline then reads as a link from this one.
+ */
+function pipelineText(call: CallExpression): string {
+  const fn = enclosingFunction(call);
+  const first = call.getArguments()[0];
+  if (!fn || !first) return call.getText();
+  const declared = new Map<string, Node>();
+  for (const declaration of fn.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    const init = declaration.getInitializer();
+    if (init && !declared.has(declaration.getName())) declared.set(declaration.getName(), init);
+  }
+  // Stages added after the declaration: `stages.push(lookup)`, `stages = [...stages, lookup]`.
+  const added = new Map<string, Node[]>();
+  const add = (name: string, node: Node): void => {
+    added.set(name, [...(added.get(name) ?? []), node]);
+  };
+  for (const other of fn.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+    const callee = other.getExpression();
+    if (Node.isPropertyAccessExpression(callee) && /^(push|unshift)$/.test(callee.getName()))
+      for (const arg of other.getArguments()) add(callee.getExpression().getText(), arg);
+  }
+  for (const assignment of fn.getDescendantsOfKind(SyntaxKind.BinaryExpression))
+    if (assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken)
+      add(assignment.getLeft().getText(), assignment.getRight());
+
+  const texts = [call.getText()];
+  const seen = new Set<string>();
+  const queue: Node[] = [first];
+  while (queue.length > 0) {
+    const node = queue.pop()!;
+    const names = Node.isIdentifier(node)
+      ? [node]
+      : node.getDescendantsOfKind(SyntaxKind.Identifier);
+    for (const identifier of names) {
+      const name = identifier.getText();
+      if (seen.has(name)) continue;
+      seen.add(name);
+      for (const part of [declared.get(name), ...(added.get(name) ?? [])]) {
+        if (!part) continue;
+        texts.push(part.getText());
+        queue.push(part);
+      }
+    }
+  }
+  return texts.join('\n');
 }
 
 /**
@@ -661,12 +733,30 @@ function lookupsIn(
   text: string,
 ): Array<{ from: string; localField?: string; foreignField?: string }> {
   const found: Array<{ from: string; localField?: string; foreignField?: string }> = [];
-  for (const match of text.matchAll(/\$lookup\s*:\s*\{([^}]*)\}/g)) {
-    const body = match[1] ?? '';
-    const from = /\bfrom\s*:\s*['"`]([^'"`]+)['"`]/.exec(body)?.[1];
+  for (const match of text.matchAll(/\$lookup\s*:\s*\{/g)) {
+    const body = balanced(text, match.index + match[0].length);
+    // The lookup's own keys, not those of a lookup nested in its pipeline.
+    const own = body.replace(/\{[^{}]*\}/g, (inner) => inner.replace(/[^\n]/g, ' '));
+    const from = /\bfrom\s*:\s*['"`]([^'"`]+)['"`]/.exec(own)?.[1];
     if (!from) continue;
-    const localField = /\blocalField\s*:\s*['"`]([^'"`]+)['"`]/.exec(body)?.[1];
-    const foreignField = /\bforeignField\s*:\s*['"`]([^'"`]+)['"`]/.exec(body)?.[1];
+    let localField = /\blocalField\s*:\s*['"`]([^'"`]+)['"`]/.exec(own)?.[1];
+    let foreignField = /\bforeignField\s*:\s*['"`]([^'"`]+)['"`]/.exec(own)?.[1];
+    // `let: { id: '$_id' }, pipeline: [{ $match: { $expr: { $eq: ['$appointment_id', '$$id'] } } }]`
+    if (!localField) {
+      const lets = new Map<string, string>();
+      const letBody = /\blet\s*:\s*\{([^}]*)\}/.exec(body)?.[1] ?? '';
+      for (const entry of letBody.matchAll(/([\w$]+)\s*:\s*['"`]\$([\w.]+)['"`]/g))
+        lets.set(entry[1]!, entry[2]!);
+      for (const eq of body.matchAll(
+        /\$eq\s*:\s*\[\s*['"`]\$([\w.]+)['"`]\s*,\s*['"`]\$\$([\w$]+)['"`]\s*\]|\$eq\s*:\s*\[\s*['"`]\$\$([\w$]+)['"`]\s*,\s*['"`]\$([\w.]+)['"`]\s*\]/g,
+      )) {
+        const local = lets.get(eq[2] ?? eq[3]!);
+        if (!local) continue;
+        localField = local;
+        foreignField = eq[1] ?? eq[4]!;
+        break;
+      }
+    }
     found.push({
       from,
       ...(localField ? { localField } : {}),
@@ -674,6 +764,17 @@ function lookupsIn(
     });
   }
   return found;
+}
+
+/** The text from `start` up to the brace that closes the one just before it. */
+function balanced(text: string, start: number): string {
+  let depth = 1;
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === '{') depth += 1;
+    else if (char === '}' && --depth === 0) return text.slice(start, i);
+  }
+  return text.slice(start);
 }
 
 /**
@@ -781,4 +882,162 @@ function isSourceRef(value: unknown): value is { file: string; line: number } {
     typeof (value as { file?: unknown }).file === 'string' &&
     typeof (value as { line?: unknown }).line === 'number'
   );
+}
+
+/**
+ * Which collection the values written into one field point at, read from the code
+ * that writes them: `{ userId }` inside `getImportMapping(userId)`, called as
+ * `getImportMapping(ctx.clinicId)`, holds a clinic id. Parameters are followed up to
+ * three calls back; the value's own name then says which collection it belongs to.
+ */
+class ValueReader {
+  private readonly calls = new Map<string, Map<number, CallExpression[]>>();
+  private readonly values = new Map<string, Map<string, Node[]>>();
+  private readonly named = new Map<string, Map<string, CallExpression[]>>();
+  private readonly files = new Map<string, SourceFile>();
+  private readonly opsOf = new Map<string, FlowNode[]>();
+  private readonly methodAt = new Map<string, FlowNode>();
+
+  constructor(
+    private readonly loaded: LoadedProject,
+    private readonly graph: FlowGraph,
+  ) {
+    for (const file of loaded.sourceFiles) this.files.set(loaded.rel(file), file);
+    for (const method of graph.nodesOfKind('method'))
+      if (method.source) {
+        const key = `${method.source.file}:${method.source.line}`;
+        if (!this.methodAt.has(key)) this.methodAt.set(key, method);
+      }
+    for (const op of graph.nodesOfKind('db-op')) {
+      const collection = op.meta?.['collection'];
+      if (typeof collection !== 'string' || !op.source) continue;
+      this.opsOf.set(collection, [...(this.opsOf.get(collection) ?? []), op]);
+    }
+  }
+
+  /** The one collection every value written into `collection.field` names, if they agree. */
+  targetOf(
+    collection: string,
+    field: string,
+    collections: ReadonlySet<string>,
+  ): string | undefined {
+    const found = new Set<string>();
+    for (const op of this.opsOf.get(collection) ?? []) {
+      for (const value of this.valuesAt(op).get(field) ?? []) {
+        for (const name of this.namesOf(value, 0)) {
+          const target = referenceTargetOf(name, collections);
+          if (!target) return undefined;
+          found.add(target.collection);
+        }
+      }
+    }
+    return found.size === 1 ? [...found][0] : undefined;
+  }
+
+  /** Each key one query's filter and update give a value, read once. */
+  private valuesAt(op: FlowNode): Map<string, Node[]> {
+    let values = this.values.get(op.id);
+    if (values) return values;
+    values = new Map();
+    const call = this.callAt(
+      op.source!.file,
+      op.source!.line,
+      String(op.meta?.['operation'] ?? ''),
+    );
+    if (call) valuesOf(call, values);
+    this.values.set(op.id, values);
+    return values;
+  }
+
+  /** The names a value is built from, through the parameters it was handed. */
+  private namesOf(value: Node, depth: number): string[] {
+    if (Node.isPropertyAccessExpression(value)) return [value.getName()];
+    if (!Node.isIdentifier(value)) return [];
+    const declaration = declarationOf(value);
+    if (!declaration || !Node.isParameterDeclaration(declaration)) return [value.getText()];
+    if (depth >= 3) return [];
+    const fn = enclosingFunction(declaration);
+    if (!fn) return [];
+    const index = fn.getParameters().indexOf(declaration);
+    const name = fnName(fn);
+    const self = this.methodAt.get(`${this.loaded.rel(fn.getSourceFile())}:${lineOf(fn)}`);
+    if (!self || !name) return [];
+    const names: string[] = [];
+    for (const caller of this.graph.predecessors(self.id, ['calls'])) {
+      if (!caller.source) continue;
+      const file = this.files.get(caller.source.file);
+      if (!file) continue;
+      for (const call of this.callsNamed(caller.source.file, file).get(name) ?? []) {
+        const callerFn = enclosingFunction(call);
+        if (!callerFn || lineOf(callerFn) !== caller.source.line) continue;
+        const arg = call.getArguments()[index];
+        if (!arg) return [];
+        const more = this.namesOf(arg, depth + 1);
+        if (more.length === 0) return [];
+        names.push(...more);
+      }
+    }
+    return names;
+  }
+
+  private callAt(file: string, line: number, operation: string): CallExpression | undefined {
+    const source = this.files.get(file);
+    if (!source) return undefined;
+    return this.callsOf(file, source)
+      .get(line)
+      ?.find((call) => !operation || calleeMember(call) === operation);
+  }
+
+  /** A file's calls by the name they call, indexed once. */
+  private callsNamed(rel: string, file: SourceFile): Map<string, CallExpression[]> {
+    let found = this.named.get(rel);
+    if (found) return found;
+    found = new Map();
+    for (const calls of this.callsOf(rel, file).values())
+      for (const call of calls) {
+        const name = calleeMember(call);
+        found.set(name, [...(found.get(name) ?? []), call]);
+      }
+    this.named.set(rel, found);
+    return found;
+  }
+
+  /** A file's calls by the line they start on, indexed once. */
+  private callsOf(rel: string, file: SourceFile): Map<number, CallExpression[]> {
+    let found = this.calls.get(rel);
+    if (found) return found;
+    found = new Map();
+    for (const call of callsIn(file)) {
+      const line = lineOf(call);
+      found.set(line, [...(found.get(line) ?? []), call]);
+    }
+    this.calls.set(rel, found);
+    return found;
+  }
+}
+
+/** The values a query's filter and update give each key: `{ userId }`, `{ $set: { userId: x } }`. */
+function valuesOf(call: CallExpression, into: Map<string, Node[]>): void {
+  const add = (key: string, value: Node): void => {
+    into.set(key, [...(into.get(key) ?? []), value]);
+  };
+  for (const arg of call.getArguments().slice(0, 2)) {
+    if (!Node.isObjectLiteralExpression(arg)) continue;
+    for (const object of [arg, ...arg.getDescendantsOfKind(SyntaxKind.ObjectLiteralExpression)])
+      for (const property of object.getProperties()) {
+        if (Node.isShorthandPropertyAssignment(property))
+          add(property.getName(), property.getNameNode());
+        else if (Node.isPropertyAssignment(property)) {
+          const init = property.getInitializer();
+          if (init) add(property.getName(), init);
+        }
+      }
+  }
+}
+
+/** A function's name as its callers write it. */
+function fnName(fn: Node): string | undefined {
+  if (Node.isFunctionDeclaration(fn) || Node.isMethodDeclaration(fn)) return fn.getName();
+  const holder = fn.getParent();
+  return holder && Node.isVariableDeclaration(holder) ? holder.getName() : undefined;
 }

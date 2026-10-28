@@ -344,6 +344,8 @@ export function renderDatabaseMarkdown(report: DatabaseReport): string {
           f.unique ? 'unique' : f.indexed && 'indexed',
           f.expiresAfterSeconds !== undefined && `expires after ${f.expiresAfterSeconds}s`,
           f.ref && `links to ${f.ref}`,
+          // A field the code only ever `$unset`s is one it is clearing out.
+          f.writes.length > 0 && f.writes.every((w) => w.how === '$unset') && 'removed by the code',
         ].filter(Boolean);
         out.push(
           `| \`${cell(f.name)}\` | ${cell(f.type ?? '')} | ${cell(rules.join(', '))} | ${cell(labels.join(', '))} |`,

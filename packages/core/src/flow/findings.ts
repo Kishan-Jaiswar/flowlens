@@ -1076,6 +1076,7 @@ function loopAround(node: Node, stopAt: Node | undefined): LoopFacts | undefined
       // `for (const x of ["a", "b"])` runs a known, small number of times.
       if (Node.isForOfStatement(current) && Node.isArrayLiteralExpression(current.getExpression()))
         return undefined;
+      if (walksChunks(current)) continue;
       return { loop: current, parallel: false };
     }
     if (Node.isArrowFunction(current) || Node.isFunctionExpression(current)) {
@@ -1084,6 +1085,10 @@ function loopAround(node: Node, stopAt: Node | undefined): LoopFacts | undefined
         const callee = call.getExpression();
         if (Node.isPropertyAccessExpression(callee) && ITERATING.test(callee.getName())) {
           if (Node.isArrayLiteralExpression(callee.getExpression())) return undefined;
+          if (isChunked(callee.getExpression(), call)) {
+            current = call;
+            continue;
+          }
           const parallel = Boolean(
             call.getFirstAncestor(
               (ancestor) =>
@@ -1098,6 +1103,50 @@ function loopAround(node: Node, stopAt: Node | undefined): LoopFacts | undefined
     }
   }
   return undefined;
+}
+
+const CHUNKING = /chunk|batch/i;
+
+/**
+ * A loop over slices of a list rather than its items — `for (let i = 0; i < n; i += 500)`,
+ * `for (const part of chunk(ids, 500))` — runs one query per batch: batching, not N+1.
+ */
+function walksChunks(loop: Node): boolean {
+  if (Node.isForStatement(loop)) {
+    const step = loop.getIncrementor()?.getText().replace(/\s+/g, '') ?? '';
+    return /^\w+\+=(?!1$)\w+/.test(step);
+  }
+  if (Node.isForOfStatement(loop)) return isChunked(loop.getExpression(), loop);
+  return false;
+}
+
+/** The list a loop walks is a list of batches: made by a chunking call, or filled one per batch. */
+function isChunked(list: Node, loop: Node, depth = 0): boolean {
+  if (depth > 3) return false;
+  if (Node.isCallExpression(list)) {
+    const callee = list.getExpression();
+    const name = Node.isPropertyAccessExpression(callee) ? callee.getName() : callee.getText();
+    return CHUNKING.test(name);
+  }
+  if (!Node.isIdentifier(list)) return false;
+  const fn = nearestFunction(loop);
+  const declaration = fn ? localVariable(fn, list.getText()) : undefined;
+  if (!declaration || !Node.isVariableDeclaration(declaration)) return false;
+  const init = declaration.getInitializer();
+  if (init && !Node.isArrayLiteralExpression(init)) return isChunked(init, loop, depth + 1);
+  // `const parts = []`, then `parts.push(...)` once per batch.
+  const pushes = (fn ?? declaration)
+    .getDescendantsOfKind(SyntaxKind.CallExpression)
+    .filter((call) => call.getExpression().getText() === `${list.getText()}.push`);
+  return (
+    pushes.length > 0 &&
+    pushes.every((push) => {
+      const outer = push.getFirstAncestor(
+        (node) => Node.isForStatement(node) || Node.isForOfStatement(node),
+      );
+      return Boolean(outer && walksChunks(outer));
+    })
+  );
 }
 
 function checkLoops(ctx: Ctx): void {

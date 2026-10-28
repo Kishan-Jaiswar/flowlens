@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { loadConfig } from '@flowslens/core';
-import { splitPositionals } from './args.js';
+import { rootsToScan, splitPositionals } from './args.js';
 import { runFlow, runFlows } from './commands/flows.js';
 import { runDb } from './commands/db.js';
 import { runDiff } from './commands/diff.js';
@@ -238,7 +238,7 @@ export function main(argv = process.argv.slice(2)): number {
     path: configPath,
     warnings: configWarnings,
   } = loadConfig(cliRoots[0] ?? '.', values.config);
-  const roots = cliRoots.length > 0 ? cliRoots : (fileConfig.roots ?? ['.']);
+  const roots = rootsToScan(cliRoots, fileConfig.roots);
 
   /**
    * On stderr, before anything runs: a config file is *found*, not asked for,

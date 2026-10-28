@@ -19,7 +19,7 @@ import {
   renderFlowTree,
   resolveFlows,
 } from '@flowslens/core';
-import { looksLikePath, splitPositionals } from '../packages/cli/dist/args.js';
+import { looksLikePath, rootsToScan, splitPositionals } from '../packages/cli/dist/args.js';
 import { detectSetup, findSiblingRepositories } from '../packages/cli/dist/commands/init.js';
 import { browserCommand, openBrowser } from '../packages/cli/dist/commands/serve.js';
 import { graphPath, outputDir, projectKey, tracePath } from '../packages/cli/dist/paths.js';
@@ -86,6 +86,24 @@ describe('path arguments, spelled any way', () => {
       roots: ['my-app'],
       args: ['create-customer'],
     });
+  });
+});
+
+describe('which directories a command reads', () => {
+  const config = ['/work/web', '/work/api'];
+
+  it('reads the config roots when none is named', () => {
+    expect(rootsToScan([], config)).toEqual(config);
+    expect(rootsToScan([], undefined)).toEqual(['.']);
+  });
+
+  it('brings the sibling roots along when the named one is in the config, named first', () => {
+    expect(rootsToScan(['/work/api'], config)).toEqual(['/work/api', '/work/web']);
+  });
+
+  it('keeps to what was named when the config does not list it', () => {
+    expect(rootsToScan(['/elsewhere'], config)).toEqual(['/elsewhere']);
+    expect(rootsToScan(['/work/web', '/elsewhere'], config)).toEqual(['/work/web', '/elsewhere']);
   });
 });
 

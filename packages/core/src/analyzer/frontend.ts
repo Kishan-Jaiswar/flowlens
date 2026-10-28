@@ -14,7 +14,7 @@ import {
   type VariableDeclaration,
 } from 'ts-morph';
 import type { FlowGraph } from '../graph/graph.js';
-import type { FlowNode } from '../graph/types.js';
+import type { FlowEdge, FlowNode } from '../graph/types.js';
 import { ids } from '../graph/ids.js';
 import {
   asObjectLiteral,
@@ -44,6 +44,7 @@ import {
 } from './screens.js';
 import { DYNAMIC_MARKER, HTTP_METHODS, PARAM, normalizePath, type HttpMethod } from './http.js';
 import type { LoadedProject } from './project.js';
+import { BASE_KEY } from './constants.js';
 import { keyPrefixOf } from './querykeys.js';
 
 /**
@@ -352,6 +353,15 @@ interface PendingCall {
   emptyArgs?: number[];
   /** Names the arguments are built from, through `useMemo` and the like: `query` -> page, sortBy. */
   reads?: string[];
+  /** The prop the call is guarded by: `data.reschedule ? a() : b()`. See `guardOf`. */
+  guard?: CallGuard;
+}
+
+/** A call made only when one prop is truthy (or only when it is not). */
+export interface CallGuard {
+  /** `data.reschedule`: a prop, or a path inside one. */
+  path: string;
+  truthy: boolean;
 }
 
 /**
@@ -631,6 +641,11 @@ function linkPopupFeatures(graph: FlowGraph, loaded: LoadedProject): void {
       for (const opener of openers) {
         const handler = graph.successors(opener.id, ['triggers'])[0];
         if (!handler) continue;
+        const presets = popupPresets(
+          files,
+          [handler, ...graph.successors(handler.id, ['calls']).filter((n) => n.kind === 'handler')],
+          element,
+        );
         before.forEach((earlier, index) => {
           const step = graph.successors(earlier.id, ['triggers'])[0];
           if (!step) return;
@@ -643,6 +658,7 @@ function linkPopupFeatures(graph: FlowGraph, loaded: LoadedProject): void {
               userStep: earlier.label,
               ...(inputs.includes(earlier) ? { input: true } : {}),
               ...(index === firstFilled && filled.length ? { fields: filled } : {}),
+              ...(presets ? { presets } : {}),
             },
           });
         });
@@ -654,12 +670,98 @@ function linkPopupFeatures(graph: FlowGraph, loaded: LoadedProject): void {
             line: end,
             userStep: main.label,
             ...(before.length === firstFilled && filled.length ? { fields: filled } : {}),
+            ...(presets ? { presets } : {}),
           },
         });
         opener.meta = { ...opener.meta, opensFeature: main.id };
       }
     }
   }
+}
+
+/** The props an opener hands one popup component, as written: `data.reschedule: true`. */
+export interface PopupPresets {
+  component: string;
+  values: Record<string, string | number | boolean | null>;
+}
+
+/**
+ * What an opener hands the popup, fixed: `setSelectTime({ reschedule: true })` with
+ * `<TimeSlotPopup data={selectTime}>` opens it with `data.reschedule` true — so of
+ * `reschedule ? rescheduleApp() : createAppointment()` inside, only the first runs.
+ * Literal values only; a key two openers' calls set differently is left out.
+ */
+function popupPresets(
+  files: ReadonlyMap<string, SourceFile>,
+  handlers: readonly FlowNode[],
+  element: Node,
+): PopupPresets | undefined {
+  const opening = Node.isJsxElement(element) ? element.getOpeningElement() : element;
+  if (!Node.isJsxOpeningElement(opening) && !Node.isJsxSelfClosingElement(opening))
+    return undefined;
+  const propOf = new Map<string, string>();
+  for (const attribute of opening.getAttributes()) {
+    if (!Node.isJsxAttribute(attribute)) continue;
+    const init = attribute.getInitializer();
+    const value = init && Node.isJsxExpression(init) ? init.getExpression() : undefined;
+    if (value && Node.isIdentifier(value))
+      propOf.set(setterName(value.getText()), attribute.getNameNode().getText());
+  }
+  const presets: Record<string, string | number | boolean | null> = {};
+  const unsure = new Set<string>();
+  for (const handler of handlers) {
+    const at = handler.source;
+    const file = at ? files.get(at.file) : undefined;
+    const fn = file ? functionsByLine(file).get(at!.line) : undefined;
+    for (const call of fn?.getDescendantsOfKind(SyntaxKind.CallExpression) ?? []) {
+      const prop = propOf.get(call.getExpression().getText());
+      const arg = call.getArguments()[0];
+      if (!prop || !arg || !Node.isObjectLiteralExpression(arg)) continue;
+      for (const property of arg.getProperties()) {
+        if (!Node.isPropertyAssignment(property)) continue;
+        const value = literalValue(property.getInitializer());
+        if (value === undefined) continue;
+        const key = `${prop}.${property.getName()}`;
+        if (key in presets && presets[key] !== value) unsure.add(key);
+        presets[key] = value;
+      }
+    }
+  }
+  for (const key of unsure) delete presets[key];
+  if (Object.keys(presets).length === 0) return undefined;
+  return { component: opening.getTagNameNode().getText(), values: presets };
+}
+
+const FUNCTIONS_BY_LINE = new WeakMap<SourceFile, Map<number, Node>>();
+
+/** A file's functions by the line they start on, the first one there. */
+function functionsByLine(file: SourceFile): Map<number, Node> {
+  let found = FUNCTIONS_BY_LINE.get(file);
+  if (found) return found;
+  found = new Map();
+  for (const node of file.getDescendants())
+    if (
+      (Node.isArrowFunction(node) ||
+        Node.isFunctionExpression(node) ||
+        Node.isFunctionDeclaration(node) ||
+        Node.isMethodDeclaration(node)) &&
+      !found.has(node.getStartLineNumber())
+    )
+      found.set(node.getStartLineNumber(), node);
+  FUNCTIONS_BY_LINE.set(file, found);
+  return found;
+}
+
+/** `true`, `0`, `"walkin"`, `null` as written; undefined for anything worked out. */
+function literalValue(node: Node | undefined): string | number | boolean | null | undefined {
+  if (!node) return undefined;
+  if (Node.isTrueLiteral(node)) return true;
+  if (Node.isFalseLiteral(node)) return false;
+  if (Node.isNullLiteral(node)) return null;
+  if (Node.isNumericLiteral(node)) return node.getLiteralValue();
+  if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node))
+    return node.getLiteralValue();
+  return undefined;
 }
 
 /** `{open && <X/>}`, `{open ? <X/> : null}`: the condition an element is drawn under. */
@@ -1895,6 +1997,7 @@ function analyzeComponentBody(
         ...(typeof handlerName === 'string' && label === humanizeHandler(handlerName)
           ? { namedByHandler: true }
           : {}),
+        ...(label === PICK_AN_OPTION ? { namedByRole: true } : {}),
       },
     });
     graph.addEdge({ from: componentId, to: actionId, kind: 'renders' });
@@ -2113,6 +2216,9 @@ function actionLabel(
   return propName === 'onDrop' && !/^drop/i.test(label) ? `Drop a file on "${label}"` : label;
 }
 
+/** A dropdown row's name, from its role alone: it carries no words of its own. */
+const PICK_AN_OPTION = 'Pick an option';
+
 function elementLabel(
   attribute: JsxAttribute,
   propName: string,
@@ -2147,7 +2253,7 @@ function elementLabel(
   // `<input type="file" onChange={…}>`: what the user does with it.
   if (tag === 'input' && stringProp('type') === 'file') return 'Choose a file';
   // `<div role="option" onClick={() => choose(o)}>`: one row of a dropdown.
-  if (stringProp('role') === 'option') return 'Pick an option';
+  if (stringProp('role') === 'option') return PICK_AN_OPTION;
   if (stringProp('aria-haspopup') === 'listbox') return 'Open the list';
   // `<button aria-haspopup="menu">` with only an avatar and a name in it.
   if (stringProp('aria-haspopup') && componentName)
@@ -2802,6 +2908,8 @@ export interface DetectedRequest {
   method: HttpMethod;
   /** Raw path as written in source. */
   rawPath: string;
+  /** The client's `baseURL`, when the call goes through one: see `baseOf`. */
+  base?: string;
   /** Normalised path used for route matching. */
   path: string;
   /** Keys of the request body object literal, when it is one. */
@@ -3060,6 +3168,7 @@ function buildRequest(
   config: FrontendConfig,
   client: string,
 ): DetectedRequest {
+  const base = baseOf(rawPath, client, config.resolveConstant);
   const payloadKeys = body ? objectKeys(body) : [];
   const payloadSources: Record<string, string> = {};
   if (body) {
@@ -3077,12 +3186,31 @@ function buildRequest(
   return {
     method: method as HttpMethod,
     rawPath,
-    path: normalizePath(rawPath, config.apiPrefixes),
+    path: normalizePath(
+      base ? `${base}/${rawPath.replace(/^\/+/, '')}` : rawPath,
+      config.apiPrefixes,
+    ),
+    ...(base ? { base } : {}),
     payloadKeys,
     payloadSources,
     queryKeys: queryKeysOf(rawPath),
     client,
   };
+}
+
+/**
+ * The `baseURL` of the client a relative URL is sent through — directly, or by a
+ * wrapper around one — which goes in front of it when the request goes out. None for
+ * an absolute URL, or one that starts from its own base.
+ */
+function baseOf(
+  rawPath: string,
+  client: string,
+  resolve: ((name: string) => string | undefined) | undefined,
+): string | undefined {
+  if (!resolve || rawPath.startsWith('<') || /^[a-z][a-z0-9+.-]*:\/\//i.test(rawPath))
+    return undefined;
+  return resolve(`${BASE_KEY}${client}`);
 }
 
 /**
@@ -3166,6 +3294,7 @@ function linkApiCall(
       path: request.path,
       rawPath: request.rawPath,
       client: request.client,
+      ...(request.base ? { base: request.base } : {}),
     },
   });
 
@@ -3450,6 +3579,16 @@ function resolvePendingCalls(
   }
 
   const touched = new Set<string>();
+  /**
+   * The guards each call edge was seen under. One edge stands for every call from a
+   * caller to a callee: when two of them disagree — one guarded, one not — none holds.
+   */
+  const guards = new Map<FlowEdge, Set<string>>();
+  const link = (from: string, to: string, call: PendingCall): void => {
+    const edge = graph.addEdge({ from, to, kind: 'calls', ...edgeMeta(call) });
+    const seen = guards.get(edge) ?? guards.set(edge, new Set()).get(edge)!;
+    seen.add(call.guard ? `${call.guard.path}:${call.guard.truthy}` : '');
+  };
 
   for (const call of pending) {
     // `createCustomer()` in this file may really mean `useCreateCustomer()`.
@@ -3462,7 +3601,7 @@ function resolvePendingCalls(
     const provided = context ? contexts.members.get(`${context}::${alias?.member}`) : undefined;
     if (provided && graph.hasNode(provided) && provided !== call.from.id) {
       call.from.ensure();
-      graph.addEdge({ from: call.from.id, to: provided, kind: 'calls', ...edgeMeta(call) });
+      link(call.from.id, provided, call);
       continue;
     }
     const name = aliased ?? call.name;
@@ -3480,8 +3619,13 @@ function resolvePendingCalls(
     if (call.from.kind === 'module-fn') touched.add(call.from.id);
     if (target.kind === 'module-fn') touched.add(target.id);
 
-    graph.addEdge({ from: call.from.id, to: target.id, kind: 'calls', ...edgeMeta(call) });
+    link(call.from.id, target.id, call);
   }
+  for (const [edge, seen] of guards)
+    if (seen.size > 1 && edge.meta) {
+      const { guard: _guard, ...rest } = edge.meta;
+      edge.meta = rest;
+    }
 
   pruneUnusedModuleFunctions(graph, touched);
 }
@@ -3496,6 +3640,7 @@ function edgeMeta(call: PendingCall): { meta?: Record<string, unknown> } {
       ...(call.emptyArgs?.length ? { emptyArgs: call.emptyArgs } : {}),
       ...(call.reads?.length ? { reads: call.reads } : {}),
       ...(call.afterResponse ? { afterResponse: true } : {}),
+      ...(call.guard ? { guard: call.guard } : {}),
     },
   };
 }
@@ -3511,7 +3656,7 @@ const PROMISE_CALLBACKS = new Set(['then', 'catch', 'finally']);
  */
 function callPlacement(
   call: CallExpression,
-): Pick<PendingCall, 'line' | 'end' | 'afterResponse' | 'emptyArgs' | 'reads'> {
+): Pick<PendingCall, 'line' | 'end' | 'afterResponse' | 'emptyArgs' | 'reads' | 'guard'> {
   let afterResponse = false;
   for (let node: Node | undefined = call.getParent(); node; node = node.getParent()) {
     if (!Node.isArrowFunction(node) && !Node.isFunctionExpression(node)) continue;
@@ -3538,13 +3683,106 @@ function callPlacement(
     .map((arg, index) => (startsEmpty(arg) ? index : -1))
     .filter((index) => index >= 0);
   const reads = argumentNames(call);
+  const guard = guardOf(call);
   return {
     line: call.getStartLineNumber(),
     end: call.getEnd(),
     ...(afterResponse ? { afterResponse } : {}),
     ...(emptyArgs.length ? { emptyArgs } : {}),
     ...(reads.length ? { reads } : {}),
+    ...(guard ? { guard } : {}),
   };
+}
+
+/**
+ * The prop the nearest condition around a call tests, inside its own handler:
+ * `reschedule ? rescheduleApp() : createAppointment()` with
+ * `const [reschedule] = useState(data?.reschedule)` runs `rescheduleApp` only when
+ * `data.reschedule` is truthy. A condition on anything but a prop is no guard here.
+ */
+function guardOf(call: CallExpression): CallGuard | undefined {
+  let child: Node = call;
+  for (let node = call.getParent(); node; child = node, node = node.getParent()) {
+    if (
+      Node.isArrowFunction(node) ||
+      Node.isFunctionExpression(node) ||
+      Node.isFunctionDeclaration(node) ||
+      Node.isMethodDeclaration(node)
+    )
+      return undefined;
+    if (Node.isConditionalExpression(node) && child !== node.getCondition())
+      return guardFrom(node.getCondition(), child === node.getWhenTrue());
+    if (Node.isIfStatement(node) && child !== node.getExpression())
+      return guardFrom(node.getExpression(), child === node.getThenStatement());
+  }
+  return undefined;
+}
+
+function guardFrom(condition: Node, inThen: boolean): CallGuard | undefined {
+  let truthy = inThen;
+  let expression: Node = condition;
+  while (
+    Node.isPrefixUnaryExpression(expression) &&
+    expression.getOperatorToken() === SyntaxKind.ExclamationToken
+  ) {
+    truthy = !truthy;
+    expression = expression.getOperand();
+  }
+  if (Node.isParenthesizedExpression(expression))
+    return guardFrom(expression.getExpression(), truthy);
+  const path = propPath(expression, 0);
+  return path ? { path, truthy } : undefined;
+}
+
+/**
+ * `data?.reschedule` → `data.reschedule` when `data` is a prop of the component it
+ * is written in; a state seeded from one (`useState(data?.reschedule)`) reads as it.
+ */
+function propPath(expression: Node, depth: number): string | undefined {
+  const text = expression.getText().replace(/\s+/g, '').replace(/\?\./g, '.');
+  if (!/^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*$/.test(text) || depth > 2) return undefined;
+  const [root, ...rest] = text.split('.');
+  const component = expression.getFirstAncestor(
+    (node): node is Functionish =>
+      (Node.isFunctionDeclaration(node) ||
+        Node.isArrowFunction(node) ||
+        Node.isFunctionExpression(node)) &&
+      /^[A-Z]/.test(functionName(node as Functionish) ?? ''),
+  );
+  const props = component?.getParameters()[0];
+  if (!component || !props) return undefined;
+  const nameNode = props.getNameNode();
+  if (Node.isIdentifier(nameNode) && root === nameNode.getText() && rest.length > 0)
+    return rest.join('.');
+  if (Node.isObjectBindingPattern(nameNode)) {
+    const element = nameNode.getElements().find((each) => each.getNameNode().getText() === root);
+    if (element) return [element.getPropertyNameNode()?.getText() ?? root!, ...rest].join('.');
+  }
+  // `const [reschedule, setReschedule] = useState(data?.reschedule)`
+  const seed = stateSeeds(component).get(root!);
+  const seeded = seed ? propPath(seed, depth + 1) : undefined;
+  return seeded ? [seeded, ...rest].join('.') : undefined;
+}
+
+const STATE_SEEDS = new WeakMap<Node, Map<string, Node>>();
+
+/** Each `useState(x)` of a component by the state's name: `reschedule` → `data?.reschedule`. */
+function stateSeeds(component: Node): Map<string, Node> {
+  let seeds = STATE_SEEDS.get(component);
+  if (seeds) return seeds;
+  seeds = new Map();
+  for (const declaration of component.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    const binding = declaration.getNameNode();
+    if (!Node.isArrayBindingPattern(binding)) continue;
+    const first = binding.getElements()[0];
+    const init = declaration.getInitializer();
+    if (!first || !Node.isBindingElement(first) || !init || !Node.isCallExpression(init)) continue;
+    if (!/useState$/.test(init.getExpression().getText())) continue;
+    const seed = init.getArguments()[0];
+    if (seed && !seeds.has(first.getName())) seeds.set(first.getName(), seed);
+  }
+  STATE_SEEDS.set(component, seeds);
+  return seeds;
 }
 
 /**
@@ -3571,12 +3809,7 @@ function argumentNames(call: CallExpression): string[] {
         const name = identifier.getText();
         if (found.has(name)) continue;
         found.add(name);
-        const declaration = scope
-          ?.getDescendantsOfKind(SyntaxKind.VariableDeclaration)
-          .find(
-            (candidate) =>
-              Node.isIdentifier(candidate.getNameNode()) && candidate.getName() === name,
-          );
+        const declaration = scope ? variablesByName(scope).get(name) : undefined;
         const init = declaration?.getInitializer();
         if (init && !/^use(State|Reducer)\b/.test(init.getText())) next.push(init);
       }
@@ -3604,21 +3837,44 @@ function startsEmpty(arg: Node): boolean {
   if (Node.isConditionalExpression(arg))
     return EMPTY.test(arg.getWhenFalse().getText()) || EMPTY.test(arg.getWhenTrue().getText());
   if (!Node.isIdentifier(arg)) return false;
-  const name = arg.getText();
-  for (const declaration of arg
-    .getSourceFile()
-    .getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+  const state = fileStates(arg.getSourceFile()).get(arg.getText());
+  if (!state) return false;
+  const initial = state.getArguments()[0];
+  return !initial || EMPTY.test(initial.getText());
+}
+
+const FILE_STATES = new WeakMap<SourceFile, Map<string, CallExpression>>();
+
+/** A file's `useState(...)` calls by the state's name, the first one of each. */
+function fileStates(file: SourceFile): Map<string, CallExpression> {
+  let found = FILE_STATES.get(file);
+  if (found) return found;
+  found = new Map();
+  for (const declaration of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const binding = declaration.getNameNode();
     if (!Node.isArrayBindingPattern(binding)) continue;
     const first = binding.getElements()[0];
-    if (!first || !Node.isBindingElement(first) || first.getName() !== name) continue;
     const init = declaration.getInitializer();
-    if (!init || !Node.isCallExpression(init) || !/useState$/.test(init.getExpression().getText()))
-      continue;
-    const initial = init.getArguments()[0];
-    return !initial || EMPTY.test(initial.getText());
+    if (!first || !Node.isBindingElement(first) || !init || !Node.isCallExpression(init)) continue;
+    if (!/useState$/.test(init.getExpression().getText()) || found.has(first.getName())) continue;
+    found.set(first.getName(), init);
   }
-  return false;
+  FILE_STATES.set(file, found);
+  return found;
+}
+
+const SCOPE_VARIABLES = new WeakMap<Node, Map<string, VariableDeclaration>>();
+
+/** A function's plainly named variables, the first declaration of each name. */
+function variablesByName(scope: Node): Map<string, VariableDeclaration> {
+  let found = SCOPE_VARIABLES.get(scope);
+  if (found) return found;
+  found = new Map();
+  for (const declaration of scope.getDescendantsOfKind(SyntaxKind.VariableDeclaration))
+    if (Node.isIdentifier(declaration.getNameNode()) && !found.has(declaration.getName()))
+      found.set(declaration.getName(), declaration);
+  SCOPE_VARIABLES.set(scope, found);
+  return found;
 }
 
 /**

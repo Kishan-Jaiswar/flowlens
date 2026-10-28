@@ -59,6 +59,7 @@ export function readPathLike(
   if (Node.isIdentifier(expression) && resolve) {
     return resolve(expression.getText())?.trim();
   }
+  if (resolve && isEnvRead(expression)) return resolve(expression.getText().replace(/\s+/g, ''));
   // `archivePatientEndpoint(id)`: a URL-building function from the constants table.
   if (
     Node.isCallExpression(expression) &&
@@ -88,8 +89,8 @@ function readInterpolation(
   expression: Node,
   resolve?: (name: string) => string | undefined,
 ): string {
-  if (resolve && Node.isIdentifier(expression)) {
-    const value = resolve(expression.getText());
+  if (resolve && (Node.isIdentifier(expression) || isEnvRead(expression))) {
+    const value = resolve(expression.getText().replace(/\s+/g, ''));
     if (value !== undefined) return value;
   }
   // Nested templates and concatenations can still be partially readable.
@@ -98,6 +99,14 @@ function readInterpolation(
     if (nested !== undefined) return nested;
   }
   return '<param>';
+}
+
+/** `process.env.API_HOST`: a URL base the constants table reads from the env files. */
+function isEnvRead(expression: Node): boolean {
+  return (
+    (Node.isPropertyAccessExpression(expression) || Node.isElementAccessExpression(expression)) &&
+    expression.getExpression().getText() === 'process.env'
+  );
 }
 
 /** Read a plain string literal, ignoring anything dynamic. */

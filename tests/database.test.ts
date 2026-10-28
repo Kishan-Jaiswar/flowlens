@@ -296,8 +296,27 @@ describe('a Nest backend: models picked at run time, sub-documents, defaults, na
      }`,
   );
   write(
+    'src/emr/note.schema.ts',
+    `import { Prop, Schema } from '@nestjs/mongoose';
+     @Schema() export class Note { @Prop() visit_ref: string; }`,
+  );
+  write(
+    'src/emr/note.service.ts',
+    `import { Injectable } from '@nestjs/common';
+     import { InjectModel } from '@nestjs/mongoose';
+     @Injectable()
+     export class NoteService {
+       constructor(@InjectModel(Note.name) private notes: Model<Note>, @InjectModel(Visit.name) private visits: Model<Visit>) {}
+       async add(dto) { await this.notes.create(dto); }
+       async withNotes() {
+         const notesLookup = { $lookup: { from: 'notes', localField: '_id', foreignField: 'visit_ref', as: 'notes' } };
+         return this.visits.aggregate([notesLookup]);
+       }
+     }`,
+  );
+  write(
     'src/emr/visit.module.ts',
-    `export const imports = [MongooseModule.forFeature([{ name: Visit.name, schema: {} }])];`,
+    `export const imports = [MongooseModule.forFeature([{ name: Visit.name, schema: {} }, { name: Note.name, schema: {} }])];`,
   );
   write(
     'src/emr/visit.service.ts',
@@ -326,12 +345,33 @@ describe('a Nest backend: models picked at run time, sub-documents, defaults, na
   const { graph } = scan({ root: project });
   const report = databaseReport(graph, [], { scenarios: false });
   const named = (name: string) => report.collections.find((entry) => entry.name === name);
+  const withNotes = graph.nodesOfKind('db-op').find((op) => op.id.includes('withNotes'))!;
 
   it('reads a ref written as `Model.name`, and a $lookup from the side that holds the id', () => {
     const links = named('visits')!.references.map((r) => `${r.field}>${r.to}:${r.via}`);
     // Stated twice — the schema's ref and the join — and read from the visits side both times.
     expect(links).toEqual([expect.stringMatching(/^advice_ref>advices:(declared|lookup)$/)]);
     expect(named('advices')!.references).toEqual([]);
+  });
+
+  it('counts a collection another pipeline joins as read', () => {
+    expect(named('notes')!.notes).not.toContain('Written but never read by this code.');
+  });
+
+  it('counts the actions that run a join as reaching the joined collection', () => {
+    const joined = databaseReport(
+      graph,
+      [
+        {
+          id: 'with-notes',
+          title: 'With notes',
+          collections: [],
+          steps: [{ nodeId: withNotes.id, meta: { operation: 'aggregate' } }],
+        } as never,
+      ],
+      { scenarios: false },
+    ).collections.find((entry) => entry.name === 'notes')!;
+    expect(joined.usedBy.map((use) => use.flowId)).toEqual(['with-notes']);
   });
 
   it('counts `new Model(dto)` only when it is saved, with what it was built from', () => {
@@ -377,6 +417,7 @@ describe('a Nest backend: models picked at run time, sub-documents, defaults, na
   it('keeps a schema nothing registers out of the collections: a sub-document, or unused', () => {
     expect(report.collections.map((entry) => entry.name).sort()).toEqual([
       'advices',
+      'notes',
       'symptoms',
       'visits',
     ]);
@@ -731,13 +772,16 @@ describe('a native-driver project: its types, databases, indexes and links', () 
      export interface Batch { quantity: number; supplierId?: string }
      export interface Record { id: string; createdAt: string }
      export interface Item extends Record { name: string; status: Status; batches: Batch[]; extra?: { note?: string } }
-     export interface Movement { id: string; itemId: string; endpointRef: string }
-     export interface Endpoint { url: string }`,
+     export interface Movement { id: string; itemId: string; endpointRef: string; state: Item['status'] }
+     export interface Endpoint { url: string }
+     export interface Setting { userId: string; mapping: string }
+     export interface User { id: string }
+     export interface Clinic { name: string }`,
   );
   write(
     'lib/mongo.ts',
     `import { MongoClient, type Db } from 'mongodb';
-     import type { Item, Movement, Endpoint } from '@/types';
+     import type { Item, Movement, Endpoint, Setting, User, Clinic } from '@/types';
      const client = new MongoClient(process.env.MONGODB_URI);
      function getDb() { return client.db(process.env.APP_DB); }
      export function getOtherDb() { return client.db('shared'); }
@@ -746,6 +790,9 @@ describe('a native-driver project: its types, databases, indexes and links', () 
          items: db.collection<Item>('items'),
          movements: db.collection<Movement>('movements'),
          endpoints: db.collection<Endpoint>('endpoints'),
+         settings: db.collection<Setting>('settings'),
+         users: db.collection<User>('users'),
+         clinics: db.collection<Clinic>('clinics'),
        };
      }
      export async function ensureIndexes() {
@@ -767,9 +814,15 @@ describe('a native-driver project: its types, databases, indexes and links', () 
      export async function listShared() {
        return getOtherDb().collection('endpoints').find({}).toArray();
      }
+     export async function getMapping(userId: string) {
+       const { settings, users, clinics } = await getCollections();
+       await users.findOne({});
+       await clinics.findOne({});
+       return settings.findOne({ userId });
+     }
      export async function markFailed(id: string) {
        const { items } = await getCollections();
-       await items.updateOne({ id }, { $set: { status: 'inactive' } });
+       await items.updateOne({ id }, { $set: { status: 'inactive' }, $unset: { legacy: '' } });
      }`,
   );
   write(
@@ -783,6 +836,14 @@ describe('a native-driver project: its types, databases, indexes and links', () 
        const worker = new Worker(QUEUE, (job) => processItems(job), { connection: {} });
        worker.on('failed', (job) => { markFailed(job.data.id); });
        return worker;
+     }`,
+  );
+  write(
+    'app/api/mapping/route.ts',
+    `import { getMapping } from '../../../lib/store';
+     export async function GET(request) {
+       const ctx = await requireClinic(request);
+       return Response.json(await getMapping(ctx.clinicId));
      }`,
   );
   write(
@@ -810,6 +871,28 @@ describe('a native-driver project: its types, databases, indexes and links', () 
     expect(field('items', 'batches[].quantity')).toMatchObject({ type: 'number' });
     expect(field('items', 'extra')?.type).toBe('object');
     expect(field('items', 'extra.note')?.required).toBeUndefined();
+    expect(field('movements', 'state')?.type).toBe("'active' | 'inactive'");
+  });
+
+  it('links a field by what the code stores in it, over what it is called', () => {
+    expect(named('settings').references.map((r) => `${r.field}>${r.to}`)).toEqual([
+      'userId>clinics',
+    ]);
+  });
+
+  it('marks a link the config states as stated, even when a name guessed it first', () => {
+    const stated = databaseReport(graph, resolveFlows(graph, { includeLocalOnly: true }), {
+      scenarios: false,
+      relations: [{ from: 'settings', field: 'userId', to: 'clinics' }],
+    });
+    const settings = stated.collections.find((entry) => entry.name === 'settings')!;
+    expect(settings.references.map((r) => `${r.field}>${r.to}:${r.via}`)).toEqual([
+      'userId>clinics:config',
+    ]);
+  });
+
+  it('says a field the code only ever unsets is being removed', () => {
+    expect(renderDatabaseMarkdown(report)).toMatch(/\| `legacy` \| +\| removed by the code \|/);
   });
 
   it('names the database each collection and each query is in', () => {
@@ -860,7 +943,13 @@ describe('a native-driver project: its types, databases, indexes and links', () 
        }`,
     );
     const changes = databaseChanges(graph, scan({ root: other }).graph);
-    expect(changes.collections.removed).toEqual(['endpoints', 'movements']);
+    expect(changes.collections.removed).toEqual([
+      'clinics',
+      'endpoints',
+      'movements',
+      'settings',
+      'users',
+    ]);
     expect(changes.fields.added).toContain('items.sku');
     expect(changes.fields.removed).toContain('items.status');
     expect(changes.indexes.added).toEqual(['items: sku 1 (unique)']);

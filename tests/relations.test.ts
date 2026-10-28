@@ -97,6 +97,24 @@ writeFileSync(
          { $lookup: { from: 'orders', localField: 'lastOrderId', foreignField: '_id', as: 'last' } },
        ]);
      }
+
+     // Two aggregates in one function, the first built in variables and joined with \`let\`.
+     @Get('stats')
+     async stats() {
+       const lineLookup = {
+         $lookup: {
+           from: 'products',
+           let: { orderId: '$_id' },
+           pipeline: [{ $match: { $expr: { $eq: ['$order_ref', '$$orderId'] } } }],
+           as: 'items',
+         },
+       };
+       const stages = [];
+       stages.push(lineLookup);
+       const orders = await this.orderModel.aggregate(stages);
+       const customers = await this.customerModel.aggregate([{ $match: {} }]);
+       return { orders, customers };
+     }
    }`,
   'utf8',
 );
@@ -169,6 +187,13 @@ describe('links a query follows', () => {
     expect(joined?.via).toBe('lookup');
     // A join is the strongest evidence there is: it is in the code that runs.
     expect(joined?.followed).toBe(true);
+  });
+
+  it('reads a `let` join from the stages it is built in, for that aggregate only', () => {
+    const lines = relations.filter((relation) => relation.field === 'order_ref');
+    expect(lines.map((r) => `${r.from}.${r.field}>${r.to}:${r.via}`)).toEqual([
+      'products.order_ref>orders:lookup',
+    ]);
   });
 
   it('records the joined collection on the query, so one action can name it', () => {

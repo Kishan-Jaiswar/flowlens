@@ -22,6 +22,19 @@ before you commit it, and finds the code nothing uses.
 > handlers, API calls, backend controllers and services, and database
 > operations — while showing dependencies, data lineage, and execution time.
 
+Use it to:
+
+- **onboard onto an unfamiliar codebase**: see what a button actually does,
+  from the React component down to the database query
+- **visualize a MongoDB or Prisma schema** as an ER-style diagram, with no
+  database connection
+- **run impact analysis before a refactor**: the blast radius of a change and
+  every feature it reaches
+- **find dead code**: unused files, exports, dependencies and API endpoints
+- **document features and the database** as Markdown with Mermaid diagrams
+- **review pull requests**: what a branch changes about the app, the database
+  included, as a PR comment
+
 The question it answers is the one you actually ask on day three of a new
 codebase:
 
@@ -333,14 +346,14 @@ files live, what your folders are called, or how deeply they nest.
 **It only reads some _stacks_.** Point it at these and it degrades to a file
 count, honestly reported rather than silently:
 
-| Not read yet                           | What happens                                      |
-| -------------------------------------- | ------------------------------------------------- |
-| Vue, Svelte, Astro (`.vue`, `.svelte`) | Files counted and named in the output; not parsed |
-| Angular                                | Components not detected (no JSX)                  |
-| Django, Rails, Go, Java, .NET, PHP     | Counted and named; not parsed                     |
-| TypeORM, Sequelize, raw SQL            | Queries not detected — Mongoose, MongoDB, Prisma  |
-| GraphQL / tRPC                         | Resolvers are not routes yet                      |
-| Queues, cron, websockets               | Not modelled                                      |
+| Not read yet                           | What happens                                       |
+| -------------------------------------- | -------------------------------------------------- |
+| Vue, Svelte, Astro (`.vue`, `.svelte`) | Files counted and named in the output; not parsed  |
+| Angular                                | Components not detected (no JSX)                   |
+| Django, Rails, Go, Java, .NET, PHP     | Counted and named; not parsed                      |
+| TypeORM, Sequelize, raw SQL            | Queries not detected — Mongoose, MongoDB, Prisma   |
+| GraphQL / tRPC                         | Resolvers are not routes yet                       |
+| Cron, websocket and event handlers     | Named as what runs a query; not flows of their own |
 
 ```text
 $ flowlens scan ./vue-project
@@ -1197,6 +1210,39 @@ The same three answers are available without the browser —
 from `@flowslens/core`, and `GET /api/insight?flow=<id>` returns all three in
 one response.
 
+## FAQ
+
+**How do I find which API and database query a button click triggers?**
+Run `npx @flowslens/cli flows .` to list every user action, then
+`npx @flowslens/cli flow <id>` for one of them: handler, request, route,
+controller, services and each MongoDB, Mongoose or Prisma query, with file and
+line. `npx @flowslens/cli serve .` shows the same in a browser.
+
+**How do I see a MongoDB schema without connecting to the database?**
+`flowlens db` reads Mongoose schemas, Prisma models and native driver types
+(`db.collection<T>('x')`) from the source, and lists each collection's fields,
+indexes, links and the user actions that read and write it. `--markdown` writes
+it as a document with a Mermaid ER diagram.
+
+**How do I know what breaks if I change a function?**
+`flowlens impact <symbol>` lists every feature that runs through it. The
+dashboard's Issues & impact tab type-checks your uncommitted edits and places
+each break on the page and the action it affects.
+
+**How do I find unused code, dead API endpoints and unused dependencies?**
+`flowlens unused` reports files, folders, exports and dependencies nothing
+reaches, and backend routes no frontend calls.
+
+**Does it work with plain JavaScript, a monorepo, or separate frontend and
+backend repositories?** Yes to all three: `flowlens scan ./web ./api` reads two
+repos as one graph.
+
+**Is it free, and does my code leave my machine?** Free and MIT-licensed. It
+runs locally, makes no network calls, sends no telemetry and needs no account.
+
+**Can my AI coding assistant use it?** `flowlens mcp` serves the graph to
+Claude Code, Cursor or VS Code over the Model Context Protocol, on your machine.
+
 ## What Flowslens does _not_ do
 
 Worth being explicit, because a tool that reads your codebase should be boring
@@ -1286,6 +1332,7 @@ The MVP targets one stack properly rather than five badly:
 | Database | MongoDB via Mongoose (`@Schema`/`@Prop`, `new Schema()`, `@InjectModel`) |
 |          | The native MongoDB driver (`db.collection<T>('x')`, `createIndex`)       |
 |          | Prisma (`schema.prisma`, `@@map`, `@relation`, client operations)        |
+| Jobs     | BullMQ, Bull and Bee-Queue: a queued job is followed into its worker     |
 
 Adapters are separate modules, so adding TypeORM, raw SQL, or Vue is additive
 rather than a rewrite. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

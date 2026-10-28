@@ -1,9 +1,12 @@
 import {
   analyzeImpact,
+  callBase,
   findBrokenCalls,
+  findExternalCalls,
   findDeadEndpoints,
   findNodes,
   findSharedWrites,
+  type FlowNode,
 } from '@flowslens/core';
 import { graphPath, loadGraph } from '../paths.js';
 import { color, glyph, heading, table } from '../ui.js';
@@ -134,6 +137,7 @@ export interface DoctorArgs {
 export function runDoctor(args: DoctorArgs): number {
   const graph = loadGraph(graphPath(args.root, args.graph));
   const broken = findBrokenCalls(graph);
+  const external = findExternalCalls(graph);
   const dead = findDeadEndpoints(graph);
   const shared = findSharedWrites(graph);
 
@@ -145,6 +149,11 @@ export function runDoctor(args: DoctorArgs): number {
             label: node.label,
             source: node.source,
             meta: node.meta,
+          })),
+          externalCalls: external.map((node) => ({
+            label: node.label,
+            source: node.source,
+            base: callBase(node),
           })),
           deadEndpoints: dead.map((node) => ({ label: node.label, source: node.source })),
           sharedWrites: shared,
@@ -169,6 +178,24 @@ export function runDoctor(args: DoctorArgs): number {
         `  ${color.yellow(glyph.warn)} ${call.label}  ${color.gray(reason)}\n` +
           (call.source ? `      ${color.gray(`${call.source.file}:${call.source.line}`)}\n` : ''),
       );
+    }
+  }
+
+  if (external.length > 0) {
+    process.stdout.write(heading(`Calls to another service (${external.length})`) + '\n');
+    const byBase = new Map<string, FlowNode[]>();
+    for (const call of external)
+      byBase.set(callBase(call), [...(byBase.get(callBase(call)) ?? []), call]);
+    for (const [base, calls] of byBase) {
+      process.stdout.write(
+        `  ${color.gray(base.replace(':', ' '))}  ${color.gray(`— no call through it reaches a route here`)}\n`,
+      );
+      for (const call of calls)
+        process.stdout.write(
+          `    ${color.gray(glyph.dot)} ${call.label}` +
+            (call.source ? `  ${color.gray(`${call.source.file}:${call.source.line}`)}` : '') +
+            '\n',
+        );
     }
   }
 

@@ -3,7 +3,7 @@ import type { FlowGraph } from '../graph/graph.js';
 import type { Evidence } from '../graph/types.js';
 import { analyzeImpact } from '../impact/impact.js';
 import { glyphsFor, type Glyphs } from '../ui/glyphs.js';
-import type { FeatureFlow, FlowStep } from './resolve.js';
+import { resolveFlows, type FeatureFlow, type FlowStep } from './resolve.js';
 
 const EVIDENCE_BADGE: Record<Evidence, string> = {
   static: 'inferred from source',
@@ -347,10 +347,13 @@ function renderSharedUsage(
   flow: FeatureFlow,
 ): Array<{ label: string; others: string[] }> {
   const rows: Array<{ label: string; others: string[] }> = [];
+  // Resolved once, not once per step: every step asks about every flow in the project.
+  let flows: FeatureFlow[] | undefined;
 
   for (const step of flow.steps) {
     if (step.kind !== 'method' && step.kind !== 'route') continue;
-    const impact = analyzeImpact(graph, step.nodeId);
+    flows ??= resolveFlows(graph, { includeLocalOnly: true });
+    const impact = analyzeImpact(graph, step.nodeId, { flows });
     if (!impact) continue;
     const others = impact.affectedFlows.filter((other) => other.id !== flow.id).map((o) => o.label);
     if (others.length > 0) {

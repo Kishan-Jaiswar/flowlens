@@ -386,16 +386,16 @@ Adding TypeORM or Sequelize is the same shape of work.
 
 Honest boundaries, because a static analyzer that claims completeness is lying:
 
-| Limit                                         | Effect               | Mitigation                         |
-| --------------------------------------------- | -------------------- | ---------------------------------- |
-| A wrapper's own definition                    | Skipped, not counted | `isConcreteEndpoint`               |
-| Fully dynamic URLs (`api[method](path)`)      | Call missed          | Runtime tracing                    |
-| Unconventional HTTP wrappers                  | Call missed          | `--request-fn`, `--http-client`    |
-| Constant declared twice with different values | Skipped, not guessed | Rename, or `--no-constants`        |
-| Cross-file name collisions                    | Ambiguous resolution | Same-file wins, then unique global |
-| Handlers passed through props                 | Action has no path   | Runtime tracing                    |
-| Dynamic collection names                      | Collection missed    | Runtime tracing                    |
-| Queues, cron, websockets                      | Not modelled         | Roadmap                            |
+| Limit                                         | Effect                 | Mitigation                         |
+| --------------------------------------------- | ---------------------- | ---------------------------------- |
+| A wrapper's own definition                    | Skipped, not counted   | `isConcreteEndpoint`               |
+| Fully dynamic URLs (`api[method](path)`)      | Call missed            | Runtime tracing                    |
+| Unconventional HTTP wrappers                  | Call missed            | `--request-fn`, `--http-client`    |
+| Constant declared twice with different values | Skipped, not guessed   | Rename, or `--no-constants`        |
+| Cross-file name collisions                    | Ambiguous resolution   | Same-file wins, then unique global |
+| Handlers passed through props                 | Action has no path     | Runtime tracing                    |
+| Dynamic collection names                      | Collection missed      | Runtime tracing                    |
+| Cron, websocket and event handlers            | Not flows of their own | Named as what runs each query      |
 
 On the production app measured above, 998 user actions produced 37 flows. That
 ratio is honest rather than disappointing: most clicks toggle local state, and

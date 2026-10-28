@@ -9,7 +9,9 @@ import {
   analyzeChanged,
   analyzeFlowImpact,
   analyzeImpact,
+  callBase,
   findBrokenCalls,
+  findExternalCalls,
   findDeadEndpoints,
   findSharedWrites,
   actionDecisions,
@@ -589,6 +591,10 @@ export function runServe(args: ServeArgs): number {
     if (path === '/api/doctor') {
       sendJson(response, {
         brokenCalls: findBrokenCalls(graph).map(summarize),
+        externalCalls: findExternalCalls(graph).map((node) => ({
+          ...summarize(node),
+          base: callBase(node),
+        })),
         deadEndpoints: findDeadEndpoints(graph).map(summarize),
         sharedWrites: findSharedWrites(graph),
       });
@@ -870,9 +876,22 @@ export function runServe(args: ServeArgs): number {
       // The helpers other actions run the same way are named, not drawn: they
       // are told once, on the page (`/api/decisions/shared`).
       answerLater(response, async () => {
-        const index = await sharedDecisions();
+        const asText = url.searchParams.get('format') === 'text';
+        /**
+         * Which helpers are shared is read from every action's tree, which on a large
+         * app takes a while after the server starts. Rather than hold the first chart
+         * for all of it, it comes drawn in full and marked `pending`: the page asks
+         * again and gets the shared helpers named once the reading is done.
+         */
+        const index = asText
+          ? await sharedDecisions()
+          : await Promise.race([sharedDecisions(), wait(2000)]);
+        if (!index) {
+          sendJson(response, { ...whole, shared: [], pending: true });
+          return;
+        }
         const tree = factorSharedDecisions(whole, index);
-        if (url.searchParams.get('format') === 'text') {
+        if (asText) {
           // Text is pasted where the page is not: the shared parts follow in full.
           const parts = tree.shared
             .map((id) => index.parts.get(id))
@@ -1293,4 +1312,9 @@ function entryActions(entry: SidebarEntry): string[] {
       .filter((child) => child.kind === 'section' || child.kind === 'tab')
       .flatMap(entryActions),
   ];
+}
+
+/** Resolves with nothing after `ms`: the other side of a race with a slow answer. */
+function wait(ms: number): Promise<undefined> {
+  return new Promise((done) => setTimeout(() => done(undefined), ms).unref());
 }

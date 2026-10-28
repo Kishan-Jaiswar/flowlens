@@ -41,6 +41,8 @@ export class FlowGraph {
   readonly meta: GraphMeta;
 
   private readonly nodes = new Map<string, FlowNode>();
+  /** Nodes by kind, in insertion order: `nodesOfKind` is asked for on every query of every tree. */
+  private readonly byKind = new Map<NodeKind, Map<string, FlowNode>>();
   private readonly edges = new Map<string, FlowEdge>();
   private readonly out = new Map<string, Set<string>>();
   private readonly incoming = new Map<string, Set<string>>();
@@ -74,7 +76,7 @@ export class FlowGraph {
       ...(input.source ? { source: input.source } : {}),
       ...(input.meta ? { meta: input.meta } : {}),
     };
-    this.nodes.set(node.id, node);
+    this.store(node);
     return node;
   }
 
@@ -120,6 +122,13 @@ export class FlowGraph {
     return EVIDENCE_RANK[next] > EVIDENCE_RANK[current] ? next : current;
   }
 
+  private store(node: FlowNode): void {
+    this.nodes.set(node.id, node);
+    let ofKind = this.byKind.get(node.kind);
+    if (!ofKind) this.byKind.set(node.kind, (ofKind = new Map()));
+    ofKind.set(node.id, node);
+  }
+
   hasNode(id: string): boolean {
     return this.nodes.has(id);
   }
@@ -140,6 +149,7 @@ export class FlowGraph {
     }
     this.out.delete(id);
     this.incoming.delete(id);
+    this.byKind.get(this.nodes.get(id)!.kind)?.delete(id);
     return this.nodes.delete(id);
   }
 
@@ -168,7 +178,7 @@ export class FlowGraph {
   }
 
   nodesOfKind(kind: NodeKind): FlowNode[] {
-    return this.allNodes().filter((n) => n.kind === kind);
+    return [...(this.byKind.get(kind)?.values() ?? [])];
   }
 
   /** Outgoing edges, optionally filtered to a set of edge kinds. */
@@ -273,7 +283,7 @@ export class FlowGraph {
   static fromJSON(data: SerializedGraph): FlowGraph {
     const graph = new FlowGraph(data.meta);
     for (const node of data.nodes) {
-      graph.nodes.set(node.id, node);
+      graph.store(node);
     }
     for (const edge of data.edges) {
       graph.edges.set(edge.id, edge);

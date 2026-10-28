@@ -27,6 +27,9 @@ const ROUTER_NAMES = new Set(['router', 'navigate', 'history', 'nav']);
  * key nobody can match is noise in a panel that is supposed to be the reliable
  * part.
  */
+/** The key an invalidation with no key at all is recorded under: every cached query. */
+export const ALL_QUERIES = '*';
+
 const INVALIDATORS = new Set([
   'invalidateQueries',
   'refetchQueries',
@@ -110,6 +113,8 @@ export function aftermathOf(fn: Node): Aftermath {
 
     // `queryClient.invalidateQueries({ queryKey: ['medicines'] })`
     if (INVALIDATORS.has(member) || INVALIDATORS.has(bare)) {
+      // `queryClient.invalidateQueries()`: no key is every query in the cache.
+      if (call.getArguments().length === 0 && /Queries$/.test(member)) invalidates.add(ALL_QUERIES);
       for (const key of invalidatedKeys(call)) invalidates.add(key);
       for (const [key, prefix] of invalidatedPrefixes(call)) prefixes[key] = prefix;
       continue;

@@ -3234,6 +3234,14 @@ function renderFindings(doctor) {
     );
   }
 
+  const external = doctor.externalCalls ?? [];
+  if (external.length > 0) {
+    const bases = [...new Set(external.map((call) => call.base.replace(/^\w+:/, '')))];
+    parts.push(
+      `<div class="finding">${external.length} call${external.length === 1 ? '' : 's'} to another service, through ${escapeHtml(bases.join(', '))}</div>`,
+    );
+  }
+
   for (const entry of doctor.sharedWrites.slice(0, 4)) {
     parts.push(
       `<div class="finding warn">⚠ <code>${escapeHtml(entry.collection)}</code> written by ${escapeHtml(
@@ -4141,12 +4149,29 @@ function writeWhen(how) {
   );
 }
 
+/** `<env:API_HOST=/api>/logout`, as the code builds it: `${API_HOST}/logout`. */
+function readableUrl(raw) {
+  const env = /^<env:([A-Za-z_]\w*)=[^>]*>/.exec(raw);
+  return env ? `\${${env[1]}}${raw.slice(env[0].length)}` : raw;
+}
+
+/** A URL for a shell: its env base as that variable, else `$BASE_URL` in front. */
+function shellUrl(raw) {
+  const env = /^<env:([A-Za-z_]\w*)=[^>]*>/.exec(raw);
+  return env ? `$${env[1]}${raw.slice(env[0].length)}` : `$BASE_URL${raw}`;
+}
+
+/** `Class.method` → `method`; a script's `main (scripts/x.ts)` stays whole. */
+function shortMethod(method) {
+  return method.replace(/^\w+\.(\w+)$/, '$1');
+}
+
 /** The functions that touch a collection, grouped by what they do to it. */
 function writersByEffect(entry) {
   const by = {};
   for (const op of entry.operations) {
     if (!op.method) continue;
-    (by[op.effect] ??= new Set()).add(op.method.split('.').pop());
+    (by[op.effect] ??= new Set()).add(shortMethod(op.method));
   }
   return by;
 }
@@ -4218,7 +4243,7 @@ function lifecycleOf(entry) {
   if (code.write) code.update = new Set([...(code.update ?? []), ...code.write]);
   // An upsert creates the record when none matches: its actions add records too.
   for (const op of entry.operations.filter((op) => op.upsert && op.source)) {
-    if (op.method) (code.create ??= new Set()).add(op.method.split('.').pop());
+    if (op.method) (code.create ??= new Set()).add(shortMethod(op.method));
     for (const field of entry.fields)
       for (const write of field.writes)
         if (write.source?.file === op.source.file && write.source.line === op.source.line)
@@ -4271,7 +4296,7 @@ function lifecycleHtml(entry) {
             ...new Set(
               entry.operations
                 .filter((op) => op.softDelete)
-                .map((op) => op.method?.split('.').pop()),
+                .map((op) => op.method && shortMethod(op.method)),
             ),
           ]
             .filter(Boolean)
@@ -5499,6 +5524,9 @@ function fieldHtml(field, open, collection) {
     field.expiresAfterSeconds != null && ttlText(field.expiresAfterSeconds),
     field.ref &&
       `links to <button class="link" data-db-collection="${escapeHtml(field.ref)}">${escapeHtml(field.ref)}</button>`,
+    field.writes.length > 0 &&
+      field.writes.every((w) => w.how === '$unset') &&
+      'removed by the code',
     field.origin === 'declared'
       ? collection?.typed
         ? `in the TypeScript type <code>${escapeHtml(collection.model)}</code>`
@@ -6124,7 +6152,7 @@ function stepSentence(step) {
       }`;
     case 'api-call': {
       const method = step.meta?.httpMethod ?? '';
-      const path = step.meta?.rawPath ?? step.meta?.path ?? step.label;
+      const path = readableUrl(step.meta?.rawPath ?? step.meta?.path ?? step.label);
       return `The browser sends ${name(`${method} ${path}`.trim())}`;
     }
     case 'route':
@@ -7677,6 +7705,23 @@ function decisionsUrl(flowId) {
   );
 }
 
+/** The same chart again, quietly, once the server has read which helpers are shared. */
+async function refreshDecisions(key, url) {
+  if (state.decisionsFor !== key) return;
+  try {
+    const tree = await getJson(url);
+    if (state.decisionsFor !== key) return;
+    if (tree.pending) {
+      setTimeout(() => refreshDecisions(key, url), 3000);
+      return;
+    }
+    state.decisions = tree;
+    if (state.tab === 'decisions') renderDecisions();
+  } catch {
+    // The chart already shown stands.
+  }
+}
+
 async function loadDecisions(flowId) {
   const key = decisionsKey(flowId);
   const url = decisionsUrl(flowId);
@@ -7692,6 +7737,8 @@ async function loadDecisions(flowId) {
     const tree = await getJson(url);
     if (state.decisionsFor !== key) return;
     state.decisions = tree;
+    // Drawn before the server knew which helpers are shared: ask again shortly.
+    if (tree.pending) setTimeout(() => refreshDecisions(key, url), 3000);
   } catch (error) {
     if (state.decisionsFor !== key) return;
     state.decisions = { error: String(error.message ?? error) };
@@ -7777,6 +7824,9 @@ function renderDecisions() {
             '. Read it top to bottom: at each ◆ the arrows say which answer leads where.' +
             (tree.shared?.length
               ? ` Steps marked ⧉ run the same way in other actions too: each is one box here, with the ways it can end, and drawn in full once on the page.`
+              : '') +
+            (tree.pending
+              ? ' Every helper is drawn in full for now: which ones other actions share is still being read, and they are named once it is.'
               : ''),
         );
 
@@ -9092,7 +9142,7 @@ function curlFor(call) {
     ? ` \\\n  -d '${JSON.stringify(Object.fromEntries(call.payload.map((f) => [f.name, '…'])))}'`
     : '';
   const headers = call.payload.length ? " \\\n  -H 'content-type: application/json'" : '';
-  return `curl -X ${call.method} "$BASE_URL${call.rawPath ?? call.path}"${headers}${body}`;
+  return `curl -X ${call.method} "${shellUrl(call.rawPath ?? call.path)}"${headers}${body}`;
 }
 
 /** `web/src/Form.tsx:16` -> `['web/src/Form.tsx', 16]` */

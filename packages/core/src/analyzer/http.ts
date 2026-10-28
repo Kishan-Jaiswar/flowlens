@@ -22,6 +22,24 @@ export const PARAM = ':param';
 export const DYNAMIC_MARKER = '<param>';
 
 /**
+ * A URL base read from an environment variable: `<env:API_HOST=/api/web>`, the
+ * variable's name and the path its value holds. See `constants.ts`.
+ */
+export const ENV_MARKER = '<env:';
+
+/** The variable a URL's base is read from, if it is one: `API_HOST`. */
+export function envBaseOf(raw: string): string | undefined {
+  if (!raw.startsWith(ENV_MARKER)) return undefined;
+  return raw.slice(ENV_MARKER.length).split(/[=>]/)[0];
+}
+
+/** A URL as the code builds it: `<env:API_HOST=/api/web>/logout` → `${API_HOST}/logout`. */
+export function readableUrl(raw: string): string {
+  const name = envBaseOf(raw);
+  return name === undefined ? raw : `\${${name}}${raw.slice(raw.indexOf('>') + 1)}`;
+}
+
+/**
  * Normalise a URL written in source into a comparable shape.
  *
  * - strips a configurable API prefix (`/api`)
@@ -49,6 +67,11 @@ export function normalizePath(raw: string, apiPrefixes: string[] = ['/api']): st
    */
   if (path.startsWith(DYNAMIC_MARKER)) {
     path = path.slice(DYNAMIC_MARKER.length);
+  } else if (path.startsWith(ENV_MARKER)) {
+    const close = path.indexOf('>');
+    const inner = path.slice(ENV_MARKER.length, close);
+    const at = inner.indexOf('=');
+    path = (at >= 0 ? inner.slice(at + 1) : '') + path.slice(close + 1);
   }
 
   path = path.split('?')[0]!.split('#')[0]!;
@@ -77,7 +100,7 @@ export function normalizePath(raw: string, apiPrefixes: string[] = ['/api']): st
 function normalizeSegment(segment: string): string {
   if (segment.startsWith(':') || segment.startsWith('*')) return PARAM;
   // `${id}` or an interpolation placeholder left by the AST reader
-  if (/\$\{|\{\{|<param>/.test(segment)) return PARAM;
+  if (/\$\{|\{\{|<param>|<env:/.test(segment)) return PARAM;
   // Express-style optional/regex segments and Nest wildcards
   if (/^\d+$/.test(segment)) return PARAM;
   if (/^[0-9a-f]{24}$/i.test(segment)) return PARAM; // Mongo ObjectId

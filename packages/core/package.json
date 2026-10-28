@@ -22,7 +22,14 @@
   },
   "license": "MIT",
   "author": "Kishan Jaiswar",
+  "homepage": "https://github.com/Kishan-Jaiswar/flowlens#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
+    "directory": "packages/core"
+  },
   "bugs": {
+    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues",
     "email": "jaiswarkishan78@gmail.com"
   },
   "keywords": [
@@ -71,7 +78,11 @@
     "er-diagram",
     "mongodb-schema",
     "mongodb-driver",
-    "collection-relations"
+    "collection-relations",
+    "job-queue",
+    "bullmq",
+    "code-explorer",
+    "click-to-database"
   ],
   "publishConfig": {
     "access": "public"

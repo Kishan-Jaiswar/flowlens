@@ -1,4 +1,5 @@
 import { existsSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 /**
  * Which positional arguments are project paths, and which are not.
@@ -111,4 +112,21 @@ function existsOnDisk(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The directories to read: the ones named, else the config's `roots`, else here.
+ *
+ * Naming a directory the config already lists is naming that project: its sibling
+ * roots come too, the named one first. Otherwise `flowlens serve ./web`, beside a
+ * config that pairs `./web` with `./api`, reads only half the app — and replaces the
+ * whole graph the last scan left with that half.
+ */
+export function rootsToScan(named: string[], configured: string[] | undefined): string[] {
+  if (named.length === 0) return configured ?? ['.'];
+  if (!configured?.length) return named;
+  const listed = new Set(configured.map((root) => resolve(root)));
+  if (!named.every((root) => listed.has(resolve(root)))) return named;
+  const chosen = new Set(named.map((root) => resolve(root)));
+  return [...named, ...configured.filter((root) => !chosen.has(resolve(root)))];
 }

@@ -2,6 +2,7 @@ import {
   Node,
   SyntaxKind,
   type ArrayLiteralExpression,
+  type BinaryExpression,
   type CallExpression,
   type NewExpression,
   type ObjectLiteralExpression,
@@ -35,7 +36,7 @@ import {
   type QueueHop,
   type Scenario,
 } from './scenarios.js';
-import type { FeatureFlow } from './resolve.js';
+import type { CollectionAccess, FeatureFlow } from './resolve.js';
 
 /**
  * The database as the code sees it: every collection, what is declared in its
@@ -507,12 +508,14 @@ export function databaseReport(
   for (const declared of options.relations ?? []) {
     if (!graph.node(`collection:${declared.from}`) || !graph.node(`collection:${declared.to}`))
       continue;
-    if (
-      relations.some(
-        (r) => r.from === declared.from && r.field === declared.field && r.to === declared.to,
-      )
-    )
+    const same = relations.find(
+      (r) => r.from === declared.from && r.field === declared.field && r.to === declared.to,
+    );
+    // What the user states outranks a guess from a name; what the code states outranks both.
+    if (same) {
+      if (same.via === 'naming') same.via = 'config';
       continue;
+    }
     relations.push({
       from: declared.from,
       field: declared.field,
@@ -626,7 +629,7 @@ function collectionOf(
         label: op.label,
         operation: String(op.meta?.['operation'] ?? op.label),
         effect: (op.meta?.['effect'] as DbEffect | undefined) ?? 'write',
-        ...(method ? { method: method.label } : {}),
+        ...(method ? { method: methodName(method) } : {}),
         ...(op.source ? { source: op.source } : {}),
         ...(op.meta?.['databaseName']
           ? { databaseName: op.meta['databaseName'] as DatabaseName }
@@ -877,8 +880,22 @@ function collectionOf(
   );
   for (const op of operations)
     if (op.effect === 'update' && softDeletes.has(op.nodeId)) op.softDelete = true;
+  // Another collection's query that `$lookup`s this one reads it too.
+  const joinedBy = new Set(
+    graph
+      .nodesOfKind('db-op')
+      .filter((op) => (op.meta?.['joins'] as string[] | undefined)?.includes(name))
+      .map((op) => op.id),
+  );
   const usedBy = flows.flatMap((flow): DatabaseUse[] => {
-    const access = flow.collections.filter((entry) => entry.collection === name);
+    const access: CollectionAccess[] = flow.collections.filter(
+      (entry) => entry.collection === name,
+    );
+    const joining = flow.steps
+      .filter((step) => joinedBy.has(step.nodeId))
+      .map((step) => String(step.meta?.['operation'] ?? step.label));
+    if (joining.length > 0)
+      access.push({ collection: name, access: 'read', effect: 'read', operations: joining });
     if (access.length === 0) return [];
     const adds = flow.steps.some((step) => upserts.has(step.nodeId));
     const hides = flow.steps.some((step) => softDeletes.has(step.nodeId));
@@ -902,11 +919,11 @@ function collectionOf(
   const writers = new Set(
     operations
       .filter((op) => op.effect !== 'read' && op.method)
-      .map((op) => op.method!.split('.')[0]),
+      .map((op) => op.method!.replace(/^(\w+)\.\w+$/, '$1')),
   );
   const notes: string[] = [];
   if (operations.length === 0) notes.push('No code reads or writes it.');
-  else if (!operations.some((op) => op.effect === 'read'))
+  else if (!operations.some((op) => op.effect === 'read') && joinedBy.size === 0)
     notes.push('Written but never read by this code.');
   if (writers.size > 1)
     notes.push(`Written from ${writers.size} places: ${[...writers].sort().join(', ')}.`);
@@ -1390,18 +1407,29 @@ function callBehind(node: Node, fn: Node): CallExpression | undefined {
  */
 function latestValue(identifier: Node, fn: Node): Node | undefined {
   const name = identifier.getText();
-  const before = fn
-    .getDescendantsOfKind(SyntaxKind.BinaryExpression)
-    .filter(
-      (node) =>
-        node.getOperatorToken().getKind() === SyntaxKind.EqualsToken &&
-        node.getLeft().getText() === name &&
-        node.getEnd() <= identifier.getStart(),
-    )
+  const start = identifier.getStart();
+  const before = (assignmentsIn(fn).get(name) ?? [])
+    .filter((node) => node.getEnd() <= start)
     .at(-1);
   if (before) return before.getRight();
   const declaration = localVariable(fn, name);
   return Node.isVariableDeclaration(declaration) ? declaration.getInitializer() : undefined;
+}
+
+const ASSIGNMENTS = new WeakMap<Node, Map<string, BinaryExpression[]>>();
+
+/** A function's `x = …` assignments by what they assign to, in the order written. */
+function assignmentsIn(fn: Node): Map<string, BinaryExpression[]> {
+  let found = ASSIGNMENTS.get(fn);
+  if (found) return found;
+  found = new Map();
+  for (const node of fn.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
+    if (node.getOperatorToken().getKind() !== SyntaxKind.EqualsToken) continue;
+    const left = node.getLeft().getText();
+    found.set(left, [...(found.get(left) ?? []), node]);
+  }
+  ASSIGNMENTS.set(fn, found);
+  return found;
 }
 
 /** The project's own function a call runs, in this file or one it imports. */
@@ -2578,7 +2606,7 @@ function codeEntriesOf(
           .filter(
             (candidate) =>
               !formFlows.has(candidate.id) &&
-              frontend.flowFiles(candidate, { components: false }).includes(mention.source.file),
+              frontend.flowFileSet(candidate, false).has(mention.source.file),
           );
         const flow = reaching[0];
         if (!flow) continue;
@@ -2638,6 +2666,9 @@ function routesVia(
  */
 class Frontend {
   private readonly forms = new Map<string, FormField[]>();
+  private readonly fileSets = new Map<string, Set<string>>();
+  private readonly screens = new Map<string, string[]>();
+  private byEndpoint: Map<string, FeatureFlow[]> | undefined;
   private readonly reads = new Map<string, Map<string, Node[]>>();
   private readonly flowById: Map<string, FeatureFlow>;
 
@@ -2660,12 +2691,23 @@ class Frontend {
 
   /** The flows that send this request. */
   flowsCalling(endpoint: string): FeatureFlow[] {
-    return [...this.flowById.values()].filter((flow) => flow.endpoints.includes(endpoint));
+    if (!this.byEndpoint) {
+      this.byEndpoint = new Map();
+      for (const flow of this.flowById.values())
+        for (const sent of new Set(flow.endpoints))
+          this.byEndpoint.set(sent, [...(this.byEndpoint.get(sent) ?? []), flow]);
+    }
+    return this.byEndpoint.get(endpoint) ?? [];
   }
 
   /** The frontend files of the actions that send a request, and the files they import. */
   screenFiles(endpoint: string): string[] {
-    return [...new Set(this.flowsCalling(endpoint).flatMap((flow) => this.flowFiles(flow)))];
+    let files = this.screens.get(endpoint);
+    if (!files) {
+      files = [...new Set(this.flowsCalling(endpoint).flatMap((flow) => this.flowFiles(flow)))];
+      this.screens.set(endpoint, files);
+    }
+    return files;
   }
 
   /** One action's frontend files, and the files they import. */
@@ -2675,15 +2717,24 @@ class Frontend {
    * renders runs its own actions, not this one.
    */
   flowFiles(flow: FeatureFlow, { components = true } = {}): string[] {
+    return [...this.flowFileSet(flow, components)];
+  }
+
+  /** The files a flow's frontend steps live in and import, worked out once per flow. */
+  flowFileSet(flow: FeatureFlow, components = true): ReadonlySet<string> {
+    const key = `${flow.id}|${components}`;
+    let files = this.fileSets.get(key);
+    if (files) return files;
     const imports = this.graph.meta.imports ?? {};
-    const files = new Set<string>();
+    files = new Set<string>();
     for (const step of flow.steps)
       if (FRONT_KINDS.has(step.kind) && step.file) {
         files.add(step.file);
         for (const imported of imports[step.file] ?? [])
           if (components || !/\.[jt]sx$/.test(imported)) files.add(imported);
       }
-    return [...files];
+    this.fileSets.set(key, files);
+    return files;
   }
 
   form(flowId: string): FormField[] {
@@ -3362,6 +3413,15 @@ function readStringValue(node: Node | undefined): string | undefined {
   return node && (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node))
     ? node.getLiteralValue()
     : undefined;
+}
+
+/** A script's `main()` names nothing on its own: it is named with the file it runs from. */
+const GENERIC_FUNCTION = /^(main|run|start|handler|execute|bootstrap|default|anonymous)$/;
+
+function methodName(method: FlowNode): string {
+  return GENERIC_FUNCTION.test(method.label) && method.source
+    ? `${method.label} (${method.source.file})`
+    : method.label;
 }
 
 /** A write that marks the record gone without erasing it. */

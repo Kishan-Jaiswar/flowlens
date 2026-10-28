@@ -26,7 +26,14 @@
   },
   "license": "MIT",
   "author": "Kishan Jaiswar",
+  "homepage": "https://github.com/Kishan-Jaiswar/flowlens#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kishan-Jaiswar/flowlens.git",
+    "directory": "packages/cli"
+  },
   "bugs": {
+    "url": "https://github.com/Kishan-Jaiswar/flowlens/issues",
     "email": "jaiswarkishan78@gmail.com"
   },
   "keywords": [
@@ -88,7 +95,11 @@
     "mongodb-schema",
     "mermaid",
     "code-to-database",
-    "onboarding"
+    "onboarding",
+    "job-queue",
+    "bullmq",
+    "code-explorer",
+    "click-to-database"
   ],
   "publishConfig": {
     "access": "public"

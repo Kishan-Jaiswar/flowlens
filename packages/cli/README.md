@@ -58,7 +58,8 @@ stack is on the right, you will get a file count and little else.
 | **NestJS**, **Express**, **Fastify**                                        | Django, Rails, Go, Java, .NET, PHP |
 | Next.js `pages/api` + App Router handlers, **Nuxt** `server/api`            | GraphQL and tRPC resolvers         |
 | **MongoDB** via Mongoose or the native driver, and **Prisma**               | TypeORM, Sequelize, raw SQL        |
-| TypeScript **or** plain JavaScript with JSX (`.js`, `.jsx`, `.mjs`, `.cjs`) | Queues, cron jobs, websockets      |
+| TypeScript **or** plain JavaScript with JSX (`.js`, `.jsx`, `.mjs`, `.cjs`) | Cron and websocket flows           |
+| Job queues (BullMQ, Bull, Bee-Queue), followed into the worker              |                                    |
 
 So the sweet spot is **React/Next + NestJS, Express or Next.js API routes +
 Mongoose, MongoDB or Prisma**. Any _folder
@@ -487,6 +488,41 @@ took. Entirely optional; the CLI works without it. On a Next.js App Router app,
 
 ---
 
+## FAQ
+
+**How do I find which API and database query a button click triggers?**
+Run `npx @flowslens/cli flows .` to list every user action, then
+`npx @flowslens/cli flow <id>` for one of them: handler, request, route,
+controller, services and each MongoDB, Mongoose or Prisma query, with file and
+line. `npx @flowslens/cli serve .` shows the same in a browser.
+
+**How do I see a MongoDB schema without connecting to the database?**
+`flowlens db` reads Mongoose schemas, Prisma models and native driver types
+(`db.collection<T>('x')`) from the source, and lists each collection's fields,
+indexes, links and the user actions that read and write it. `--markdown` writes
+it as a document with a Mermaid ER diagram.
+
+**How do I know what breaks if I change a function?**
+`flowlens impact <symbol>` lists every feature that runs through it. The
+dashboard's Issues & impact tab type-checks your uncommitted edits and places
+each break on the page and the action it affects.
+
+**How do I find unused code, dead API endpoints and unused dependencies?**
+`flowlens unused` reports files, folders, exports and dependencies nothing
+reaches, and backend routes no frontend calls.
+
+**Does it work with plain JavaScript, a monorepo, or separate frontend and
+backend repositories?** Yes to all three: `flowlens scan ./web ./api` reads two
+repos as one graph.
+
+**Is it free, and does my code leave my machine?** Free and MIT-licensed. It
+runs locally, makes no network calls, sends no telemetry and needs no account.
+
+**Can my AI coding assistant use it?** `flowlens mcp` serves the graph to
+Claude Code, Cursor or VS Code over the Model Context Protocol, on your machine.
+
+---
+
 ## Related packages
 
 - **[`@flowslens/core`](https://www.npmjs.com/package/@flowslens/core)** — the
@@ -500,7 +536,8 @@ This page covers everything you need to use the CLI. The engine and the tracer
 document themselves on their own npm pages:
 [`@flowslens/core`](https://www.npmjs.com/package/@flowslens/core) and
 [`@flowslens/runtime`](https://www.npmjs.com/package/@flowslens/runtime). Run
-`flowlens --help` for every command and option.
+`flowlens --help` for every command and option. Source, full documentation
+and issues: [github.com/Kishan-Jaiswar/flowlens](https://github.com/Kishan-Jaiswar/flowlens).
 
 Bug reports and feature requests: **jaiswarkishan78@gmail.com**.
 

@@ -1,3 +1,4 @@
+import { envBaseOf } from '../analyzer/http.js';
 import { pageAtPath } from '../flow/pages.js';
 import type { FlowGraph } from '../graph/graph.js';
 import type { EdgeKind, FlowNode } from '../graph/types.js';
@@ -191,12 +192,58 @@ export function findDeadEndpoints(graph: FlowGraph): FlowNode[] {
     .filter((route) => graph.predecessors(route.id, ['handled-by']).length === 0);
 }
 
-/** Frontend calls that hit no backend route — typos and version drift. */
+/**
+ * Frontend calls that hit no backend route — typos and version drift.
+ *
+ * Calls to another service (see `findExternalCalls`) are not among them: there is
+ * no route for those here because they are not this backend's to answer.
+ */
 export function findBrokenCalls(graph: FlowGraph): FlowNode[] {
+  const external = new Set(findExternalCalls(graph));
+  return unmatchedCalls(graph).filter((call) => !external.has(call));
+}
+
+/**
+ * Calls that go to another service: through a base none of whose calls reaches a
+ * route in the scanned code.
+ *
+ * The base is the environment variable the URL starts from (`<env:AI_HOST>`), the host
+ * an absolute URL names, or else the client or wrapper that sends it. A client seen in
+ * one call only is not enough to say so — that call may simply be wrong. With no call
+ * matched at all there is no backend here to compare with, and nothing is set aside.
+ */
+export function findExternalCalls(graph: FlowGraph): FlowNode[] {
+  const calls = graph.nodesOfKind('api-call').filter((call) => !isPageNavigation(graph, call));
+  const unmatched = new Set(unmatchedCalls(graph));
+  if (unmatched.size === calls.length) return [];
+  const reached = new Set<string>();
+  const sizes = new Map<string, number>();
+  for (const call of calls) {
+    const base = callBase(call);
+    sizes.set(base, (sizes.get(base) ?? 0) + 1);
+    if (!unmatched.has(call)) reached.add(base);
+  }
+  return [...unmatched].filter((call) => {
+    const base = callBase(call);
+    return !reached.has(base) && (!base.startsWith('client:') || sizes.get(base)! > 1);
+  });
+}
+
+function unmatchedCalls(graph: FlowGraph): FlowNode[] {
   return graph
     .nodesOfKind('api-call')
     .filter((call) => graph.successors(call.id, ['handled-by']).length === 0)
     .filter((call) => !isPageNavigation(graph, call));
+}
+
+/** Where a call is sent: `env:AI_HOST`, `host:maps.example.com` or `client:aiPost`. */
+export function callBase(call: FlowNode): string {
+  const raw = String(call.meta?.['base'] ?? call.meta?.['rawPath'] ?? '');
+  const env = envBaseOf(raw);
+  if (env) return `env:${env}`;
+  const host = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(raw)?.[1];
+  if (host) return `host:${host.replace(/^[^@]*@/, '')}`;
+  return `client:${String(call.meta?.['client'] ?? '')}`;
 }
 
 /**
