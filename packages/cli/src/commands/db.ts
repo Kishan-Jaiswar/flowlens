@@ -33,16 +33,27 @@ export interface DbArgs {
  */
 export function runDb(args: DbArgs): number {
   const graph = loadGraph(graphPath(args.root, args.graph));
+  const document = Boolean(args.markdown || args.out);
+  // Only the collection asked for — by name or by model — and no cases for the summary table.
+  const wanted = args.collection?.toLowerCase();
+  const only = wanted
+    ? (graph.nodesOfKind('collection').find((node) => node.label.toLowerCase() === wanted)?.label ??
+      graph.nodesOfKind('model').find((node) => node.label.toLowerCase() === wanted)?.meta?.[
+        'collection'
+      ])
+    : undefined;
   const report = databaseReport(graph, resolveFlows(graph, { includeLocalOnly: true }), {
     ...(args.relations ? { relations: args.relations } : {}),
+    ...(typeof only === 'string' && !document ? { only } : {}),
+    ...(!wanted && !document && !args.json ? { summary: true } : {}),
   });
 
-  if (args.markdown || args.out) {
-    const document = renderDatabaseMarkdown(report);
+  if (document) {
+    const markdown = renderDatabaseMarkdown(report);
     if (args.out) {
-      writeFileSync(args.out, document, 'utf8');
+      writeFileSync(args.out, markdown, 'utf8');
       process.stdout.write(`${color.green('written')} ${args.out}\n`);
-    } else process.stdout.write(document);
+    } else process.stdout.write(markdown);
     return 0;
   }
 
@@ -131,7 +142,9 @@ export function renderCollection(entry: DatabaseCollection): string {
           ]
             .filter(Boolean)
             .join(', '),
-          field.ref ? `→ ${field.ref}` : '',
+          field.ref
+            ? `→ ${field.ref}${guessedRef(entry, field.name) ? color.yellow(' (guessed)') : ''}`
+            : '',
           field.origin === 'declared' ? 'schema' : color.yellow('a query only'),
         ]),
         ['Field', 'Type', 'Rules', 'Links to', 'Seen in'],
@@ -216,6 +229,17 @@ export function renderCollection(entry: DatabaseCollection): string {
     out.push(heading('Links'), table(rows, ['Link', 'Holds', 'Known from']), '');
   }
   return out.join('\n');
+}
+
+/** A link only its name suggests: `clinic_id` with no `ref` in the schema. */
+function guessedRef(entry: DatabaseCollection, field: string): boolean {
+  const link = entry.references.find((r) => r.field === field);
+  return (
+    link !== undefined &&
+    link.via !== 'query' &&
+    link.via !== 'config' &&
+    !relationIsDeclared(link.via)
+  );
 }
 
 /** The checks on one collection, one line each: owner filter, deletes, indexes, unused fields. */

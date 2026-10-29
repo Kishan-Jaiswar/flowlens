@@ -123,11 +123,12 @@ export function analyzeImpact(
     ),
   ].sort();
 
-  const uiActions = dependents.filter((d) => d.kind === 'ui-action').length;
   const blastRadius = dependents.length;
 
   const warnings: string[] = [];
-  if (uiActions >= 3) warnings.push(`${uiActions} user actions depend on this`);
+  // The features listed above, so the warning and the table agree.
+  if (affectedFlows.length >= 3)
+    warnings.push(`${affectedFlows.length} user actions depend on this`);
   if (endpoints.length >= 3) warnings.push(`reached from ${endpoints.length} endpoints`);
   if (collections.length >= 2) warnings.push(`touches ${collections.length} collections`);
   // A function the tracer has no span for still ran if a query it makes was seen.
@@ -140,7 +141,8 @@ export function analyzeImpact(
     warnings.push('never observed at runtime — the static picture may be incomplete');
   }
 
-  const level = blastRadius >= 25 || uiActions >= 4 ? 'high' : blastRadius >= 8 ? 'medium' : 'low';
+  const level =
+    blastRadius >= 25 || affectedFlows.length >= 4 ? 'high' : blastRadius >= 8 ? 'medium' : 'low';
 
   return {
     target: {
@@ -177,19 +179,61 @@ export function findNodes(graph: FlowGraph, query: string): FlowNode[] {
     );
   });
 
-  // Prefer exact label matches, then shorter labels (less incidental matching).
-  return matches.sort((a, b) => {
-    const aExact = a.label.toLowerCase() === needle ? 0 : 1;
-    const bExact = b.label.toLowerCase() === needle ? 0 : 1;
-    return aExact - bExact || a.label.length - b.label.length;
-  });
+  /**
+   * The name itself first — `rescheduleAppointment` is the method
+   * `AppointmentsController.rescheduleAppointment`, not a `diagnosis` field whose
+   * id happens to contain it — then the label containing it, then the id; shorter
+   * labels first within each.
+   */
+  const tier = (node: FlowNode): number => {
+    const label = node.label.toLowerCase();
+    if (label === needle) return 0;
+    if (label.endsWith(`.${needle}`) || label.startsWith(`${needle}.`)) return 1;
+    if (label.includes(needle)) return 2;
+    return 3;
+  };
+  return matches.sort((a, b) => tier(a) - tier(b) || a.label.length - b.label.length);
 }
 
-/** Endpoints declared by the backend that no frontend code calls. */
+/**
+ * Endpoints declared by the backend that no frontend code calls. A route that
+ * answers any method (`@All()`, a handler with no method check) is one endpoint:
+ * dead only when no method of it is called, and listed once as `ALL /path`.
+ */
 export function findDeadEndpoints(graph: FlowGraph): FlowNode[] {
-  return graph
-    .nodesOfKind('route')
-    .filter((route) => graph.predecessors(route.id, ['handled-by']).length === 0);
+  // A call made only from a file nothing imports never runs.
+  const unused = graph.meta.unused;
+  // Trusted only when the scan found where the app starts: with none, everything looks unused.
+  const deadFiles = new Set(
+    unused && unused.checked.entries > 0 ? unused.files.map((entry) => entry.file) : [],
+  );
+  const live = (call: FlowNode): boolean => {
+    const sites = (call.meta?.['callSites'] as string[] | undefined) ?? [];
+    return sites.length === 0 || sites.some((site) => !deadFiles.has(site.replace(/:\d+$/, '')));
+  };
+  const called = (route: FlowNode): boolean =>
+    graph.predecessors(route.id, ['handled-by']).some(live);
+  const anyMethod = new Map<string, FlowNode[]>();
+  const dead: FlowNode[] = [];
+  for (const route of graph.nodesOfKind('route')) {
+    if (route.meta?.['anyMethod'] !== true) {
+      if (!called(route)) dead.push(route);
+      continue;
+    }
+    const key = `${route.source?.file}:${route.meta?.['path']}`;
+    const group = anyMethod.get(key);
+    if (group) group.push(route);
+    else {
+      anyMethod.set(key, [route]);
+      dead.push(route);
+    }
+  }
+  return dead.flatMap((route) => {
+    if (route.meta?.['anyMethod'] !== true) return [route];
+    const group = anyMethod.get(`${route.source?.file}:${route.meta?.['path']}`)!;
+    if (group.some(called)) return [];
+    return [{ ...route, label: `ALL ${String(route.meta?.['path'])}` }];
+  });
 }
 
 /**
@@ -267,7 +311,8 @@ export function findSharedWrites(
     const writers = new Set<string>();
     for (const op of graph.predecessors(collection.id, ['writes'])) {
       for (const method of graph.predecessors(op.id, ['queries'])) {
-        const owner = method.meta?.['class'];
+        // A service class, or the module of a plain function: `lib/db/store.ts`.
+        const owner = method.meta?.['class'] ?? method.source?.file;
         if (owner) writers.add(String(owner));
       }
     }

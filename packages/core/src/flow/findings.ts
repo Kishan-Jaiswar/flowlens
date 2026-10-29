@@ -505,12 +505,16 @@ function checkRoutes(ctx: Ctx, tenantKey: string | undefined): void {
     ).toUpperCase();
     const path = String(route.meta?.['path'] ?? route.label.split(' ').slice(1).join(' '));
     const handler = handlerOf(ctx, route);
-    const guards = ctx.graph.successors(route.id, ['guarded-by']);
+    const guards = ctx.graph
+      .successors(route.id, ['guarded-by'])
+      .filter((guard) => isAuthGate(ctx, guard));
     const inHandler = handler ? authCallsIn(handler, ctx.reader) : [];
-    const guarded = guards.length > 0 || inHandler.length > 0 || globalAuth;
+    // Next's middleware runs in front of Next's own routes only, not a Nest or Express server.
+    const behindNextMiddleware = globalAuth && route.meta?.['framework'] === 'file-route';
+    const guarded = guards.length > 0 || inHandler.length > 0 || behindNextMiddleware;
     // `@All('/hip/…/discover')`: any method, an outside system's callback — not a signed-in user.
-    if (guarded && !PUBLIC_PATH.test(path) && route.meta?.['anyMethod'] !== true)
-      ctx.signedIn.add(route.id);
+    const callback = route.meta?.['anyMethod'] === true && route.meta?.['framework'] === 'nestjs';
+    if (guarded && !PUBLIC_PATH.test(path) && !callback) ctx.signedIn.add(route.id);
     const at = handler ? point(ctx, handler) : (route.source ?? { file: '', line: 1 });
 
     if (!guarded && !PUBLIC_PATH.test(path) && at.file) {
@@ -605,6 +609,49 @@ function deniesInBody(call: CallExpression, reader: SourceReader): boolean {
   const denies = DENIES.test(fn.getText());
   denyingHelpers.set(fn, denies);
   return denies;
+}
+
+const authGates = new WeakMap<SourceReader, Map<string, boolean>>();
+
+/** `!req.headers?.authorization) return next()`: no token, let through. */
+const LETS_ANONYMOUS_THROUGH =
+  /!\s*[\w$.?[\]'"]*(?:authorization|token|auth\w*|user)\b[\w$.?[\]'"]*\s*\)\s*\{?\s*return\s+next\(\)/i;
+/** Hands the decision to something that refuses: `new JwtAuthGuard().canActivate(…)`, `jwt.verify(…)`. */
+const DELEGATES_AUTH =
+  /\.canActivate\(|\bjwt\.verify\(|\bverify(?:Token|Jwt|IdToken)\(|passport\.authenticate\(/;
+const AUTH_NAME = /auth|jwt|session|passport|login|signed|protect|token|credential|bearer/i;
+
+/**
+ * Does a guard or middleware stop a stranger? A validation pipe, an upload
+ * interceptor, a rate limiter or a middleware that only decorates the request
+ * does not — counting them hid every unguarded route behind a global pipe.
+ * A middleware counts when its body refuses (401/403), or hands that to a guard
+ * or a token check, and does not wave through
+ * a request with no token; one Flowslens cannot read counts by its name.
+ */
+function isAuthGate(ctx: Ctx, gate: FlowNode): boolean {
+  const role = gate.meta?.['role'];
+  if (role === 'pipe' || role === 'interceptor' || role === 'filter') return false;
+  if (/throttl|rate.?limit/i.test(gate.label)) return false;
+  if (role === 'guard') return true;
+  let cache = authGates.get(ctx.reader);
+  if (!cache) authGates.set(ctx.reader, (cache = new Map()));
+  const known = cache.get(gate.id);
+  if (known !== undefined) return known;
+  const file = gate.source ? ctx.reader.file(gate.source.file) : undefined;
+  const declaration = file ? ctx.reader.declaration(gate.label, file) : undefined;
+  const body =
+    declaration && !declaration.getSourceFile().getFilePath().includes('/node_modules/')
+      ? Node.isClassDeclaration(declaration)
+        ? (declaration.getMethod('use') ?? declaration).getText()
+        : declaration.getText()
+      : undefined;
+  const gates =
+    body === undefined
+      ? AUTH_NAME.test(gate.label)
+      : (DENIES.test(body) || DELEGATES_AUTH.test(body)) && !LETS_ANONYMOUS_THROUGH.test(body);
+  cache.set(gate.id, gates);
+  return gates;
 }
 
 /** Next.js `middleware.ts`/`proxy.ts` that checks auth and runs for API routes. */
@@ -742,6 +789,21 @@ const UNSCOPED_OK = new Set([
   'estimatedDocumentCount',
 ]);
 
+/** False only when the collection's declared schemas all leave the field out. */
+function mayHoldField(ctx: Ctx, collection: string, field: string): boolean {
+  const models = ctx.graph
+    .predecessors(`collection:${collection}`, ['defines'])
+    .filter((node) => node.kind === 'model');
+  if (models.length === 0) return true;
+  return models.some((model) => {
+    const fields = ctx.graph
+      .successors(model.id, ['defines'])
+      .filter((node) => node.kind === 'field');
+    // A schema with no fields declared (`strict: false`, `Mixed`) can hold anything.
+    return fields.length === 0 || fields.some((node) => node.label.split('.').pop() === field);
+  });
+}
+
 function checkTenantScope(ctx: Ctx, tenantKey: string | undefined): void {
   if (!tenantKey) return;
   /**
@@ -767,6 +829,8 @@ function checkTenantScope(ctx: Ctx, tenantKey: string | undefined): void {
   for (const query of ctx.queries) {
     const example = scoped.get(query.collection);
     if (!example || UNSCOPED_OK.has(query.operation)) continue;
+    // Its schema has no such field: there is nothing to filter by.
+    if (!mayHoldField(ctx, query.collection, tenantKey)) continue;
     if (!query.filter || !query.filter.complete || query.filter.keys.has(tenantKey)) continue;
     // Only what a signed-in user can set off: a script, a job, a webhook or a public
     // route is no tenant's request (and an unguarded route is its own finding).
@@ -1077,7 +1141,8 @@ function loopAround(node: Node, stopAt: Node | undefined): LoopFacts | undefined
       if (Node.isForOfStatement(current) && Node.isArrayLiteralExpression(current.getExpression()))
         return undefined;
       if (walksChunks(current)) continue;
-      return { loop: current, parallel: false };
+      // Not awaited inside the loop: each pass starts its query and moves on.
+      return { loop: current, parallel: !awaitedWithin(node, current) };
     }
     if (Node.isArrowFunction(current) || Node.isFunctionExpression(current)) {
       const call = current.getParent();
@@ -1089,13 +1154,17 @@ function loopAround(node: Node, stopAt: Node | undefined): LoopFacts | undefined
             current = call;
             continue;
           }
-          const parallel = Boolean(
-            call.getFirstAncestor(
-              (ancestor) =>
-                Node.isCallExpression(ancestor) &&
-                /Promise\.(all|allSettled)$/.test(ancestor.getExpression().getText()),
-            ),
-          );
+          // `forEach`/`map` do not wait for an async callback: its queries all start at once.
+          // Only `reduce` can chain them, by awaiting the accumulator.
+          const parallel =
+            callee.getName() !== 'reduce' ||
+            Boolean(
+              call.getFirstAncestor(
+                (ancestor) =>
+                  Node.isCallExpression(ancestor) &&
+                  /Promise\.(all|allSettled)$/.test(ancestor.getExpression().getText()),
+              ),
+            );
           return { loop: call, parallel };
         }
       }
@@ -1103,6 +1172,13 @@ function loopAround(node: Node, stopAt: Node | undefined): LoopFacts | undefined
     }
   }
   return undefined;
+}
+
+/** `await` between the query and its loop: the loop waits for it before the next pass. */
+function awaitedWithin(node: Node, loop: Node): boolean {
+  for (let current = node.getParent(); current && current !== loop; current = current.getParent())
+    if (Node.isAwaitExpression(current)) return true;
+  return Node.isForOfStatement(loop) && loop.isAwaited();
 }
 
 const CHUNKING = /chunk|batch/i;
@@ -1195,7 +1271,7 @@ function reportLoop(ctx: Ctx, query: QueryFacts, facts: LoopFacts, site: Node): 
     title: `\`${query.collection}.${query.operation}\` runs once per item of a loop${through}`,
     why:
       (facts.parallel
-        ? 'Every item starts its own query at once (`Promise.all` over a list): N round trips and N connections at the same time.'
+        ? 'Every item starts its own query without waiting for the others: N round trips and N connections at the same time.'
         : 'Every item waits for its own query before the next starts: N round trips one after another, so it slows down as the list grows.') +
       (avg ? ` One run takes ${Math.round(avg)}ms on average here.` : ''),
     fix:
@@ -1273,6 +1349,8 @@ function checkSequentialAwaits(ctx: Ctx): void {
     }
     if (run.length < 2) continue;
     for (const entry of run) done.add(entry.statement);
+    // "The request pays" only where a request runs it.
+    if (!reachedByRequest(ctx, query.node.id)) continue;
     const times = run
       .map((entry) => entry.query.node.timing?.avgMs)
       .filter((ms): ms is number => ms !== undefined);
@@ -1305,12 +1383,21 @@ function namesDeclaredBy(statement: Node): string[] {
 
 /** Whether a route a signed-in user calls runs this node, walking back through its callers. */
 function reachedBySignedIn(ctx: Ctx, nodeId: string): boolean {
+  return reachedFrom(ctx, nodeId, (id) => ctx.signedIn.has(id));
+}
+
+/** Run by some route at all: a script or a migration is no request. */
+function reachedByRequest(ctx: Ctx, nodeId: string): boolean {
+  return reachedFrom(ctx, nodeId, (id) => ctx.graph.node(id)?.kind === 'route');
+}
+
+function reachedFrom(ctx: Ctx, nodeId: string, start: (id: string) => boolean): boolean {
   const seen = new Set([nodeId]);
   const queue = [nodeId];
   while (queue.length && seen.size < 4000) {
     const id = queue.shift()!;
     for (const edge of ctx.graph.edgesTo(id)) {
-      if (ctx.signedIn.has(edge.from)) return true;
+      if (start(edge.from)) return true;
       if (seen.has(edge.from)) continue;
       seen.add(edge.from);
       queue.push(edge.from);

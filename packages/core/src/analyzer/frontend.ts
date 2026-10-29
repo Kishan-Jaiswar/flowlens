@@ -45,6 +45,7 @@ import {
 import { DYNAMIC_MARKER, HTTP_METHODS, PARAM, normalizePath, type HttpMethod } from './http.js';
 import type { LoadedProject } from './project.js';
 import { BASE_KEY } from './constants.js';
+import { moduleResolver, type ModuleResolver } from './imports.js';
 import { keyPrefixOf } from './querykeys.js';
 
 /**
@@ -314,7 +315,7 @@ export interface FrontendConfig {
    */
   inputActionProps?: string[];
   /** Resolve identifiers (endpoint constants) to their literal value. */
-  resolveConstant?: (name: string) => string | undefined;
+  resolveConstant?: (name: string, at?: Node) => string | undefined;
 }
 
 export const DEFAULT_FRONTEND_CONFIG: FrontendConfig = {
@@ -442,7 +443,7 @@ export function analyzeFrontend(
     }
   }
 
-  resolvePendingCalls(graph, globals, pending, aliases, contexts);
+  resolvePendingCalls(graph, globals, pending, aliases, contexts, loaded);
   addMountActions(graph);
   nameComponentEvents(graph);
   linkPropBindings(graph, loaded);
@@ -451,6 +452,77 @@ export function analyzeFrontend(
   linkPopupFeatures(graph, loaded);
   markConditionalMounts(graph, loaded);
   distinguishTwins(graph, loaded);
+}
+
+const resolvers = new WeakMap<
+  LoadedProject,
+  { resolver: ModuleResolver; files: Map<string, SourceFile> }
+>();
+
+/** The project's module resolver and its files by relative path, made once per scan. */
+function modulesOf(loaded: LoadedProject): {
+  resolver: ModuleResolver;
+  files: Map<string, SourceFile>;
+} {
+  let cached = resolvers.get(loaded);
+  if (!cached) {
+    cached = {
+      resolver: moduleResolver(loaded),
+      files: new Map(loaded.sourceFiles.map((each) => [loaded.rel(each), each] as const)),
+    };
+    resolvers.set(loaded, cached);
+  }
+  return cached;
+}
+
+/** Where `file` imports `name` from, as written: `'./pgBuddyApi'`. */
+function importSpecifier(file: SourceFile, name: string): string | undefined {
+  return file
+    .getImportDeclarations()
+    .find(
+      (declaration) =>
+        declaration.getDefaultImport()?.getText() === name ||
+        declaration.getNamespaceImport()?.getText() === name ||
+        declaration
+          .getNamedImports()
+          .some((entry) => (entry.getAliasNode()?.getText() ?? entry.getName()) === name),
+    )
+    ?.getModuleSpecifierValue();
+}
+
+/**
+ * Does `<tag>` in `file` draw the component declared in `componentFile`? Two files
+ * can export a component under one name — a `TimeSlotPopupNew.js` nobody imports —
+ * and a tag means the one its file imports. A tag that cannot be traced (a global,
+ * an unresolved alias) counts as drawing it.
+ */
+function drawsFrom(
+  file: SourceFile,
+  tag: string,
+  componentFile: string | undefined,
+  loaded: LoadedProject,
+): boolean {
+  if (!componentFile || loaded.rel(file) === componentFile) return true;
+  const cached = modulesOf(loaded);
+  const local = tag.split('.')[0]!;
+  let specifier = importSpecifier(file, local);
+  if (!specifier) {
+    // `const X = dynamic(() => import('../components/X'))`, `require('./X')`.
+    const declared = file.getVariableDeclaration(local) ?? file.getFunction(local);
+    if (!declared) return true;
+    specifier = /(?:import|require)\(\s*['"`]([^'"`]+)['"`]/.exec(declared.getText())?.[1];
+    // Declared right here: this file's own component of that name.
+    if (!specifier) return false;
+  }
+  const target = cached.resolver.resolve(specifier, file.getFilePath());
+  if (target === undefined || target === componentFile) return true;
+  // A barrel: `export { default as X } from './X'`.
+  return (
+    cached.files
+      .get(target)
+      ?.getExportDeclarations()
+      .some((declaration) => declaration.getModuleSpecifierValue() !== undefined) ?? false
+  );
 }
 
 /**
@@ -565,8 +637,12 @@ function linkPopupFeatures(graph: FlowGraph, loaded: LoadedProject): void {
         // A copy made for one place it is drawn: `AdjustStockDialog`'s button
         // as drawn on this page, or `MedicineForm`'s as drawn in `AddMedicineDialog`.
         const site = action.meta?.['site'];
-        if (drawn.has(String(action.meta?.['component'] ?? '')))
-          return site === undefined || site === component.label;
+        const drawnName = String(action.meta?.['component'] ?? '');
+        if (drawn.has(drawnName))
+          return (
+            (site === undefined || site === component.label) &&
+            drawsFrom(file, drawnName, at.file, loaded)
+          );
         return site !== undefined && drawn.has(String(site));
       });
       const pressed = inside.filter(
@@ -891,6 +967,7 @@ function markConditionalMounts(graph: FlowGraph, loaded: LoadedProject): void {
         ...file.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
       ]) {
         if (opening.getTagNameNode().getText() !== name) continue;
+        if (!drawsFrom(file, name, action.source?.file, loaded)) continue;
         sites += 1;
         const element = Node.isJsxSelfClosingElement(opening) ? opening : opening.getParent();
         const condition = renderCondition(element);
@@ -999,14 +1076,23 @@ function linkPropBindings(graph: FlowGraph, loaded: LoadedProject): void {
       rel: string;
       site: string;
       links: Array<{ to: string; kind: 'writes-state' | 'calls'; prop: string }>;
+      passed: PassedProps;
     }> = [];
+    const shape = propsShape(
+      loaded.sourceFiles.find((each) => loaded.rel(each) === action.source?.file),
+      owner,
+    );
     for (const file of loaded.sourceFiles) {
       if (!file.getFullText().includes(`<${owner}`)) continue;
       const rel = loaded.rel(file);
       const openings = [
         ...file.getDescendantsOfKind(SyntaxKind.JsxOpeningElement),
         ...file.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
-      ].filter((opening) => opening.getTagNameNode().getText() === owner);
+      ].filter(
+        (opening) =>
+          opening.getTagNameNode().getText() === owner &&
+          drawsFrom(file, owner, action.source?.file, loaded),
+      );
       const needs = action.meta?.['needsProps'] as { any: string[]; all: string[] } | undefined;
       for (const opening of openings) {
         const site = siteComponentName(opening);
@@ -1052,7 +1138,7 @@ function linkPropBindings(graph: FlowGraph, loaded: LoadedProject): void {
           }
         }
         // A place that passes nothing followable still draws it: it keeps its copy.
-        sites.push({ rel, site, links });
+        sites.push({ rel, site, links, passed: passedProps(opening) });
       }
     }
     if (sites.every((site) => site.links.length === 0)) continue;
@@ -1076,7 +1162,7 @@ function linkPropBindings(graph: FlowGraph, loaded: LoadedProject): void {
      * its own action. One shared "Next" listed every page's request at once —
      * GET /medicines on the stock history page.
      */
-    for (const { rel, site, links } of sites) {
+    for (const { rel, site, links, passed } of sites) {
       const place = screenOf(rel, site);
       const cloneId = `${action.id}@${rel}#${site}`;
       graph.addNode({
@@ -1103,8 +1189,10 @@ function linkPropBindings(graph: FlowGraph, loaded: LoadedProject): void {
           ...(handler.source ? { source: handler.source } : {}),
           ...(handler.meta ? { meta: handler.meta } : {}),
         });
+        // `reschedule ? rescheduleApp() : createAppointment()` where no `reschedule` is passed: one side only.
         for (const edge of graph.edgesFrom(handler.id))
-          graph.addEdge({ ...edge, from: handlerClone });
+          if (!ruledOut(edge.meta?.['guard'], passed, shape))
+            graph.addEdge({ ...edge, from: handlerClone });
         for (const link of links)
           graph.addEdge({
             from: handlerClone,
@@ -1119,6 +1207,77 @@ function linkPropBindings(graph: FlowGraph, loaded: LoadedProject): void {
     }
     graph.removeNode(action.id);
   }
+}
+
+/** What one `<Component …>` is given: attribute -> its value as written; `spread` for `{...rest}`. */
+type PassedProps = { values: Map<string, string>; spread: boolean };
+
+function passedProps(opening: JsxOpeningElement | JsxSelfClosingElement): PassedProps {
+  const values = new Map<string, string>();
+  let spread = false;
+  for (const attr of opening.getAttributes()) {
+    if (!Node.isJsxAttribute(attr)) {
+      spread = true;
+      continue;
+    }
+    const init = attr.getInitializer();
+    const value = init && Node.isJsxExpression(init) ? init.getExpression() : init;
+    values.set(attr.getNameNode().getText(), value ? value.getText() : 'true');
+  }
+  return { values, spread };
+}
+
+/** How a component reads its props: `data` in `(data) =>`, or the names in `({ reschedule })`. */
+function propsShape(
+  file: SourceFile | undefined,
+  component: string,
+): { object?: string; names: Set<string> } | undefined {
+  const declared = file?.getFunction(component) ?? file?.getVariableDeclaration(component);
+  const fn = Node.isVariableDeclaration(declared) ? declared.getInitializer() : declared;
+  if (
+    !fn ||
+    !(Node.isFunctionDeclaration(fn) || Node.isArrowFunction(fn) || Node.isFunctionExpression(fn))
+  )
+    return undefined;
+  const first = fn.getParameters()[0]?.getNameNode();
+  if (!first) return undefined;
+  if (Node.isIdentifier(first)) return { object: first.getText(), names: new Set() };
+  return {
+    names: new Set(
+      first.getDescendantsOfKind(SyntaxKind.BindingElement).map((element) => element.getName()),
+    ),
+  };
+}
+
+/**
+ * A call this place can never make: its guard tests a prop the place leaves out
+ * or sets to a literal the guard rules out.
+ * shortcut: only applied where the component is drawn in several places (each
+ * gets its own copy); a single place keeps both sides — add edge removal to cover it.
+ */
+function ruledOut(
+  guard: unknown,
+  passed: PassedProps,
+  shape: { object?: string; names: Set<string> } | undefined,
+): boolean {
+  if (!shape || passed.spread || !guard || typeof guard !== 'object') return false;
+  const { path, truthy } = guard as { path?: unknown; truthy?: unknown };
+  if (typeof path !== 'string' || typeof truthy !== 'boolean') return false;
+  const segments = path.split('.');
+  const prop = shape.object
+    ? segments[0] === shape.object
+      ? segments[1]
+      : undefined
+    : shape.names.has(segments[0]!)
+      ? segments[0]
+      : undefined;
+  if (!prop) return false;
+  const value = passed.values.get(prop);
+  // Left out or `false`: it, and anything read off it (`data.reschedule`), is never truthy.
+  if (value === undefined || /^(false|null|undefined|0|''|""|``)$/.test(value)) return truthy;
+  // `reschedule` written bare or `={true}`: only the prop itself, not a field inside it.
+  const exact = segments.length === (shape.object ? 2 : 1);
+  return exact && value === 'true' && !truthy;
 }
 
 /**
@@ -2383,8 +2542,30 @@ function elementLabel(
   // A trash icon with `onClick={() => remove(index)}`: "Remove". Plain elements
   // only: a component's event is named by the component, after the scan.
   if (said && /^[a-z]/.test(tag)) return said;
+  // `onClick={() => (reschedule ? rescheduleApp() : createAppointment())}`: either job.
+  const either = /^[a-z]/.test(tag) ? callAlternatives(attribute) : undefined;
+  if (either) return either;
 
   return `${tag} ${propName}`;
+}
+
+/** The two or three functions an inline handler picks between, named: "Reschedule app or Create appointment". */
+function callAlternatives(attribute: JsxAttribute): string | undefined {
+  const init = attribute.getInitializer();
+  const handler = init && Node.isJsxExpression(init) ? init.getExpression() : undefined;
+  if (!handler || (!Node.isArrowFunction(handler) && !Node.isFunctionExpression(handler)))
+    return undefined;
+  const names = [
+    ...new Set(
+      handler
+        .getDescendantsOfKind(SyntaxKind.CallExpression)
+        .map((call) => call.getExpression())
+        .filter((callee) => Node.isIdentifier(callee) && !/^set[A-Z]/.test(callee.getText()))
+        .map((callee) => humanizeHandler(callee.getText()))
+        .filter(Boolean),
+    ),
+  ];
+  return names.length >= 2 && names.length <= 3 ? names.join(' or ') : undefined;
 }
 
 /**
@@ -2728,7 +2909,27 @@ function labelPropOf(element: Node): string {
  */
 function nestedText(element: Node): string {
   const candidates: Array<{ position: number; text: string }> = [];
+  /** Inside a nested control with a handler of its own: its words, not this one's. */
+  const ownedByInner = (node: Node): boolean => {
+    for (let at = node.getParent(); at && at !== element; at = at.getParent()) {
+      const opening = Node.isJsxElement(at)
+        ? at.getOpeningElement()
+        : Node.isJsxSelfClosingElement(at)
+          ? at
+          : undefined;
+      if (
+        opening
+          ?.getAttributes()
+          .some(
+            (attr) => Node.isJsxAttribute(attr) && /^on[A-Z]/.test(attr.getNameNode().getText()),
+          )
+      )
+        return true;
+    }
+    return false;
+  };
   for (const text of element.getDescendantsOfKind(SyntaxKind.JsxText)) {
+    if (ownedByInner(text)) continue;
     const value = text.getLiteralText().replace(/\s+/g, ' ').trim();
     if (hasWords(value)) candidates.push({ position: text.getStart(), text: value });
   }
@@ -2741,6 +2942,7 @@ function nestedText(element: Node): string {
     // Attribute values are class names and ids, not words on the screen.
     if (literal.getFirstAncestorByKind(SyntaxKind.JsxAttribute)) continue;
     if (!literal.getFirstAncestorByKind(SyntaxKind.JsxExpression)) continue;
+    if (ownedByInner(literal)) continue;
     // `cond === "x"` compares; only a branch of `? :` or `&&` is shown.
     const parent = literal.getParent();
     if (Node.isBinaryExpression(parent) && !/^&&|\|\|$/.test(parent.getOperatorToken().getText())) {
@@ -2751,8 +2953,16 @@ function nestedText(element: Node): string {
     if (hasWords(value)) candidates.push({ position: literal.getStart(), text: value });
   }
   candidates.sort((a, b) => a.position - b.position);
+  // `{invited ? "Invited" : "Invite"}`: the button is pressed to invite.
+  const doneState = (text: string): boolean =>
+    candidates.some(
+      (other) =>
+        text.startsWith(other.text) && /^(?:d|ed|[a-z]ed)$/.test(text.slice(other.text.length)),
+    );
   // Only progress text — the handler's name says more than "Cancelling...".
-  const found = candidates.find((candidate) => !isProgressText(candidate.text))?.text ?? '';
+  const found =
+    candidates.find((candidate) => !isProgressText(candidate.text) && !doneState(candidate.text))
+      ?.text ?? '';
   // `Create &quot;` as written in JSX is `Create "` on screen.
   return found
     .replace(/&quot;/g, '"')
@@ -3060,7 +3270,7 @@ function readWrapperCall(
   member: string,
   args: ReturnType<CallExpression['getArguments']>,
   config: FrontendConfig,
-  resolve: ((name: string) => string | undefined) | undefined,
+  resolve: ((name: string, at?: Node) => string | undefined) | undefined,
 ): DetectedRequest | undefined {
   // Case-insensitive: the verb shows up as `get`, `Get` and `GET` across the
   // wrapper families real codebases grow (`crmPostRequest`, `AcmeGetRequest`).
@@ -3104,7 +3314,7 @@ function readWrapperCall(
 function readOption(
   options: NonNullable<ReturnType<typeof asObjectLiteral>>,
   keys: string[],
-  resolve: ((name: string) => string | undefined) | undefined,
+  resolve: ((name: string, at?: Node) => string | undefined) | undefined,
 ): string | undefined {
   for (const key of keys) {
     const value = propertyValue(options, key);
@@ -3113,7 +3323,7 @@ function readOption(
     // `{ url }` shorthand: the property name is also the variable name.
     const property = options.getProperty(key);
     if (property && Node.isShorthandPropertyAssignment(property) && resolve) {
-      const resolved = resolve(property.getName());
+      const resolved = resolve(property.getName(), property);
       if (resolved) return resolved;
     }
   }
@@ -3131,7 +3341,7 @@ function withSuffix(
   rawPath: string,
   options: NonNullable<ReturnType<typeof asObjectLiteral>>,
   config: FrontendConfig,
-  resolve: ((name: string) => string | undefined) | undefined,
+  resolve: ((name: string, at?: Node) => string | undefined) | undefined,
 ): string {
   for (const key of config.suffixKeys) {
     const suffix = readPathLike(propertyValue(options, key), resolve);
@@ -3206,7 +3416,7 @@ function buildRequest(
 function baseOf(
   rawPath: string,
   client: string,
-  resolve: ((name: string) => string | undefined) | undefined,
+  resolve: ((name: string, at?: Node) => string | undefined) | undefined,
 ): string | undefined {
   if (!resolve || rawPath.startsWith('<') || /^[a-z][a-z0-9+.-]*:\/\//i.test(rawPath))
     return undefined;
@@ -3559,8 +3769,16 @@ function resolvePendingCalls(
   pending: PendingCall[],
   aliases: PendingAlias[],
   contexts: ContextIndex,
+  loaded: LoadedProject,
 ): void {
   const aliasTable = new Map<string, PendingAlias>();
+  /** The file a name in `file` is imported from: picks one of several same-named functions. */
+  const importedFrom = (file: string, name: string): string | undefined => {
+    const { resolver, files } = modulesOf(loaded);
+    const source = files.get(file);
+    const specifier = source && importSpecifier(source, name);
+    return specifier ? resolver.resolve(specifier, source.getFilePath()) : undefined;
+  };
   for (const alias of aliases) {
     aliasTable.set(`${alias.file}::${alias.localName}`, alias);
   }
@@ -3607,9 +3825,13 @@ function resolvePendingCalls(
     const name = aliased ?? call.name;
     const candidates = globals.get(name);
     if (!candidates || candidates.length === 0) continue;
-    // Prefer a declaration in the same file, then a unique global one.
+    // Prefer a declaration in the same file, then the one it imports, then a unique global one.
     const sameFile = candidates.find((c) => c.file === call.file);
-    const target = sameFile ?? (candidates.length === 1 ? candidates[0] : undefined);
+    const imported =
+      !sameFile && candidates.length > 1
+        ? candidates.find((c) => c.file === importedFrom(call.file, name))
+        : undefined;
+    const target = sameFile ?? imported ?? (candidates.length === 1 ? candidates[0] : undefined);
     if (!target || target.id === call.from.id) continue;
 
     // Both ends must exist before they can be joined; lazily-declared module

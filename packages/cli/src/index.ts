@@ -416,6 +416,7 @@ export function main(argv = process.argv.slice(2)): number {
         return runUnused({
           root: common.root,
           ...(common.extraRoots ? { extraRoots: common.extraRoots } : {}),
+          ...(common.graph ? { graph: common.graph } : {}),
           json: values.json,
           all: values.all,
         });

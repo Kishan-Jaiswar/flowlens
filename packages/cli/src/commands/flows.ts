@@ -1,5 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import {
+  actionDecisions,
+  renderDecisionTree,
   renderFeatureDocument,
   renderFlowTree,
   renderTimings,
@@ -103,6 +105,9 @@ export function runFlow(args: FlowArgs): number {
   return 0;
 }
 
+/** A terminal's worth: the dashboard draws the rest. */
+const DECISION_LINES = 60;
+
 function printFlow(graph: FlowGraph, flow: FeatureFlow): void {
   process.stdout.write(`\n${color.bold(flow.title)}  ${color.gray(`(${flow.id})`)}\n`);
   if (flow.source) {
@@ -117,6 +122,25 @@ function printFlow(graph: FlowGraph, flow: FeatureFlow): void {
 
   process.stdout.write(heading('Execution path') + '\n');
   process.stdout.write(`${renderFlowTree(flow, { ascii })}\n`);
+
+  // Where it can stop or branch: a confirm the user cancels, a check that answers 403.
+  let decisions: string | undefined;
+  try {
+    decisions = renderDecisionTree(actionDecisions(graph, flow)).split('\n').slice(1).join('\n');
+  } catch {
+    decisions = undefined;
+  }
+  if (decisions?.trim()) {
+    const lines = decisions.replace(/^\n+/, '').split('\n');
+    process.stdout.write(heading('Decisions') + '\n');
+    process.stdout.write(`${lines.slice(0, DECISION_LINES).join('\n')}\n`);
+    if (lines.length > DECISION_LINES)
+      process.stdout.write(
+        color.gray(
+          `  … ${lines.length - DECISION_LINES} more lines: \`flowlens serve\` shows the whole tree\n`,
+        ),
+      );
+  }
 
   if (flow.state.length > 0) {
     process.stdout.write(heading('Frontend state') + '\n');

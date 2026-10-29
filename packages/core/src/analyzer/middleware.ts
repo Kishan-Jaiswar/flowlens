@@ -352,7 +352,8 @@ function pathMatches(pattern: string, path: string, apiPrefixes: readonly string
     if (segment === '*' || segment.endsWith('*')) return true;
     const actual = have[index];
     if (actual === undefined) return false;
-    if (segment.startsWith(':') || actual.startsWith(':')) continue;
+    // `:id` in the pattern takes any value; a route's own `:id` is not `opd-data`.
+    if (segment.startsWith(':')) continue;
     if (segment !== actual) return false;
   }
   return want.length === have.length || (want.length === 0 && pattern.trim() === '*');

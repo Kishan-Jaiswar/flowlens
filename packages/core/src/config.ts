@@ -58,13 +58,19 @@ export function loadConfig(fromDir: string, explicitPath?: string): LoadedConfig
     return loaded(parse(path), path);
   }
 
-  let current = resolve(fromDir);
+  const start = resolve(fromDir);
+  let current = start;
   for (;;) {
     for (const name of CONFIG_FILENAMES) {
       const candidate = join(current, name);
-      if (existsSync(candidate)) {
-        return loaded(parse(candidate), candidate);
-      }
+      if (!existsSync(candidate)) continue;
+      const config = parse(candidate);
+      // A folder of several projects lists them as roots: it speaks for those, not their neighbours.
+      const forThis =
+        !config.roots ||
+        current === start ||
+        config.roots.some((root) => resolve(root) === start || contains(resolve(root), start));
+      if (forThis) return loaded(config, candidate);
     }
     const parent = dirname(current);
     if (parent === current) return { config: {} };

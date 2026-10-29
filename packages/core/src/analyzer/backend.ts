@@ -106,7 +106,7 @@ export interface BackendConfig {
    */
   apiPrefixes: string[];
   /** Resolve identifiers (route path constants) to their literal value. */
-  resolveConstant?: (name: string) => string | undefined;
+  resolveConstant?: (name: string, at?: Node) => string | undefined;
   /** Collection handles produced by a factory; see `collectionAliasesOf`. */
   collectionAliases?: CollectionAliases;
   /** Prisma models read from `schema.prisma`, when the project has one. */

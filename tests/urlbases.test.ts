@@ -93,6 +93,9 @@ describe('URL bases', () => {
       'POST /v3/enroll',
     ]);
     expect(new Set(external.map(callBase))).toEqual(new Set(['env:NEXT_PUBLIC_OTHER_HOST']));
+    // Not flagged as a wrong URL in a flow either.
+    expect(external.map((node) => node.meta?.['mismatch'])).toEqual([undefined, undefined]);
+    expect(call('GET /patients/missing/list')?.meta?.['mismatch']).toBe('no-route');
   });
 
   it('keeps no host, credential or query string from the env file', () => {

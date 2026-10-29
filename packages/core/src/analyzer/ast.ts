@@ -30,7 +30,7 @@ export function readPathLike(
    * Optional lookup for identifiers, so a URL held in a constant resolves to
    * its literal instead of degrading to a placeholder. See `constants.ts`.
    */
-  resolve?: (name: string) => string | undefined,
+  resolve?: (name: string, at?: Node) => string | undefined,
 ): string | undefined {
   if (!expression) return undefined;
   if (Node.isStringLiteral(expression) || Node.isNoSubstitutionTemplateLiteral(expression)) {
@@ -57,7 +57,7 @@ export function readPathLike(
     return readPathLike(expression.getExpression(), resolve);
   }
   if (Node.isIdentifier(expression) && resolve) {
-    return resolve(expression.getText())?.trim();
+    return resolve(expression.getText(), expression)?.trim();
   }
   if (resolve && isEnvRead(expression)) return resolve(expression.getText().replace(/\s+/g, ''));
   // `archivePatientEndpoint(id)`: a URL-building function from the constants table.
@@ -87,10 +87,10 @@ export function readPathLike(
  */
 function readInterpolation(
   expression: Node,
-  resolve?: (name: string) => string | undefined,
+  resolve?: (name: string, at?: Node) => string | undefined,
 ): string {
   if (resolve && (Node.isIdentifier(expression) || isEnvRead(expression))) {
-    const value = resolve(expression.getText().replace(/\s+/g, ''));
+    const value = resolve(expression.getText().replace(/\s+/g, ''), expression);
     if (value !== undefined) return value;
   }
   // Nested templates and concatenations can still be partially readable.

@@ -6,6 +6,7 @@ import {
   analyzeFrontend,
   type FrontendConfig,
 } from './analyzer/frontend.js';
+import type { Node } from 'ts-morph';
 import { collectConstants, type ConstantTable } from './analyzer/constants.js';
 import { analyzeFileRoutes } from './analyzer/fileroutes.js';
 import { analyzeServerModules } from './analyzer/servermodules.js';
@@ -19,6 +20,7 @@ import { collectImports, collectImportUses, moduleResolver } from './analyzer/im
 import { findUnused } from './analyzer/unused.js';
 import { linkCollectionRelations } from './analyzer/relations.js';
 import { linkDataLineage, linkFrontendToBackend, type SeamResult } from './analyzer/seam.js';
+import { findExternalCalls } from './impact/impact.js';
 
 /** Cap on `requestFunctionPattern`: see the check in {@link scan}. */
 const MAX_PATTERN_LENGTH = 500;
@@ -111,7 +113,9 @@ export function scan(options: ScanOptions & FlowslensConfig): ScanResult {
   // reference them.
   const constants = collectConstants(loaded);
   const resolveConstant =
-    options.resolveConstants === false ? undefined : (name: string) => constants.resolve(name);
+    options.resolveConstants === false
+      ? undefined
+      : (name: string, at?: Node) => constants.resolve(name, at);
 
   const apiPrefixes = options.apiPrefixes ?? DEFAULT_FRONTEND_CONFIG.apiPrefixes;
 
@@ -151,7 +155,10 @@ export function scan(options: ScanOptions & FlowslensConfig): ScanResult {
   }
 
   const frontendConfig: FrontendConfig = {
-    httpClients: options.httpClients ?? DEFAULT_FRONTEND_CONFIG.httpClients,
+    httpClients: [
+      ...(options.httpClients ?? DEFAULT_FRONTEND_CONFIG.httpClients),
+      ...constants.clients,
+    ],
     apiPrefixes,
     requestFunctionPattern,
     urlKeys: options.urlKeys ?? DEFAULT_FRONTEND_CONFIG.urlKeys,
@@ -221,6 +228,12 @@ export function scan(options: ScanOptions & FlowslensConfig): ScanResult {
    */
   const relationLinks = linkCollectionRelations(loaded, graph, prisma);
   const seam = linkFrontendToBackend(graph);
+  // A call to another service has no route here by design: not a wrong URL.
+  for (const call of findExternalCalls(graph)) {
+    if (call.meta?.['mismatch'] !== 'no-route') continue;
+    const { mismatch: _, ...meta } = call.meta;
+    call.meta = { ...meta, external: true };
+  }
   const lineageLinks = linkDataLineage(graph);
 
   const stats: ScanStats = {

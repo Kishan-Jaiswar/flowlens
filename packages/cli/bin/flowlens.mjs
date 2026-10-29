@@ -49,6 +49,12 @@ try {
   throw error;
 }
 
+// `flowlens impact x | head`: the reader closing the pipe early is not an error.
+process.stdout.on('error', (error) => {
+  if (error?.code === 'EPIPE') process.exit(0);
+  throw error;
+});
+
 const code = main();
 if (process.argv[2] !== 'serve' || code !== 0) {
   process.exitCode = code;

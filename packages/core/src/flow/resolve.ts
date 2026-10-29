@@ -209,9 +209,9 @@ export function resolveFlows(graph: FlowGraph, options: ResolveOptions = {}): Fe
     if (repeatsItsSite(action)) continue;
     const flow = resolveFlow(graph, action.id);
     if (!flow) continue;
-    if (!flow.hitsBackend && !options.includeLocalOnly) continue;
 
-    // Two "Save" buttons in different components must not collide.
+    // Two "Save" buttons in different components must not collide. Numbered
+    // before the filter below, so an id names the same action with or without it.
     const seen = usedIds.get(flow.id);
     if (seen !== undefined) {
       usedIds.set(flow.id, seen + 1);
@@ -219,6 +219,7 @@ export function resolveFlows(graph: FlowGraph, options: ResolveOptions = {}): Fe
     } else {
       usedIds.set(flow.id, 1);
     }
+    if (!flow.hitsBackend && !options.includeLocalOnly) continue;
     flows.push(flow);
   }
 

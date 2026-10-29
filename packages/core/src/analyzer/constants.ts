@@ -2,6 +2,7 @@ import { Node, SyntaxKind, type SourceFile } from 'ts-morph';
 import { readPathLike, readString } from './ast.js';
 import { envValue } from './driver.js';
 import { ENV_MARKER } from './http.js';
+import { moduleResolver } from './imports.js';
 import type { LoadedProject } from './project.js';
 
 /**
@@ -22,8 +23,13 @@ export interface ConstantTable {
   values: Map<string, string>;
   /** Names declared more than once with different values. */
   ambiguous: Set<string>;
-  /** Resolve a name, or undefined if unknown or ambiguous. */
-  resolve(name: string): string | undefined;
+  /** HTTP client instances the project makes: `const aria = axios.create(...)`. */
+  clients: Set<string>;
+  /**
+   * Resolve a name, or undefined if unknown or ambiguous. Given the node it is read
+   * at, the file's own constant or the one it imports wins over the project-wide table.
+   */
+  resolve(name: string, at?: Node): string | undefined;
 }
 
 /** Only strings that could plausibly be a URL path are worth keeping. */
@@ -44,8 +50,12 @@ export function collectConstants(loaded: LoadedProject): ConstantTable {
   const ambiguous = new Set<string>();
 
   const env = (name: string): string => envBase(loaded.roots, name);
+  /** file -> its own module-level constants, for names declared differently elsewhere. */
+  const perFile = new Map<string, Map<string, string>>();
   for (const file of loaded.sourceFiles) {
-    for (const [name, value] of stringConstantsIn(file, env)) {
+    const own = stringConstantsIn(file, env);
+    if (own.length > 0) perFile.set(loaded.rel(file), new Map(own));
+    for (const [name, value] of own) {
       const existing = values.get(name);
       if (existing === undefined) {
         values.set(name, value);
@@ -62,19 +72,42 @@ export function collectConstants(loaded: LoadedProject): ConstantTable {
     const variable = ENV_READ.exec(name);
     return variable ? env((variable[1] ?? variable[2])!) : values.get(name);
   };
-  const bases = clientBases(loaded, read);
+  const clients = new Set<string>();
+  const bases = clientBases(loaded, read, clients);
+  const resolver = moduleResolver(loaded);
+  /** `name` as `file` sees it: declared there, or imported from a scanned file. */
+  const scoped = (name: string, file: SourceFile): string | undefined => {
+    const own = perFile.get(loaded.rel(file))?.get(name);
+    if (own !== undefined) return own;
+    for (const declaration of file.getImportDeclarations()) {
+      const named = declaration
+        .getNamedImports()
+        .find((entry) => (entry.getAliasNode()?.getText() ?? entry.getName()) === name);
+      if (!named) continue;
+      const target = resolver.resolve(declaration.getModuleSpecifierValue(), file.getFilePath());
+      return target ? perFile.get(target)?.get(named.getName()) : undefined;
+    }
+    return undefined;
+  };
 
   return {
     values,
     ambiguous,
-    resolve(name: string) {
-      return name.startsWith(BASE_KEY) ? bases.get(name.slice(BASE_KEY.length)) : read(name);
+    clients,
+    resolve(name: string, at?: Node) {
+      if (name.startsWith(BASE_KEY)) return bases.get(name.slice(BASE_KEY.length));
+      return (
+        (at && !ENV_READ.test(name) ? scoped(name, at.getSourceFile()) : undefined) ?? read(name)
+      );
     },
   };
 }
 
 /** `resolve("base:getRequest")`: the base URL a client or request wrapper sends to. */
 export const BASE_KEY = 'base:';
+
+/** `axios.create(...)`, `ky.create(...)`: what they return sends requests. */
+const CLIENT_FACTORY = /^(axios|ky)\.create$/;
 
 const HTTP_VERBS = /^(get|post|put|patch|delete|head|options|request)$/;
 
@@ -89,6 +122,7 @@ const HTTP_VERBS = /^(get|post|put|patch|delete|head|options|request)$/;
 function clientBases(
   loaded: LoadedProject,
   read: (name: string) => string | undefined,
+  clients: Set<string>,
 ): Map<string, string> {
   const bases = new Map<string, string>();
   const ambiguous = new Set<string>();
@@ -107,6 +141,7 @@ function clientBases(
         !/\.create$/.test(init.getExpression().getText())
       )
         continue;
+      if (CLIENT_FACTORY.test(init.getExpression().getText())) clients.add(declaration.getName());
       const options = init.getArguments()[0];
       if (!options || !Node.isObjectLiteralExpression(options)) continue;
       const property = options.getProperty('baseURL');
@@ -117,11 +152,13 @@ function clientBases(
       const base = (value ? readPathLike(value, read) : shorthand)?.trim();
       if (base) keep(declaration.getName(), base.replace(/\/+$/, ''));
     }
-  if (bases.size === 0) return bases;
-
   const instances = [...bases.keys()];
+  /** `axios.get(...)` in a wrapper: no base of its own, but its URL may carry one. */
+  const receiverBase = (receiver: string): string | undefined =>
+    bases.get(receiver) ?? (receiver === 'axios' ? '' : undefined);
   for (const file of loaded.sourceFiles) {
-    if (!instances.some((name) => file.getFullText().includes(name))) continue;
+    const text = file.getFullText();
+    if (!text.includes('axios') && !instances.some((name) => text.includes(name))) continue;
     const functions: Array<[string, Node]> = [
       ...file.getFunctions().map((fn): [string, Node] => [fn.getName() ?? '', fn]),
       ...file
@@ -138,16 +175,82 @@ function clientBases(
         const callee = call.getExpression();
         if (!Node.isPropertyAccessExpression(callee) || !HTTP_VERBS.test(callee.getName()))
           continue;
-        const base = bases.get(callee.getExpression().getText());
-        if (base !== undefined) {
-          keep(name, base);
-          break;
-        }
+        const instanceBase = receiverBase(callee.getExpression().getText());
+        if (instanceBase === undefined) continue;
+        // `${PG_API}${url}`: an absolute URL replaces the instance's baseURL, as axios does.
+        const prefix = urlPrefix(call.getArguments()[0], parameterNames(fn), read) ?? '';
+        const base = ABSOLUTE_OR_ENV.test(prefix) ? prefix : instanceBase + prefix;
+        if (base) keep(name, base.replace(/\/+$/, ''));
+        break;
       }
     }
   }
   for (const name of ambiguous) bases.delete(name);
   return bases;
+}
+
+/** A base that replaces the client's: `<env:PG_API=/api>` or `https://host/api`. */
+const ABSOLUTE_OR_ENV = /^(<env:|[a-z][a-z0-9+.-]*:\/\/)/i;
+
+/** Every name a function's parameters bind, destructured ones included. */
+function parameterNames(fn: Node): Set<string> {
+  const names = new Set<string>();
+  if (
+    !Node.isArrowFunction(fn) &&
+    !Node.isFunctionExpression(fn) &&
+    !Node.isFunctionDeclaration(fn)
+  )
+    return names;
+  for (const parameter of fn.getParameters()) {
+    const nameNode = parameter.getNameNode();
+    for (const id of [nameNode, ...nameNode.getDescendantsOfKind(SyntaxKind.Identifier)])
+      if (Node.isIdentifier(id)) names.add(id.getText());
+  }
+  return names;
+}
+
+/**
+ * What a wrapper's URL puts in front of the `url` it was given: `${PG_API}${url}` →
+ * PG_API's value. Undefined when the URL does not come from a parameter, or the part
+ * before it cannot be read.
+ */
+function urlPrefix(
+  url: Node | undefined,
+  params: Set<string>,
+  read: (name: string) => string | undefined,
+): string | undefined {
+  const parts: Array<string | Node> = [];
+  const flatten = (node: Node): void => {
+    if (Node.isParenthesizedExpression(node)) flatten(node.getExpression());
+    else if (
+      Node.isBinaryExpression(node) &&
+      node.getOperatorToken().getKind() === SyntaxKind.PlusToken
+    ) {
+      flatten(node.getLeft());
+      flatten(node.getRight());
+    } else if (Node.isTemplateExpression(node)) {
+      parts.push(node.getHead().getLiteralText());
+      for (const span of node.getTemplateSpans()) {
+        flatten(span.getExpression());
+        parts.push(span.getLiteral().getLiteralText());
+      }
+    } else parts.push(node);
+  };
+  if (!url) return undefined;
+  flatten(url);
+  let prefix = '';
+  for (const part of parts) {
+    if (typeof part === 'string') {
+      prefix += part;
+      continue;
+    }
+    const ids = [part, ...part.getDescendantsOfKind(SyntaxKind.Identifier)];
+    if (ids.some((id) => Node.isIdentifier(id) && params.has(id.getText()))) return prefix;
+    const value = readPathLike(part, read);
+    if (value === undefined) return undefined;
+    prefix += value;
+  }
+  return undefined;
 }
 
 /** `process.env.API_HOST`, `process.env["API_HOST"]`. */
@@ -247,5 +350,5 @@ function stringConstantsIn(
 
 /** An empty table, for callers that do not want constant resolution. */
 export function emptyConstantTable(): ConstantTable {
-  return { values: new Map(), ambiguous: new Set(), resolve: () => undefined };
+  return { values: new Map(), ambiguous: new Set(), clients: new Set(), resolve: () => undefined };
 }

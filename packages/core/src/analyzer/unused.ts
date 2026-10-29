@@ -95,6 +95,8 @@ const ENTRY_PATTERNS: RegExp[] = [
   /(?:^|\/)[^/]+\.config\.[cm]?[jt]s$/,
   // Run by hand: scripts/seed.ts, bin/cli.js.
   /(?:^|\/)(?:scripts|bin)\/[^/]+\.[cm]?[jt]s$/,
+  // Served as-is by URL: a service worker, a widget script in public/ or static/.
+  /^(?:[^/]+\/)?(?:public|static)\/.+\.[cm]?js$/,
   // Storybook, and test setup files a runner loads by name.
   /\.stories\.[cm]?[jt]sx?$/,
   /(?:^|\/)(?:setupTests|vitest\.setup|jest\.setup)\.[cm]?[jt]sx?$/,
@@ -284,6 +286,10 @@ export function findUnused(
   for (const manifest of manifests) {
     const declared = manifest.json.dependencies ?? {};
     const implicit = new Set(Object.keys(declared).flatMap((name) => IMPLICIT_WITH[name] ?? []));
+    // `i18next` beside `react-i18next`: a package that is used needs its peers installed.
+    for (const name of Object.keys(declared))
+      if (importedPackages.has(name))
+        for (const peer of peersOf(dirname(manifest.path), name)) implicit.add(peer);
     for (const [name, version] of Object.entries(declared)) {
       if (importedPackages.has(name) || implicit.has(name) || ALWAYS_IMPLICIT.test(name)) continue;
       // A CLI run from a script, or a plugin named in a config file.
@@ -407,6 +413,18 @@ function flattenExports(value: unknown): string[] {
   if (typeof value === 'string') return [value];
   if (value && typeof value === 'object') return Object.values(value).flatMap(flattenExports);
   return [];
+}
+
+/** The peer dependencies an installed package declares; none when it is not installed. */
+function peersOf(dir: string, name: string): string[] {
+  try {
+    const json = JSON.parse(
+      readFileSync(join(dir, 'node_modules', name, 'package.json'), 'utf8'),
+    ) as { peerDependencies?: Record<string, string> };
+    return Object.keys(json.peerDependencies ?? {});
+  } catch {
+    return [];
+  }
 }
 
 interface Manifest {

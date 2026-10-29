@@ -113,12 +113,11 @@ describe('detectStack', () => {
   });
 
   /**
-   * Neither "traced" nor "not traced" is true of a queue: the `queue.add()`
-   * that hands the job over is now a node, and the worker on the far side is
-   * not read at all. Saying so is the whole point of the third state.
+   * A BullMQ worker in the scanned code is followed from the `queue.add()` that
+   * queues its job, so the queue is read, not only handed off.
    */
-  it('separates a hand-off it shows from a stack it cannot read', () => {
-    expect(report.edgeOnly).toContain('BullMQ');
+  it('follows a BullMQ job into its worker: neither a hand-off nor unread', () => {
+    expect(report.edgeOnly).not.toContain('BullMQ');
     expect(report.unread).not.toContain('BullMQ');
   });
 

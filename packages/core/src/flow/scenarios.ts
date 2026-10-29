@@ -410,12 +410,33 @@ interface Step {
   calls: Node[];
 }
 
+/** A query's own conditions, per source reader: every collection's cases ask again. */
+const OF_OP = new WeakMap<
+  SourceReader,
+  Map<string, { when: ScenarioCondition[]; result?: 'truthy' | 'falsy' }>
+>();
+const AROUND = new WeakMap<Node, { stop: Node; when: ScenarioCondition[] }>();
+
+/** `conditionsAround` for a call on a path, read once: many paths and collections share it. */
+function aroundCall(call: Node, stop: Node): ScenarioCondition[] {
+  const known = AROUND.get(call);
+  if (known?.stop === stop) return known.when;
+  const when = conditionsAround(call, stop);
+  AROUND.set(call, { stop, when });
+  return when;
+}
+
 /** Reads the conditions around call sites and queries, caching each path it opens. */
 class ConditionReader {
   private readonly paths = new Map<string, PathRead[]>();
   private readonly stepCache = new Map<string, Step | undefined>();
   /** Every function a write of the collection is reached through, by name: read once. */
   private leadingNames?: Set<string>;
+  /** A step's exits, read once: the same method sits on many paths to many writes. */
+  private readonly exitCache = new Map<
+    string,
+    Array<{ when: ScenarioCondition[]; in: string; nodeId: string; source?: SourceRef }>
+  >();
   /** Input checks (`schema.safeParse`) met on the way, by route. */
   readonly checks = new Map<string, string>();
 
@@ -447,7 +468,7 @@ class ConditionReader {
     let ways: PathRead[] = [{ split: [], all: [] }];
     try {
       for (const step of this.steps(path)) {
-        const options = step.calls.map((call) => conditionsAround(call, step.fn));
+        const options = step.calls.map((call) => aroundCall(call, step.fn));
         for (const option of options) {
           const check = option.find((c) => c.checkedBy && c.holds);
           // The request's own check; one in a job (a row at a time) is a case of its own.
@@ -527,6 +548,14 @@ class ConditionReader {
   }
 
   ofOp(op: FlowNode): { when: ScenarioCondition[]; result?: 'truthy' | 'falsy' } {
+    let cache = OF_OP.get(this.reader);
+    if (!cache) OF_OP.set(this.reader, (cache = new Map()));
+    let read = cache.get(op.id);
+    if (!read) cache.set(op.id, (read = this.readOp(op)));
+    return read;
+  }
+
+  private readOp(op: FlowNode): { when: ScenarioCondition[]; result?: 'truthy' | 'falsy' } {
     const call = locateQueryCall(
       this.reader,
       op.source?.file,
@@ -579,56 +608,80 @@ class ConditionReader {
         }
         // The request handler checks the request: its exits are preconditions, not cases.
         for (const step of steps.filter((s) => s.from.id !== path[1])) {
-          // Exits before the first write every run makes. A write under an `if` (`if (redated)
-          // save`) or in a branch that returns does not stop later checks counting: the case
-          // that reaches the exit is the one where that `if` was false.
-          const writeCalls = step.fn
-            .getDescendantsOfKind(SyntaxKind.CallExpression)
-            .filter((call) => isWrite(call));
-          const first = writeCalls.find((call) => !underIf(call, step.fn));
-          const limit = first?.getStart() ?? Math.min(...step.calls.map((c) => c.getStart()));
-          const writesIn = (node: Node | undefined) =>
-            node !== undefined &&
-            node.getDescendantsOfKind(SyntaxKind.CallExpression).some(isWrite);
-          for (const statement of step.fn.getDescendantsOfKind(SyntaxKind.IfStatement)) {
-            if (nearestFunction(statement) !== step.fn) continue;
-            const then = statement.getThenStatement();
-            const otherwise = statement.getElseStatement();
-            if (writesIn(then)) continue;
-            // `if (bad) { … } else { save }`: the side with no write is a case of its own.
-            const sidePath = otherwise !== undefined && writesIn(otherwise);
-            // `if (done) return …` before the writes: the case stops there.
-            const stops = !otherwise && exits(then) && statement.getEnd() <= limit;
-            if (!sidePath && !stops) continue;
-            // `continue` skips one item: a case only when a write follows it in the same loop.
-            const loop = statement.getFirstAncestor(
-              (a) =>
-                Node.isForStatement(a) ||
-                Node.isForOfStatement(a) ||
-                Node.isForInStatement(a) ||
-                Node.isWhileStatement(a),
-            );
-            if (stops && endsInContinue(then) && !(loop && writesIn(loop))) continue;
-            // Each conditional write before the exit did not happen on the way to it.
-            const skipped = writeCalls
-              .filter((call) => call.getEnd() < statement.getStart())
-              .map((call) => innermostIf(call, step.fn))
-              .filter((branch): branch is { test: Node; then: boolean } => branch !== undefined)
-              .map((branch) => condition(branch.test, !branch.then));
-            const when = [condition(statement.getExpression(), true), ...skipped];
-            found.push({
-              when,
-              in: step.from.label.split('.').pop()!,
-              nodeId: step.from.id,
-              source: this.reader.point(statement),
-            });
+          const key = `${[...opNames].join(',')}|${step.from.id}|${step.fn.getStart()}|${step.calls.map((c) => c.getStart()).join(',')}`;
+          let exitsHere = this.exitCache.get(key);
+          if (!exitsHere) {
+            exitsHere = this.stepExits(step, isWrite);
+            this.exitCache.set(key, exitsHere);
           }
+          found.push(...exitsHere);
         }
       }
     }
     return [
       ...new Map(found.map((f) => [`${f.in}|${f.when.map(sameCondition).join('&')}`, f])).values(),
     ];
+  }
+
+  /** The exits in one step's function before its first write: see `exitsOn`. */
+  private stepExits(
+    step: Step,
+    isWrite: (call: Node) => boolean,
+  ): Array<{ when: ScenarioCondition[]; in: string; nodeId: string; source?: SourceRef }> {
+    const cases: Array<{
+      when: ScenarioCondition[];
+      in: string;
+      nodeId: string;
+      source?: SourceRef;
+    }> = [];
+    // Exits before the first write every run makes. A write under an `if` (`if (redated)
+    // save`) or in a branch that returns does not stop later checks counting: the case
+    // that reaches the exit is the one where that `if` was false.
+    const writeCalls = step.fn
+      .getDescendantsOfKind(SyntaxKind.CallExpression)
+      .filter((call) => isWrite(call));
+    const first = writeCalls.find((call) => !underIf(call, step.fn));
+    const limit = first?.getStart() ?? Math.min(...step.calls.map((c) => c.getStart()));
+    // Every write call in the function is known: one inside `node` is one of them.
+    const writesIn = (node: Node | undefined) =>
+      node !== undefined &&
+      writeCalls.some(
+        (call) => call.getStart() >= node.getStart() && call.getEnd() <= node.getEnd(),
+      );
+    for (const statement of step.fn.getDescendantsOfKind(SyntaxKind.IfStatement)) {
+      if (nearestFunction(statement) !== step.fn) continue;
+      const then = statement.getThenStatement();
+      const otherwise = statement.getElseStatement();
+      if (writesIn(then)) continue;
+      // `if (bad) { … } else { save }`: the side with no write is a case of its own.
+      const sidePath = otherwise !== undefined && writesIn(otherwise);
+      // `if (done) return …` before the writes: the case stops there.
+      const stops = !otherwise && exits(then) && statement.getEnd() <= limit;
+      if (!sidePath && !stops) continue;
+      // `continue` skips one item: a case only when a write follows it in the same loop.
+      const loop = statement.getFirstAncestor(
+        (a) =>
+          Node.isForStatement(a) ||
+          Node.isForOfStatement(a) ||
+          Node.isForInStatement(a) ||
+          Node.isWhileStatement(a),
+      );
+      if (stops && endsInContinue(then) && !(loop && writesIn(loop))) continue;
+      // Each conditional write before the exit did not happen on the way to it.
+      const skipped = writeCalls
+        .filter((call) => call.getEnd() < statement.getStart())
+        .map((call) => innermostIf(call, step.fn))
+        .filter((branch): branch is { test: Node; then: boolean } => branch !== undefined)
+        .map((branch) => condition(branch.test, !branch.then));
+      const when = [condition(statement.getExpression(), true), ...skipped];
+      cases.push({
+        when,
+        in: step.from.label.split('.').pop()!,
+        nodeId: step.from.id,
+        source: this.reader.point(statement),
+      });
+    }
+    return cases;
   }
 }
 

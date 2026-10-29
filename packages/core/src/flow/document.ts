@@ -355,7 +355,8 @@ function renderSharedUsage(
     flows ??= resolveFlows(graph, { includeLocalOnly: true });
     const impact = analyzeImpact(graph, step.nodeId, { flows });
     if (!impact) continue;
-    const others = impact.affectedFlows.filter((other) => other.id !== flow.id).map((o) => o.label);
+    // Titles, not labels: "Delete" alone could be this action's twin on another screen.
+    const others = impact.affectedFlows.filter((other) => other.id !== flow.id).map((o) => o.title);
     if (others.length > 0) {
       rows.push({ label: step.label, others: [...new Set(others)].sort() });
     }

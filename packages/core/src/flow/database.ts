@@ -456,6 +456,11 @@ export interface DatabaseReportOptions {
   scenarios?: boolean;
   /** Only this collection, in full: the page a user opened. */
   only?: string;
+  /**
+   * Counts and notes only, for a table of every collection: no cases, and no
+   * field's inputs, screens, endpoints or mentions.
+   */
+  summary?: boolean;
 }
 
 /** `{ "from": "medicines", "field": "ownerId", "to": "clinics" }` */
@@ -525,12 +530,24 @@ export function databaseReport(
     });
   }
 
-  const cases = options.scenarios !== false;
+  const details = options.summary !== true;
+  const cases = options.scenarios !== false && details;
   const collections = graph
     .nodesOfKind('collection')
     .filter((node) => options.only === undefined || node.label === options.only)
     .map((node) =>
-      collectionOf(graph, node, flows, relations, reader, actionsOf, frontend, project, cases),
+      collectionOf(
+        graph,
+        node,
+        flows,
+        relations,
+        reader,
+        actionsOf,
+        frontend,
+        project,
+        cases,
+        details,
+      ),
     )
     .sort((a, b) => a.name.localeCompare(b.name));
   for (const { collection, name, lookup } of JOINED) {
@@ -569,6 +586,7 @@ function collectionOf(
   frontend: Frontend,
   project: ProjectCode,
   cases = true,
+  details = true,
 ): DatabaseCollection {
   const name = node.label;
   const models = graph.predecessors(node.id, ['defines']).filter((n) => n.kind === 'model');
@@ -752,93 +770,97 @@ function collectionOf(
       const field = fields.find((entry) => entry.name === relation.field);
       if (field && !field.ref) field.ref = relation.to;
     }
-  for (const field of fields) field.enteredIn = entriesOf(graph, field, frontend);
-  // The screens of actions that only load data (a page, a list, a search):
-  // what they read comes back to be shown, unlike a save that reads on the way.
-  const screens = [
-    ...new Set(
-      flows
+  // Where each field is typed, shown, sent and named: the collection's page, not the summary table.
+  if (details) {
+    for (const field of fields) field.enteredIn = entriesOf(graph, field, frontend);
+    // The screens of actions that only load data (a page, a list, a search):
+    // what they read comes back to be shown, unlike a save that reads on the way.
+    const screens = [
+      ...new Set(
+        flows
+          .filter(
+            (flow) =>
+              flow.collections.some((entry) => entry.collection === name) &&
+              flow.collections.every((entry) => entry.effect === 'read'),
+          )
+          .flatMap((flow) => flow.steps)
+          .filter((step) => FRONT_KINDS.has(step.kind) && step.file)
+          .map((step) => step.file!),
+      ),
+    ];
+    // Names on both the record and its items (`expiryDate` on a medicine and on each batch) say nothing about which one a receiver is.
+    const topLeaves = new Set(fields.filter((f) => !f.name.includes('[]')).map((f) => f.name));
+    const both = new Set(
+      fields
+        .filter((f) => f.name.includes('[]'))
+        .map((f) => leafOf(f.name))
+        .filter((leaf) => topLeaves.has(leaf)),
+    );
+    for (const field of fields) {
+      // An item field is shown beside its siblings (`b.mrp`, `b.quantity`); a top-level one beside the others.
+      const parent = field.name.includes('[]') ? field.name.split('[]')[0] : undefined;
+      const siblings = fields
+        .map((other) => other.name)
         .filter(
-          (flow) =>
-            flow.collections.some((entry) => entry.collection === name) &&
-            flow.collections.every((entry) => entry.effect === 'read'),
+          (name) =>
+            name !== field.name &&
+            (parent ? name.startsWith(`${parent}[].`) : !name.includes('[]')),
         )
-        .flatMap((flow) => flow.steps)
-        .filter((step) => FRONT_KINDS.has(step.kind) && step.file)
-        .map((step) => step.file!),
-    ),
-  ];
-  // Names on both the record and its items (`expiryDate` on a medicine and on each batch) say nothing about which one a receiver is.
-  const topLeaves = new Set(fields.filter((f) => !f.name.includes('[]')).map((f) => f.name));
-  const both = new Set(
-    fields
-      .filter((f) => f.name.includes('[]'))
-      .map((f) => leafOf(f.name))
-      .filter((leaf) => topLeaves.has(leaf)),
-  );
-  for (const field of fields) {
-    // An item field is shown beside its siblings (`b.mrp`, `b.quantity`); a top-level one beside the others.
-    const parent = field.name.includes('[]') ? field.name.split('[]')[0] : undefined;
-    const siblings = fields
-      .map((other) => other.name)
-      .filter(
-        (name) =>
-          name !== field.name && (parent ? name.startsWith(`${parent}[].`) : !name.includes('[]')),
-      )
-      .map(leafOf)
-      .filter((leaf) => !both.has(leaf));
-    field.shownIn = frontend.shown(screens, leafOf(field.name), siblings, name);
-  }
-  // Reads that hand records back: `find*` always, an aggregate only when its pipeline names the field.
-  const readOps: ReadOp[] = [];
-  for (const op of new Map(ops.map((entry) => [entry.id, entry])).values()) {
-    if (op.meta?.['effect'] !== 'read') continue;
-    const operation = String(op.meta?.['operation'] ?? '');
-    if (!/^find/.test(operation) && operation !== 'aggregate') continue;
-    let call: Node | undefined;
-    try {
-      call = locateQueryCall(reader, op.source?.file, op.source?.line, operation);
-    } catch {
-      // Unreadable: an aggregate is left out rather than claimed; a find still loads records.
+        .map(leafOf)
+        .filter((leaf) => !both.has(leaf));
+      field.shownIn = frontend.shown(screens, leafOf(field.name), siblings, name);
     }
-    const fn = call && nearestFunction(call);
-    readOps.push({
-      op,
-      aggregate: operation === 'aggregate' ? (call?.getText() ?? '') : undefined,
-      fnText: fn?.getText() ?? '',
-    });
-  }
-  // Every function that writes this collection: a request that reaches a write only through another of them goes via it.
-  const writerFns = new Set(
-    ops
-      .filter((op) => op.meta?.['access'] === 'write')
-      .flatMap((op) => graph.predecessors(op.id, ['queries']).map((n) => n.id)),
-  );
-  for (const field of fields) field.apis = apisOf(graph, field, readOps, frontend, writerFns);
-  markUpdatePaths(graph, fields);
-  const names = new Set(fields.map((field) => field.name));
-  const scope = project.scopeFor(ops, names);
-  for (const field of fields) Object.assign(field, project.about(field, scope));
-  for (const field of fields)
-    field.enteredIn.push(...codeEntriesOf(graph, field, frontend, writerFns));
-  for (const field of fields) {
-    const sources = new Set(field.writes.flatMap((write) => write.derivedFrom ?? []));
-    const known = new Set(field.enteredIn.map(entryKey));
-    for (const source of sources) {
-      for (const entry of fields.find((other) => other.name === source)?.enteredIn ?? []) {
-        const worked = field.writes.find((write) => write.derivedFrom?.includes(source));
-        const inherited: FieldEntry = {
-          ...entry,
-          through: source,
-          savedBy: {
-            ...entry.savedBy,
-            ...(worked?.derivedIn ? { derivedIn: worked.derivedIn } : {}),
-            derivedFrom: [source],
-          },
-        };
-        if (known.has(entryKey(inherited))) continue;
-        known.add(entryKey(inherited));
-        field.enteredIn.push(inherited);
+    // Reads that hand records back: `find*` always, an aggregate only when its pipeline names the field.
+    const readOps: ReadOp[] = [];
+    for (const op of new Map(ops.map((entry) => [entry.id, entry])).values()) {
+      if (op.meta?.['effect'] !== 'read') continue;
+      const operation = String(op.meta?.['operation'] ?? '');
+      if (!/^find/.test(operation) && operation !== 'aggregate') continue;
+      let call: Node | undefined;
+      try {
+        call = locateQueryCall(reader, op.source?.file, op.source?.line, operation);
+      } catch {
+        // Unreadable: an aggregate is left out rather than claimed; a find still loads records.
+      }
+      const fn = call && nearestFunction(call);
+      readOps.push({
+        op,
+        aggregate: operation === 'aggregate' ? (call?.getText() ?? '') : undefined,
+        fnText: fn?.getText() ?? '',
+      });
+    }
+    // Every function that writes this collection: a request that reaches a write only through another of them goes via it.
+    const writerFns = new Set(
+      ops
+        .filter((op) => op.meta?.['access'] === 'write')
+        .flatMap((op) => graph.predecessors(op.id, ['queries']).map((n) => n.id)),
+    );
+    for (const field of fields) field.apis = apisOf(graph, field, readOps, frontend, writerFns);
+    markUpdatePaths(graph, fields);
+    const names = new Set(fields.map((field) => field.name));
+    const scope = project.scopeFor(ops, names);
+    for (const field of fields) Object.assign(field, project.about(field, scope));
+    for (const field of fields)
+      field.enteredIn.push(...codeEntriesOf(graph, field, frontend, writerFns));
+    for (const field of fields) {
+      const sources = new Set(field.writes.flatMap((write) => write.derivedFrom ?? []));
+      const known = new Set(field.enteredIn.map(entryKey));
+      for (const source of sources) {
+        for (const entry of fields.find((other) => other.name === source)?.enteredIn ?? []) {
+          const worked = field.writes.find((write) => write.derivedFrom?.includes(source));
+          const inherited: FieldEntry = {
+            ...entry,
+            through: source,
+            savedBy: {
+              ...entry.savedBy,
+              ...(worked?.derivedIn ? { derivedIn: worked.derivedIn } : {}),
+              derivedFrom: [source],
+            },
+          };
+          if (known.has(entryKey(inherited))) continue;
+          known.add(entryKey(inherited));
+          field.enteredIn.push(inherited);
+        }
       }
     }
   }
@@ -3103,7 +3125,13 @@ class ProjectCode {
       list.push({ kind, node });
       this.names!.set(name, list);
     };
-    for (const node of source.getDescendants()) {
+    // By kind, not `getDescendants()`: that wraps every node of every file, most of the cost of `db`.
+    const nodes: Node[] = [
+      ...source.getDescendantsOfKind(SyntaxKind.PropertyAssignment),
+      ...source.getDescendantsOfKind(SyntaxKind.ShorthandPropertyAssignment),
+      ...source.getDescendantsOfKind(SyntaxKind.StringLiteral),
+    ].sort((a, b) => a.getPos() - b.getPos() || b.getEnd() - a.getEnd());
+    for (const node of nodes) {
       if (Node.isPropertyAssignment(node) || Node.isShorthandPropertyAssignment(node)) {
         // A schema's own shape is reported as its validation, not as a mention.
         const call = node.getParent()?.getParent();

@@ -42,6 +42,53 @@ Found by running 1.4.0 against a Next.js + MongoDB app and a Next.js + NestJS pa
   feature document in under a second (was up to 18s), and the Database page in
   about 26s (was up to 58s).
 
+Found by running the release against a Next.js + MongoDB app, a Next.js + NestJS
+pair and a frontend-only Next.js app.
+
+- **A wrapper that builds its own URL is sent where it says.** A wrapper that puts
+  `PG_API` in front of the `url` it is given sends to `PG_API`, not to its axios
+  instance's `baseURL`; one around plain `axios` takes its host the same way. About 60
+  calls in one app had a false `/v3` in front.
+- **A name declared in several files resolves the way the file imports it.** URL
+  constants (`drugDosage`, a `HOST` read from a different env variable in each file)
+  and functions (`fetchTopics` imported from one module, declared locally in two
+  pages) were dropped as ambiguous.
+- **Every `axios.create()` instance is a client,** whatever it is called (`aria.post(…)`).
+- **A component is placed where its own file is imported.** Two files exporting a
+  `TimeSlotPopup` no longer put the unused copy's buttons on every page that draws the
+  real one. A place that leaves a prop out no longer follows the branch that tests it.
+- **Labels.** A wrapper `<div onClick>` no longer takes the words of a nested button
+  with its own handler; with no words of its own it is named for the calls it picks
+  between. `{invited ? "Invited" : "Invite"}` is "Invite".
+- **No-auth findings fire on Nest apps.** Validation pipes, upload interceptors, rate
+  limiters and a middleware that lets a request with no token through no longer count
+  as an auth check; a middleware that hands the request to a guard
+  (`new JwtAuthGuard().canActivate(…)`) does. A Next.js `middleware.ts` covers only
+  Next's own routes. A middleware applied to `/analytics/opd-data` no longer covers
+  `/analytics/:id`.
+- **Fewer false findings.** No missing-tenant warning on a collection whose schema has
+  no such field; no "the request pays" on a script no route runs; a query per item of a
+  `forEach`/`map`, or a loop that does not await it, is reported as N at once, not one
+  after another.
+- **`doctor`.** Calls to another service are not marked "no matching backend route" in
+  a flow. An `@All()` route, or a handler with no method check, is one `ALL /path` row.
+  A call made only from a file nothing imports does not keep an endpoint alive. A
+  collection written from two modules (not only two service classes) is a shared write.
+- **`impact`.** The method named wins over a field whose id merely contains the name;
+  the "user actions depend on this" count matches the features listed; `| head` no
+  longer prints an `EPIPE` stack trace.
+- **Flow ids stay the same with or without `--all`**, so `flow <id>` opens the action
+  `flows` listed. `flow` prints the action's decisions (the first 60 lines).
+- **`db`, `unused`, config.** `db` 53s → 9s and `db <collection>` 55s → 10s on a
+  1,000-file app (same output); `unused` reads the saved graph instead of scanning
+  again. A link known only from a field's name is marked "(guessed)" in the fields
+  table. A peer dependency of an imported package, and a script in `public/`, are not
+  unused. A `flowlens.config.json` above the project that lists `roots` applies only to
+  those roots.
+- **`stack`.** BullMQ and Bull are read (their workers are followed); Firebase is a
+  hosted backend, not a database; `ioredis` is a Redis client; Socket.IO clients and
+  i18n libraries are listed.
+
 ### Changed
 
 - **Docs and package metadata.** The npm packages now link to the GitHub

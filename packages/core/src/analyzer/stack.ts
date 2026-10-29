@@ -84,11 +84,11 @@ interface Rule {
    * `stack` should tell it before you spend the afternoon.
    *
    * `'edge'` is the third honest answer, and it exists because two of the
-   * others would both be lies. A flow that enqueues a BullMQ job *is* traced up
-   * to the `queue.add()` that hands it over — that step now appears as an
-   * `external-effect` node — but what the worker does next is not read at all.
-   * Calling that `true` promises a chain that stops; calling it `false` hides a
-   * step that is really there.
+   * others would both be lies. A Kafka message or a socket emit *is* traced up
+   * to the call that hands it over — that step appears as an `external-effect`
+   * node — but what the other side does next is not read at all. Calling that
+   * `true` promises a chain that stops; calling it `false` hides a step that is
+   * really there.
    */
   read?: boolean | 'edge';
 }
@@ -121,6 +121,11 @@ const RULES: readonly Rule[] = [
   { match: 'expo', role: 'meta-framework', as: 'Expo', read: false },
   // ui
   { match: /^@mui\/material$/, role: 'ui', as: 'MUI' },
+  // translations, each under its own package name
+  {
+    match: /^(i18next|react-i18next|next-i18next|ni18n|next-international|react-intl|next-intl)$/,
+    role: 'ui',
+  },
   { match: 'antd', role: 'ui', as: 'Ant Design' },
   { match: 'tailwindcss', role: 'ui', as: 'Tailwind CSS' },
   { match: /^@chakra-ui\//, role: 'ui', as: 'Chakra UI' },
@@ -166,7 +171,8 @@ const RULES: readonly Rule[] = [
   { match: /^mysql2?$/, role: 'database', as: 'MySQL driver', read: false },
   { match: 'better-sqlite3', role: 'database', as: 'SQLite', read: false },
   { match: '@supabase/supabase-js', role: 'database', as: 'Supabase', read: false },
-  { match: 'firebase', role: 'database', as: 'Firebase', read: false },
+  // Often sign-in only, so not called a database: a hosted backend (auth, Firestore, storage).
+  { match: 'firebase', role: 'backend', as: 'Firebase', read: false },
   // auth
   { match: 'passport', role: 'auth', as: 'Passport' },
   { match: /^@nestjs\/passport$/, role: 'auth', as: 'Nest Passport' },
@@ -177,14 +183,17 @@ const RULES: readonly Rule[] = [
   { match: 'bcrypt', role: 'auth', as: 'bcrypt' },
   { match: 'bcryptjs', role: 'auth', as: 'bcrypt' },
   // queues & messaging
-  { match: 'bullmq', role: 'queue', read: 'edge', as: 'BullMQ' },
-  { match: 'bull', role: 'queue', read: 'edge', as: 'Bull' },
+  // A worker in the scanned code is followed from the job that queues it (`linkQueueWorkers`).
+  { match: 'bullmq', role: 'queue', read: true, as: 'BullMQ' },
+  { match: 'bull', role: 'queue', read: true, as: 'Bull' },
   { match: 'kafkajs', role: 'queue', read: 'edge', as: 'Kafka' },
   { match: 'amqplib', role: 'queue', read: 'edge', as: 'RabbitMQ' },
-  { match: 'ioredis', role: 'queue', read: 'edge', as: 'Redis' },
-  { match: 'redis', role: 'queue', read: 'edge', as: 'Redis' },
+  // The version is the client library's, not the Redis server's.
+  { match: 'ioredis', role: 'queue', read: 'edge', as: 'Redis client (ioredis)' },
+  { match: 'redis', role: 'queue', read: 'edge', as: 'Redis client' },
   // realtime
   { match: 'socket.io', role: 'realtime', read: 'edge', as: 'Socket.IO' },
+  { match: 'socket.io-client', role: 'realtime', read: 'edge', as: 'Socket.IO client' },
   { match: 'ws', role: 'realtime', read: 'edge', as: 'ws' },
   { match: 'pusher', role: 'realtime', read: 'edge', as: 'Pusher' },
   // testing

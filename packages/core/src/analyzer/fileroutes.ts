@@ -66,7 +66,14 @@ export function analyzeFileRoutes(
         kind: 'route',
         label: `${method} ${path}`,
         source: { file: rel, line: 1 },
-        meta: { httpMethod: method, path, framework: 'file-route', handler: rel },
+        meta: {
+          httpMethod: method,
+          path,
+          framework: 'file-route',
+          handler: rel,
+          // No method check in the handler: it answers whatever is sent.
+          ...(methods.length === HTTP_METHODS.length ? { anyMethod: true } : {}),
+        },
       });
       const scope = perVerb.get(method);
       const handlerId = scope

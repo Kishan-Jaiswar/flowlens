@@ -1,9 +1,12 @@
+import { existsSync } from 'node:fs';
 import { projectUnused, scan, type ProjectUnused } from '@flowslens/core';
+import { graphPath, loadGraph } from '../paths.js';
 import { color, heading, table } from '../ui.js';
 
 export interface UnusedArgs {
   root: string;
   extraRoots?: string[];
+  graph?: string;
   json?: boolean;
   /** Also list exports only used inside their own file. */
   all?: boolean;
@@ -18,10 +21,14 @@ export interface UnusedArgs {
  * deleted — the answer is a list to check, and it says what it cannot see.
  */
 export function runUnused(args: UnusedArgs): number {
-  const graph = scan({
-    root: args.root,
-    ...(args.extraRoots ? { extraRoots: args.extraRoots } : {}),
-  }).graph;
+  // The scan already worked it out: read the graph it saved, and scan only when there is none.
+  const saved = graphPath(args.root, args.graph);
+  const graph = existsSync(saved)
+    ? loadGraph(saved)
+    : scan({
+        root: args.root,
+        ...(args.extraRoots ? { extraRoots: args.extraRoots } : {}),
+      }).graph;
   const report = projectUnused(graph);
 
   if (args.json) {
