@@ -13,7 +13,7 @@ import {
   type SourceFile,
   type VariableDeclaration,
 } from 'ts-morph';
-import type { FlowGraph } from '../graph/graph.js';
+import { edgeId, type FlowGraph } from '../graph/graph.js';
 import type { FlowEdge, FlowNode } from '../graph/types.js';
 import { ids } from '../graph/ids.js';
 import {
@@ -356,6 +356,8 @@ interface PendingCall {
   reads?: string[];
   /** The prop the call is guarded by: `data.reschedule ? a() : b()`. See `guardOf`. */
   guard?: CallGuard;
+  /** In an effect that returns early while a state is still empty: not run on first draw. */
+  idleOnMount?: boolean;
 }
 
 /** A call made only when one prop is truthy (or only when it is not). */
@@ -2470,7 +2472,7 @@ function elementLabel(
         initializer && Node.isStringLiteral(initializer)
           ? initializer.getLiteralValue()
           : undefined;
-      if (value) return value;
+      if (value && hasWords(value)) return value;
     }
     return undefined;
   };
@@ -2948,9 +2950,24 @@ function nestedText(element: Node): string {
     if (Node.isBinaryExpression(parent) && !/^&&|\|\|$/.test(parent.getOperatorToken().getText())) {
       continue;
     }
-    if (Node.isCallExpression(parent) || Node.isElementAccessExpression(parent)) continue;
+    // `t("Close")`: a translation key is the words on the screen; any other call's argument is not.
+    if (
+      (Node.isCallExpression(parent) &&
+        !(
+          TRANSLATE.test(parent.getExpression().getText()) && parent.getArguments()[0] === literal
+        )) ||
+      Node.isElementAccessExpression(parent)
+    )
+      continue;
     const value = shownText(literal).replace(/\s+/g, ' ').trim();
     if (hasWords(value)) candidates.push({ position: literal.getStart(), text: value });
+  }
+  // `{scheduleBtnText}`, set once above as a string or a choice of strings.
+  for (const expression of element.getDescendantsOfKind(SyntaxKind.JsxExpression)) {
+    const shown = expression.getExpression();
+    if (!shown || !Node.isIdentifier(shown) || ownedByInner(expression)) continue;
+    for (const value of literalChoices(declaredAbove(shown)?.getInitializer()))
+      if (hasWords(value)) candidates.push({ position: shown.getStart(), text: value });
   }
   candidates.sort((a, b) => a.position - b.position);
   // `{invited ? "Invited" : "Invite"}`: the button is pressed to invite.
@@ -2969,6 +2986,37 @@ function nestedText(element: Node): string {
     .replace(/&apos;|&#39;/g, "'")
     .replace(/&amp;/g, '&')
     .replace(/&nbsp;/g, ' ');
+}
+
+/** The `const` an identifier names, from the nearest block or file above it that declares it. */
+function declaredAbove(name: Node): VariableDeclaration | undefined {
+  for (let at = name.getParent(); at; at = at.getParent()) {
+    if (!Node.isBlock(at) && !Node.isSourceFile(at)) continue;
+    for (const statement of at.getStatements()) {
+      if (!Node.isVariableStatement(statement)) continue;
+      const found = statement.getDeclarations().find((each) => each.getName() === name.getText());
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+/** `t("Save")`, `i18n.t(…)`, `translate(…)`, `$t(…)`, `__(…)`: translation lookups. */
+const TRANSLATE = /^(?:[\w$]+\.)?(?:t|\$t|__|translate)$/;
+
+/** `"Book"`, `walkIn ? "Walk in" : "Book"`, `x && "Book"`: the strings an initializer can be. */
+function literalChoices(node: Node | undefined): string[] {
+  if (!node) return [];
+  if (Node.isParenthesizedExpression(node)) return literalChoices(node.getExpression());
+  if (Node.isConditionalExpression(node))
+    return [...literalChoices(node.getWhenTrue()), ...literalChoices(node.getWhenFalse())];
+  if (Node.isBinaryExpression(node) && /^(&&|\|\||\?\?)$/.test(node.getOperatorToken().getText()))
+    return literalChoices(node.getRight());
+  if (Node.isCallExpression(node) && TRANSLATE.test(node.getExpression().getText()))
+    return literalChoices(node.getArguments()[0]);
+  return Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node)
+    ? [node.getLiteralValue()]
+    : [];
 }
 
 /** A string as the screen shows it: `Cancel ${count} & Remove` -> "Cancel & Remove". */
@@ -3542,11 +3590,23 @@ function linkApiCall(
      * "which one runs first" is a fact about a site. The edge is per
      * (caller, endpoint), which is the grain the question is asked at.
      */
+    // This site's own body: the node's keys are every site's, merged.
+    const edge = graph.edge(edgeId(ownerId, 'requests', id));
+    const sent = (key: string, keys: string[]) => [
+      ...new Set([...((edge?.meta?.[key] as string[] | undefined) ?? []), ...keys]),
+    ];
     graph.addEdge({
       from: ownerId,
       to: id,
       kind: 'requests',
-      meta: { file: rel, line: lineOf(call), ...callSequenceFacts(call) },
+      meta: {
+        file: rel,
+        line: lineOf(call),
+        ...callSequenceFacts(call),
+        payloadKeys: sent('payloadKeys', request.payloadKeys),
+        queryKeys: sent('queryKeys', request.queryKeys),
+        ...(idleOnMount(call) ? { idleOnMount: true } : {}),
+      },
     });
   }
 }
@@ -3665,6 +3725,13 @@ function addMountActions(graph: FlowGraph): void {
           ?.meta?.['emptyArgs'] as number[] | undefined;
         return !empty?.includes(param);
       })
+      // Called from an effect that waits for an empty state to be filled.
+      .filter(
+        (node) =>
+          !graph.edgesFrom(component.id, ['calls']).find((edge) => edge.to === node.id)?.meta?.[
+            'idleOnMount'
+          ],
+      )
       .map((node) => node.id)
       .filter((id) => !triggered.has(id))
       .filter((id) => reachesApiCall(graph, id));
@@ -3684,7 +3751,7 @@ function addMountActions(graph: FlowGraph): void {
      */
     const effectRequests = graph
       .edgesFrom(component.id, ['requests'])
-      .filter((edge) => edge.meta?.['inEffect'] === true);
+      .filter((edge) => edge.meta?.['inEffect'] === true && !edge.meta?.['idleOnMount']);
 
     if (onMount.length === 0 && effectRequests.length === 0) continue;
 
@@ -3863,6 +3930,7 @@ function edgeMeta(call: PendingCall): { meta?: Record<string, unknown> } {
       ...(call.reads?.length ? { reads: call.reads } : {}),
       ...(call.afterResponse ? { afterResponse: true } : {}),
       ...(call.guard ? { guard: call.guard } : {}),
+      ...(call.idleOnMount ? { idleOnMount: true } : {}),
     },
   };
 }
@@ -3878,7 +3946,10 @@ const PROMISE_CALLBACKS = new Set(['then', 'catch', 'finally']);
  */
 function callPlacement(
   call: CallExpression,
-): Pick<PendingCall, 'line' | 'end' | 'afterResponse' | 'emptyArgs' | 'reads' | 'guard'> {
+): Pick<
+  PendingCall,
+  'line' | 'end' | 'afterResponse' | 'emptyArgs' | 'reads' | 'guard' | 'idleOnMount'
+> {
   let afterResponse = false;
   for (let node: Node | undefined = call.getParent(); node; node = node.getParent()) {
     if (!Node.isArrowFunction(node) && !Node.isFunctionExpression(node)) continue;
@@ -3913,7 +3984,80 @@ function callPlacement(
     ...(emptyArgs.length ? { emptyArgs } : {}),
     ...(reads.length ? { reads } : {}),
     ...(guard ? { guard } : {}),
+    ...(idleOnMount(call) ? { idleOnMount: true } : {}),
   };
+}
+
+/**
+ * `useEffect(() => { if (!url?.trim()) return; load(url); }, [url])` with
+ * `const [url, setUrl] = useState("")`: the effect runs as the component
+ * appears, but returns before the call until something fills `url`.
+ */
+function idleOnMount(call: CallExpression): boolean {
+  const effect = call.getFirstAncestor((node) => {
+    const parent = node.getParent();
+    return (
+      (Node.isArrowFunction(node) || Node.isFunctionExpression(node)) &&
+      Node.isCallExpression(parent) &&
+      /^(React\.)?use(Layout)?Effect$/.test(parent.getExpression().getText())
+    );
+  });
+  const body =
+    effect && (Node.isArrowFunction(effect) || Node.isFunctionExpression(effect))
+      ? effect.getBody()
+      : undefined;
+  if (!body || !Node.isBlock(body)) return false;
+  const states = fileStates(call.getSourceFile());
+  const emptyAtFirst = (test: Node): boolean => {
+    if (Node.isParenthesizedExpression(test)) return emptyAtFirst(test.getExpression());
+    if (Node.isBinaryExpression(test) && test.getOperatorToken().getText() === '||')
+      return emptyAtFirst(test.getLeft()) || emptyAtFirst(test.getRight());
+    if (
+      !Node.isPrefixUnaryExpression(test) ||
+      test.getOperatorToken() !== SyntaxKind.ExclamationToken
+    )
+      return false;
+    const name = /^[A-Za-z_$][\w$]*/.exec(test.getOperand().getText())?.[0];
+    const state = name ? states.get(name) : undefined;
+    const initial = state?.getArguments()[0];
+    return (
+      state !== undefined && (!initial || EMPTY.test(initial.getText())) && !filledOnLoad(name!)
+    );
+  };
+  // `useEffect(() => { api.get('/me').then(setUser) }, [])` beside it fills it as the screen loads.
+  const filledOnLoad = (name: string): boolean => {
+    const setter = `set${name.charAt(0).toUpperCase()}${name.slice(1)}`;
+    const component = effect!
+      .getParent()!
+      .getFirstAncestor(
+        (node) =>
+          Node.isFunctionDeclaration(node) ||
+          Node.isArrowFunction(node) ||
+          Node.isFunctionExpression(node),
+      );
+    return (component ?? call.getSourceFile()).getDescendantsOfKind(SyntaxKind.CallExpression).some(
+      (other) =>
+        other !== effect!.getParent() &&
+        /^(React\.)?use(Layout)?Effect$/.test(other.getExpression().getText()) &&
+        other
+          .getArguments()[0]
+          ?.getDescendantsOfKind(SyntaxKind.Identifier)
+          .some((id) => id.getText() === setter),
+    );
+  };
+  for (const statement of body.getStatements()) {
+    if (statement.getEnd() >= call.getStart()) break;
+    if (!Node.isIfStatement(statement) || statement.getElseStatement()) continue;
+    const then = statement.getThenStatement();
+    const only = Node.isBlock(then) ? then.getStatements() : [then];
+    if (
+      only.length === 1 &&
+      Node.isReturnStatement(only[0]) &&
+      emptyAtFirst(statement.getExpression())
+    )
+      return true;
+  }
+  return false;
 }
 
 /**

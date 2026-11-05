@@ -7,7 +7,40 @@ project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-05
+
 ### Fixed
+
+Found by checking every command against four real apps (Next.js + MongoDB, a
+Next.js + NestJS pair, and a frontend-only Next.js app).
+
+- **Imports through tsconfig `baseUrl` resolve** (`import x from 'src/common/x'`), so
+  `unused` no longer lists files a Nest backend imports that way.
+- **`this.model.db.collection('patients')` is a query on `patients`**, not on the model's collection.
+- **Mass assignment respects validation where it is set**: the `main.ts` nearest the
+  code (also when several repos are scanned together) and `@UsePipes(new
+ValidationPipe({ whitelist: true }))` on the controller or the handler.
+- **A flow shows the body its own call site sends**, not every site's keys merged,
+  and `...(ok ? { a } : {})` gives `a` instead of raw code.
+- **Middleware and guards show where they apply to that route**, not the first place
+  the same name was seen.
+- **An effect that returns early while a state is still empty is not a page load**:
+  `if (!url) return; fetch(url)` no longer attaches that request to every button
+  that shows the component.
+- **Button labels** read `t("Close")`, a `const` holding the text (or a choice of
+  texts), and never a placeholder with no words (`"-"`).
+- **Pages Router methods from a guard**: `if (req.method !== 'GET') return 405` makes a
+  `GET` route. A route that a `rewrites` rule in `next.config` serves is not "dead".
+- **A local `baseUrl` or a parameter hides another file's constant of that name**, so
+  calls are filed under the right host; one whose host is a parameter is listed as
+  "set at run time" instead of a wrong URL. A query string picked by a ternary inside
+  a template no longer turns into a `:param` segment.
+- **`where`** names the endpoint that actually reaches the line first; **`impact`**
+  no longer lists the class that declares a method as its caller; **`doctor`** no
+  longer says "every frontend call matches a route" while listing calls to other services.
+- **`stack`** lists a package family (`@radix-ui/*`) once and shows a dependency's
+  other versions; **`db`** lists `createdAt`/`updatedAt` from `timestamps: true`
+  even when they are not declared as `@Prop`s.
 
 Found by running 1.4.0 against a Next.js + MongoDB app and a Next.js + NestJS pair.
 
@@ -1951,7 +1984,8 @@ Recorded because each one shaped the design, and the reasoning is in
 - Chained Mongoose modifiers (`.lean()`, `.sort()`) were counted as separate
   database operations.
 
-[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.4.0...HEAD
+[unreleased]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.3.1...v1.4.0
 [1.3.1]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/Kishan-Jaiswar/flowlens/compare/v1.2.0...v1.3.0

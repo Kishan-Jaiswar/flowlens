@@ -238,6 +238,22 @@ export function whereIs(
 
   const hits: WhereFlowHit[] = [];
   const other: WhereFlowHit[] = [];
+  // The endpoints whose handlers run the line: a flow calling several names those first.
+  const reaching = new Set<string>();
+  for (const match of matches)
+    for (const id of graph
+      .reachable(match.nodeId, { direction: 'in', kinds: ['calls', 'emits'] })
+      .keys()) {
+      const node = graph.node(id);
+      if (node?.kind === 'route') reaching.add(node.label);
+    }
+  const hit = (flow: FeatureFlow, via: { via: WhereNode; indirect: boolean }) => {
+    const entry = hitOf(flow, via);
+    entry.endpoints = [...entry.endpoints].sort(
+      (a, b) => Number(reaching.has(b)) - Number(reaching.has(a)),
+    );
+    return entry;
+  };
 
   for (const flow of flows) {
     const anchored = flow.steps.find((step) => anchors.has(step.nodeId));
@@ -311,7 +327,7 @@ function describe(nodeId: string, graph: FlowGraph): WhereNode {
   };
 }
 
-function hit(flow: FeatureFlow, via: { via: WhereNode; indirect: boolean }): WhereFlowHit {
+function hitOf(flow: FeatureFlow, via: { via: WhereNode; indirect: boolean }): WhereFlowHit {
   return {
     id: flow.id,
     label: flow.label,

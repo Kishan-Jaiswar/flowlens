@@ -1010,10 +1010,10 @@ const WRITTEN_ARG: Record<string, number> = {
 };
 
 function checkMassAssignment(ctx: Ctx): void {
-  const whitelisting = validationWhitelists(ctx);
   for (const query of ctx.queries) {
     const index = WRITTEN_ARG[query.operation];
     if (index === undefined || !query.fn) continue;
+    let whitelisting: boolean | undefined | null = null;
     const written = query.call.getArguments()[index];
     if (!written) continue;
     // The value that is spread or passed whole: `body`, `{ $set: dto }`, `{ ...req.body }`.
@@ -1021,6 +1021,7 @@ function checkMassAssignment(ctx: Ctx): void {
     for (const source of sources) {
       const origin = requestOrigin(query.fn, source);
       if (!origin) continue;
+      if (origin.kind === 'dto') whitelisting ??= validationWhitelists(ctx, query);
       if (origin.kind === 'dto' && whitelisting) continue;
       push(ctx, {
         kind: 'mass-assignment',
@@ -1044,16 +1045,69 @@ function checkMassAssignment(ctx: Ctx): void {
   }
 }
 
-/** True when a global `ValidationPipe` strips undeclared fields; false when it does not; undefined when none was found. */
-function validationWhitelists(ctx: Ctx): boolean | undefined {
-  for (const rel of ['src/main.ts', 'main.ts', 'src/main.js']) {
-    const file = ctx.reader.file(rel);
-    if (!file) continue;
-    const text = file.getFullText();
-    if (!/ValidationPipe/.test(text)) continue;
-    return /whitelist\s*:\s*true/.test(text);
+/**
+ * True when every route that runs the query strips undeclared fields — through
+ * the nearest `main.ts`'s global `ValidationPipe`, or `@UsePipes` on the
+ * controller or handler; false when the global pipe runs without `whitelist`;
+ * undefined when no pipe was found.
+ */
+function validationWhitelists(ctx: Ctx, query: QueryFacts): boolean | undefined {
+  const global = globalWhitelist(ctx, query.at.file);
+  if (global) return true;
+  const routes = routesReaching(ctx, query.node.id);
+  if (
+    routes.length > 0 &&
+    routes.every((route) => {
+      const handler = handlerOf(ctx, route);
+      const owner = handler?.getFirstAncestor((node) => Node.isClassDeclaration(node));
+      return [handler, owner].some(
+        (node) =>
+          node &&
+          Node.isDecoratable(node) &&
+          node
+            .getDecorators()
+            .some((decorator) =>
+              /^UsePipes\b[\s\S]*whitelist\s*:\s*true/.test(decorator.getText().slice(1)),
+            ),
+      );
+    })
+  )
+    return true;
+  return global;
+}
+
+/** The global pipe in the `main.ts` nearest above `rel`. */
+function globalWhitelist(ctx: Ctx, rel: string): boolean | undefined {
+  const parts = rel.split('/').slice(0, -1);
+  for (let depth = parts.length; depth >= 0; depth -= 1) {
+    const dir = parts.slice(0, depth).join('/');
+    for (const name of ['main.ts', 'main.js']) {
+      const file = ctx.reader.file(dir ? `${dir}/${name}` : name);
+      if (!file) continue;
+      const text = file.getFullText();
+      if (!/ValidationPipe/.test(text)) continue;
+      return /whitelist\s*:\s*true/.test(text);
+    }
   }
   return undefined;
+}
+
+/** The routes that run a node, walking back through its callers. */
+function routesReaching(ctx: Ctx, nodeId: string): FlowNode[] {
+  const routes: FlowNode[] = [];
+  const seen = new Set([nodeId]);
+  const queue = [nodeId];
+  while (queue.length && seen.size < 4000) {
+    const id = queue.shift()!;
+    for (const edge of ctx.graph.edgesTo(id)) {
+      if (seen.has(edge.from)) continue;
+      seen.add(edge.from);
+      const from = ctx.graph.node(edge.from);
+      if (from?.kind === 'route') routes.push(from);
+      else queue.push(edge.from);
+    }
+  }
+  return routes;
 }
 
 /** The identifiers written whole: the argument itself, `$set: x`, or `...x`. */

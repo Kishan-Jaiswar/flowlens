@@ -1,6 +1,6 @@
 {
   "name": "@flowslens/cli",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Trace any user action from the UI to the database. Maps every click through React/Next.js, NestJS/Express, Prisma, Mongoose and the MongoDB driver, flowcharts its decisions, explains the database schema in plain words, shows what a change breaks, finds dead code, and serves a local dashboard.",
   "type": "module",
   "bin": {
@@ -19,7 +19,7 @@
     "prepack": "node ../../scripts/prepack.mjs"
   },
   "dependencies": {
-    "@flowslens/core": "1.4.0"
+    "@flowslens/core": "1.4.1"
   },
   "engines": {
     "node": ">=18.18"

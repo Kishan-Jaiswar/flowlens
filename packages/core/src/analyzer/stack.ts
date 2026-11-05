@@ -392,9 +392,15 @@ export function detectStack(roots: readonly string[]): StackReport {
            * manifest wins, and `from` names it, so the reader can still find a
            * version disagreement by looking there.
            */
-          const key = `${label}:${name}`;
+          // `@radix-ui/react-slot`, `@radix-ui/themes`, …: one kit, one line.
+          const family = rule.match instanceof RegExp && rule.match.source.endsWith('\\/');
+          const key = family ? label : `${label}:${name}`;
           const declared = typeof version === 'string' ? version : 'unknown';
           const already = seen.get(key);
+          if (already && family) {
+            if (already.package !== name) already.version = 'several packages';
+            continue;
+          }
           if (already) {
             if (already.version !== declared) {
               already.conflicts = [...(already.conflicts ?? []), { from: dir, version: declared }];

@@ -121,5 +121,6 @@ function note(entry: StackEntry): string {
   if (entry.dev) bits.push('dev');
   if (entry.read === false) bits.push('not traced');
   if (entry.read === 'edge') bits.push('hand-off only');
+  for (const other of entry.conflicts ?? []) bits.push(`${other.version} in ${other.from}`);
   return color.gray(bits.join(' · '));
 }

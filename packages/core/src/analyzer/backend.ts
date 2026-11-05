@@ -391,6 +391,19 @@ function declareSchemaClass(
       },
     });
     graph.addEdge({ from: modelId, to: fieldId, kind: 'defines' });
+    stamped.delete(fieldName);
+  }
+  // Not declared as a @Prop, but every document has them all the same.
+  for (const fieldName of stamped) {
+    const fieldId = ids.field(modelId, fieldName);
+    graph.addNode({
+      id: fieldId,
+      kind: 'field',
+      label: fieldName,
+      source: { file: rel, line: lineOf(declaration) },
+      meta: { owner: modelName, type: 'Date', defaultValue: 'the time (Mongoose timestamps)' },
+    });
+    graph.addEdge({ from: modelId, to: fieldId, kind: 'defines' });
   }
 }
 
@@ -783,7 +796,12 @@ function resolveMethodBodies(
       if (modelNames.length) {
         const effect = dbEffectOf(member);
         if (!effect) continue;
-        for (const modelName of modelNames)
+        // `this.medicineModel.db.collection('patients')`: the named collection, not the model's.
+        const named = /\.collection(?:<[^>]*>)?\(\s*['"`]([^'"`$]+)['"`]\s*\)$/.exec(receiver)?.[1];
+        const namedModel = named
+          ? ([...index.collections].find(([, collection]) => collection === named)?.[0] ?? named)
+          : undefined;
+        for (const modelName of namedModel ? [namedModel] : modelNames)
           recordDbOp(graph, index, {
             methodId,
             modelName,
@@ -793,6 +811,7 @@ function resolveMethodBodies(
             site: `${info.name}.${methodName}`,
             upsert: upsertsIn(call),
             effect,
+            ...(named ? { collection: named, database: 'mongodb' } : {}),
           });
         continue;
       }

@@ -1,4 +1,4 @@
-import { envBaseOf } from '../analyzer/http.js';
+import { DYNAMIC_MARKER, envBaseOf } from '../analyzer/http.js';
 import { pageAtPath } from '../flow/pages.js';
 import type { FlowGraph } from '../graph/graph.js';
 import type { EdgeKind, FlowNode } from '../graph/types.js';
@@ -212,6 +212,7 @@ export function findDeadEndpoints(graph: FlowGraph): FlowNode[] {
     return sites.length === 0 || sites.some((site) => !deadFiles.has(site.replace(/:\d+$/, '')));
   };
   const called = (route: FlowNode): boolean =>
+    route.meta?.['rewriteTarget'] === true ||
     graph.predecessors(route.id, ['handled-by']).some(live);
   const anyMethod = new Map<string, FlowNode[]>();
   const dead: FlowNode[] = [];
@@ -287,6 +288,8 @@ export function callBase(call: FlowNode): string {
   if (env) return `env:${env}`;
   const host = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(raw)?.[1];
   if (host) return `host:${host.replace(/^[^@]*@/, '')}`;
+  // `${baseUrl}/x` with `baseUrl` a parameter: the host is decided by whoever calls it.
+  if (raw.startsWith(DYNAMIC_MARKER)) return 'host:(set at run time)';
   return `client:${String(call.meta?.['client'] ?? '')}`;
 }
 

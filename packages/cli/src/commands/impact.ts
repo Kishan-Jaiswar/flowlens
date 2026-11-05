@@ -86,7 +86,14 @@ export function runImpact(args: ImpactArgs): number {
     );
   }
 
-  const direct = report.dependents.filter((dependent) => dependent.distance === 1);
+  // The class that declares a method depends on it, but does not call it.
+  const direct = report.dependents.filter(
+    (dependent) =>
+      dependent.distance === 1 &&
+      graph
+        .edgesFrom(dependent.nodeId)
+        .some((edge) => edge.to === target.id && edge.kind !== 'defines'),
+  );
   if (direct.length > 0) {
     process.stdout.write(heading(`Direct callers (${direct.length})`) + '\n');
     process.stdout.write(
@@ -167,7 +174,13 @@ export function runDoctor(args: DoctorArgs): number {
 
   process.stdout.write(heading(`API calls with no backend route (${broken.length})`) + '\n');
   if (broken.length === 0) {
-    process.stdout.write(color.green('  none — every frontend call matches a route\n'));
+    process.stdout.write(
+      color.green(
+        external.length > 0
+          ? '  none — every call meant for this backend matches a route (the rest go to another service, below)\n'
+          : '  none — every frontend call matches a route\n',
+      ),
+    );
   } else {
     for (const call of broken) {
       const reason =

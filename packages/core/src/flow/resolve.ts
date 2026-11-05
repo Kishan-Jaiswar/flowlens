@@ -583,6 +583,16 @@ function attributeCallSites(
   depths: Map<string, number>,
 ): void {
   for (const step of steps) {
+    // One middleware node is applied in many places: show where it is applied to this flow's route.
+    if (step.kind === 'middleware') {
+      const applied = graph
+        .edgesTo(step.nodeId, ['guarded-by'])
+        .filter((edge) => depths.has(edge.from))
+        .sort((a, b) => (depths.get(a.from) ?? 0) - (depths.get(b.from) ?? 0))[0];
+      if (typeof applied?.meta?.['file'] === 'string') step.file = applied.meta['file'];
+      if (typeof applied?.meta?.['line'] === 'number') step.line = applied.meta['line'];
+      continue;
+    }
     if (step.kind !== 'api-call') continue;
 
     const edges = graph.edgesTo(step.nodeId, ['requests']);
@@ -596,6 +606,11 @@ function attributeCallSites(
     const line = nearest?.meta?.['line'];
     if (typeof file === 'string') step.file = file;
     if (typeof line === 'number') step.line = line;
+    // What this site sends, rather than every site's keys merged on the node.
+    for (const key of ['payloadKeys', 'queryKeys']) {
+      const keys = nearest?.meta?.[key];
+      if (Array.isArray(keys)) step.meta = { ...step.meta, [key]: keys };
+    }
 
     const elsewhere = edges.length - mine.length;
     if (elsewhere > 0) {

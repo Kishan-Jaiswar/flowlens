@@ -249,6 +249,8 @@ export function readAliases(root: string): Root['aliases'] {
           targets: targets.map((target) => resolve(base, target.replace(/\*$/, ''))),
         });
       }
+      // `baseUrl` alone makes every bare specifier resolvable from it: `import x from 'src/a'`.
+      if (options.baseUrl) aliases.push({ prefix: '', targets: [base] });
     } catch {
       // An unreadable tsconfig only costs the aliases.
     }

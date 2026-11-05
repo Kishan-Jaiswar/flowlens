@@ -1,6 +1,6 @@
 {
   "name": "@flowslens/core",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Static analysis engine for full-stack TypeScript and JavaScript: maps each UI action to its API route, service and database query, reads Mongoose, Prisma and MongoDB driver schemas, with decision flowcharts, field-level data lineage, impact and breaking-change analysis.",
   "type": "module",
   "main": "./dist/index.js",

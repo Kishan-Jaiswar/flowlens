@@ -93,6 +93,13 @@ function readInterpolation(
     const value = resolve(expression.getText().replace(/\s+/g, ''), expression);
     if (value !== undefined) return value;
   }
+  // `${city ? `?city=${city}` : `?state=${state}`}`: a query string either way, not a segment.
+  if (Node.isConditionalExpression(expression)) {
+    const sides = [expression.getWhenTrue(), expression.getWhenFalse()].map((side) =>
+      readPathLike(side, resolve),
+    );
+    if (sides.every((side) => side !== undefined && /^[?&]/.test(side))) return sides[0]!;
+  }
   // Nested templates and concatenations can still be partially readable.
   if (Node.isTemplateExpression(expression) || Node.isBinaryExpression(expression)) {
     const nested = readPathLike(expression, resolve);
@@ -163,10 +170,22 @@ export function objectKeys(object: ObjectLiteralExpression): string[] {
     } else if (Node.isShorthandPropertyAssignment(property)) {
       keys.push(property.getName());
     } else if (Node.isSpreadAssignment(property)) {
-      keys.push(`...${property.getExpression().getText()}`);
+      keys.push(...spreadKeys(property.getExpression()));
     }
   }
   return keys;
+}
+
+/** `...rest` stays a spread; `...(ok ? { a } : {})` and `...(ok && { a })` give their keys. */
+function spreadKeys(expression: Node): string[] {
+  if (Node.isParenthesizedExpression(expression)) return spreadKeys(expression.getExpression());
+  if (Node.isObjectLiteralExpression(expression)) return objectKeys(expression);
+  if (Node.isConditionalExpression(expression))
+    return [...spreadKeys(expression.getWhenTrue()), ...spreadKeys(expression.getWhenFalse())];
+  if (Node.isBinaryExpression(expression)) return spreadKeys(expression.getRight());
+  if (Node.isIdentifier(expression) || Node.isPropertyAccessExpression(expression))
+    return [`...${expression.getText()}`];
+  return [];
 }
 
 export function asObjectLiteral(expression: Node | undefined): ObjectLiteralExpression | undefined {

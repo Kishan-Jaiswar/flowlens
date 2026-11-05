@@ -3,11 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  detectStack,
   findDeadEndpoints,
   findSharedWrites,
   loadConfig,
   projectFindings,
   projectUnused,
+  resolveFlows,
   scan,
 } from '@flowslens/core';
 
@@ -409,5 +411,173 @@ describe('findings that hold only for code a request runs, the way it runs', () 
   it('tells a forEach that starts every query at once from a loop that awaits each', () => {
     const loops = found.filter((finding) => finding.kind === 'n-plus-one');
     expect(loops.map((finding) => finding.severity).sort()).toEqual(['low', 'medium']);
+  });
+});
+
+describe('shapes from the clinic and medisage apps', () => {
+  const app = mkdtempSync(join(tmpdir(), 'flowlens-audit-'));
+  const put = (rel: string, text: string): void => {
+    mkdirSync(join(app, rel, '..'), { recursive: true });
+    writeFileSync(join(app, rel), text, 'utf8');
+  };
+  put(
+    'api/package.json',
+    JSON.stringify({
+      dependencies: { '@nestjs/core': '9', '@radix-ui/react-slot': '1', '@radix-ui/themes': '3' },
+    }),
+  );
+  put('api/tsconfig.json', JSON.stringify({ compilerOptions: { baseUrl: './' } }));
+  put(
+    'api/src/main.ts',
+    `import { AppModule } from 'src/app.module';
+     async function bootstrap() { const app = await NestFactory.create(AppModule); app.useGlobalPipes(new ValidationPipe()); }
+     bootstrap();`,
+  );
+  put(
+    'api/src/app.module.ts',
+    `import { log } from 'src/common/logger'; export class AppModule {}`,
+  );
+  put('api/src/common/logger.ts', `export const log = 1;`);
+  put(
+    'api/src/notes.schema.ts',
+    `@Schema({ timestamps: true })
+     export class Note { @Prop() title: string; }
+     @Schema() export class Patient { @Prop() uuid: string; }`,
+  );
+  put(
+    'api/src/notes.service.ts',
+    `export class NotesService {
+       constructor(@InjectModel(Note.name) private noteModel: Model<Note>) {}
+       async create(dto: CreateNoteDto) { return this.noteModel.create(dto); }
+       async stamp(id) { await this.noteModel.db.collection('patients').updateOne({ _id: id }, { $set: { uuid: 1 } }); }
+     }`,
+  );
+  put(
+    'api/src/notes.controller.ts',
+    `@Controller('api/notes')
+     @UsePipes(new ValidationPipe({ whitelist: true }))
+     export class NotesController {
+       constructor(private notesService: NotesService) {}
+       @Post() create(@Body() dto: CreateNoteDto) { return this.notesService.create(dto); }
+       @Post('stamp') stamp(@Body() body) { return this.notesService.stamp(body.id); }
+     }`,
+  );
+  const result = scan({ root: join(app, 'api') });
+  const graph = result.graph;
+
+  it('resolves a bare import through tsconfig baseUrl', () => {
+    const dead = projectUnused(graph).files.map((entry) => entry.file);
+    expect(dead).not.toContain('src/common/logger.ts');
+    expect(dead).not.toContain('src/app.module.ts');
+  });
+
+  it('files model.db.collection("x") under x, not the model', () => {
+    const ops = graph.nodesOfKind('db-op').map((node) => node.label);
+    expect(ops).toContain('patients.updateOne');
+    expect(ops).not.toContain('notes.updateOne');
+  });
+
+  it('counts @UsePipes whitelist on the controller as stripping undeclared fields', () => {
+    const kinds = projectFindings(graph, result.root).findings.map((finding) => finding.kind);
+    expect(kinds).not.toContain('mass-assignment');
+  });
+
+  it('adds the fields Mongoose timestamps fill in', () => {
+    const fields = graph
+      .nodesOfKind('field')
+      .filter((node) => node.meta?.['owner'] === 'Note')
+      .map((node) => node.label);
+    expect(fields).toEqual(expect.arrayContaining(['title', 'createdAt', 'updatedAt']));
+  });
+
+  it('lists a package family once', () => {
+    expect(
+      detectStack([join(app, 'api')]).entries.filter((entry) => entry.name === 'Radix'),
+    ).toHaveLength(1);
+  });
+
+  const web = join(app, 'web');
+  put('web/package.json', JSON.stringify({ dependencies: { next: '13', react: '18' } }));
+  put(
+    'web/next.config.js',
+    `module.exports = { rewrites: async () => [{ source: '/img', destination: '/api/image' }] };`,
+  );
+  put(
+    'web/pages/api/image.js',
+    `export default function handler(req, res) {
+       if (req.method !== 'GET' && req.method !== 'HEAD') return res.status(405).end();
+       if (req.method === 'HEAD') return res.end();
+       res.end();
+     }`,
+  );
+  put('web/pages/api/meta.js', `export default function handler(req, res) { res.json({}); }`);
+  put(
+    'web/pages/_app.js',
+    `const baseUrl = 'https://site.example.com'; export default function App() { return null; }`,
+  );
+  put(
+    'web/pages/index.js',
+    `import { useEffect, useState } from 'react';
+     export default function Home({ isWalkIn, id }) {
+       const [link, setLink] = useState('');
+       const btnText = isWalkIn ? 'Schedule Walkin' : 'Schedule Appointment';
+       const baseUrl = \`https://wow.example.com/forms/\${id}\`;
+       useEffect(() => {
+         if (!link?.trim()) return;
+         fetch(\`/api/meta?url=\${link}\`);
+       }, [link]);
+       const save = (dto) => fetch('/api/notes', { method: 'POST', body: JSON.stringify({ title: dto.title, ...(dto.ok ? { ok: true } : {}) }) });
+       return (
+         <div>
+           <button onClick={() => fetch(\`\${baseUrl}/book\`, { method: 'POST' })}>{btnText}</button>
+           <button onClick={() => save({})}>{t('Close')}</button>
+           <input placeholder="-" onChange={(e) => setLink(e.target.value)} />
+           <button onClick={() => fetch(\`/api/doctors\${id ? \`?city=\${id}\` : \`?state=\${id}\`}&x=1\`)}>Doctors</button>
+         </div>
+       );
+     }`,
+  );
+  const webGraph = scan({ root: web }).graph;
+  const flows = resolveFlows(webGraph, { includeLocalOnly: true });
+  const labels = flows.map((flow) => flow.label);
+
+  it('reads a route method from a guard that turns the others away', () => {
+    const routes = webGraph.nodesOfKind('route').map((node) => node.label);
+    expect(routes.filter((label) => label.endsWith(' /image')).sort()).toEqual([
+      'GET /image',
+      'HEAD /image',
+    ]);
+  });
+
+  it('does not call a next.config rewrite target dead', () => {
+    const dead = findDeadEndpoints(webGraph).map((route) => route.label);
+    expect(dead.filter((label) => label.endsWith(' /image'))).toEqual([]);
+  });
+
+  it('names buttons by a const label, a translation key, and never by a "-" placeholder', () => {
+    expect(labels).toEqual(expect.arrayContaining(['Schedule Walkin', 'Close']));
+    expect(labels).not.toContain('-');
+  });
+
+  it('does not load what an effect waits for while its state is still empty', () => {
+    const load = flows.find((flow) => flow.label.endsWith('loads'));
+    expect(load?.endpoints ?? []).not.toContain('GET /meta');
+  });
+
+  it('reads a local baseUrl, not another file’s', () => {
+    const book = webGraph
+      .nodesOfKind('api-call')
+      .find((node) => node.label === 'POST /forms/:param/book');
+    expect(book?.meta?.['rawPath']).toBe('https://wow.example.com/forms/<param>/book');
+  });
+
+  it('keeps a query string chosen by a ternary out of the path', () => {
+    expect(webGraph.nodesOfKind('api-call').map((node) => node.label)).toContain('GET /doctors');
+  });
+
+  it('shows the body this call site sends, conditional spreads read', () => {
+    const close = flows.find((flow) => flow.label === 'Close')!;
+    const call = close.steps.find((step) => step.kind === 'api-call')!;
+    expect(call.meta?.['payloadKeys']).toEqual(['title', 'ok']);
   });
 });

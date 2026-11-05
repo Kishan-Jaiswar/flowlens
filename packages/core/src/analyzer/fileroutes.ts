@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Node, SyntaxKind, type SourceFile } from 'ts-morph';
 import type { FlowGraph } from '../graph/graph.js';
 import { ids } from '../graph/ids.js';
@@ -38,6 +40,7 @@ export function analyzeFileRoutes(
   config: FileRouteConfig,
 ): number {
   let declared = 0;
+  const rewritten = rewriteTargets(loaded.roots, config.apiPrefixes);
 
   for (const file of loaded.sourceFiles) {
     const rel = loaded.rel(file);
@@ -73,6 +76,8 @@ export function analyzeFileRoutes(
           handler: rel,
           // No method check in the handler: it answers whatever is sent.
           ...(methods.length === HTTP_METHODS.length ? { anyMethod: true } : {}),
+          // Served under another URL too, by a `rewrites` rule in next.config.
+          ...(rewritten.has(path) ? { rewriteTarget: true } : {}),
         },
       });
       const scope = perVerb.get(method);
@@ -107,6 +112,24 @@ export function analyzeFileRoutes(
   }
 
   return declared;
+}
+
+/** `{ source: '/image-resize', destination: '/api/image' }` in next.config: `/image`, prefix stripped. */
+function rewriteTargets(roots: readonly string[], apiPrefixes: readonly string[]): Set<string> {
+  const targets = new Set<string>();
+  for (const root of roots)
+    for (const name of ['next.config.js', 'next.config.mjs', 'next.config.ts', 'next.config.cjs']) {
+      const path = join(root, name);
+      if (!existsSync(path)) continue;
+      for (const match of readFileSync(path, 'utf8').matchAll(
+        /destination\s*:\s*['"`](\/[^'"`?#]*)['"`]/g,
+      )) {
+        const url = match[1]!.replace(/\/$/, '') || '/';
+        const prefix = apiPrefixes.find((each) => url === each || url.startsWith(`${each}/`));
+        targets.add(prefix ? url.slice(prefix.length) || '/' : url);
+      }
+    }
+  return targets;
 }
 
 /**
@@ -198,15 +221,16 @@ function methodsOf(file: SourceFile, rel: string): HttpMethod[] {
 
   if (found.size > 0) return [...found];
 
-  // Pages Router: read `req.method === 'POST'` style branches.
+  // Pages Router: read `req.method === 'POST'` style branches, and the
+  // `req.method !== 'GET'` guard that turns every other method away.
+  const COMPARES = [
+    SyntaxKind.EqualsEqualsEqualsToken,
+    SyntaxKind.EqualsEqualsToken,
+    SyntaxKind.ExclamationEqualsEqualsToken,
+    SyntaxKind.ExclamationEqualsToken,
+  ];
   for (const comparison of file.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
-    const operator = comparison.getOperatorToken().getKind();
-    if (
-      operator !== SyntaxKind.EqualsEqualsEqualsToken &&
-      operator !== SyntaxKind.EqualsEqualsToken
-    ) {
-      continue;
-    }
+    if (!COMPARES.includes(comparison.getOperatorToken().getKind())) continue;
     const left = comparison.getLeft().getText();
     const right = comparison.getRight();
     if (!/\.method$/.test(left)) continue;

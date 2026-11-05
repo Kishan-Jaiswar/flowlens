@@ -90,17 +90,64 @@ export function collectConstants(loaded: LoadedProject): ConstantTable {
     return undefined;
   };
 
-  return {
+  /** Locals being read, so `const a = b; const b = a` ends. */
+  const reading = new Set<Node>();
+  const table: ConstantTable = {
     values,
     ambiguous,
     clients,
     resolve(name: string, at?: Node) {
       if (name.startsWith(BASE_KEY)) return bases.get(name.slice(BASE_KEY.length));
+      // A local or a parameter of that name hides every module's constant of the same name.
+      const local = at && !ENV_READ.test(name) ? localBinding(name, at) : undefined;
+      if (local) {
+        if (!local.init || reading.has(local.init)) return undefined;
+        reading.add(local.init);
+        try {
+          return readPathLike(local.init, table.resolve);
+        } finally {
+          reading.delete(local.init);
+        }
+      }
       return (
         (at && !ENV_READ.test(name) ? scoped(name, at.getSourceFile()) : undefined) ?? read(name)
       );
     },
   };
+  return table;
+}
+
+/**
+ * `name` as declared inside a function around `at`: a parameter (no value to
+ * read) or a local `const` (its initializer). Undefined when only the module or
+ * the project declares it.
+ */
+function localBinding(name: string, at: Node): { init?: Node } | undefined {
+  for (let node = at.getParent(); node && !Node.isSourceFile(node); node = node.getParent()) {
+    if (Node.isFunctionLikeDeclaration(node) || Node.isArrowFunction(node)) {
+      const parameters = node.getParameters();
+      if (
+        parameters.some((parameter) =>
+          Node.isIdentifier(parameter.getNameNode())
+            ? parameter.getName() === name
+            : parameter
+                .getNameNode()
+                .getDescendantsOfKind(SyntaxKind.BindingElement)
+                .some((element) => element.getName() === name),
+        )
+      )
+        return {};
+    }
+    if (!Node.isBlock(node)) continue;
+    for (const statement of node.getStatements()) {
+      if (!Node.isVariableStatement(statement)) continue;
+      const found = statement.getDeclarations().find((each) => each.getName() === name);
+      // Its own initializer cannot see itself: `const url = url + '/x'` is not this.
+      if (found && !found.containsRange(at.getPos(), at.getEnd()))
+        return { init: found.getInitializer() };
+    }
+  }
+  return undefined;
 }
 
 /** `resolve("base:getRequest")`: the base URL a client or request wrapper sends to. */
